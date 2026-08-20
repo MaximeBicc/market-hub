@@ -25,7 +25,6 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 
 /** Plateformes dont l'adaptateur n'est pas encore écrit. */
 const A_VENIR = [
-  ["eBay", "OAuth et lecture faits ; signature des notifications à finir."],
   ["Allegro", "API REST complète, application à enregistrer."],
   ["Etsy", "Adaptateur à porter. Aucun bac à sable : tests en réel obligatoires."],
   ["TikTok Shop", "Validation Partner Center nécessaire, 2 à 3 jours."],
@@ -183,6 +182,7 @@ export function Shops() {
       )}
 
       <ConnectShopify onDone={() => qc.invalidateQueries({ queryKey: ["accounts"] })} />
+      <ConnectEbay />
 
       <h2 className="sec">Pas encore disponibles</h2>
       <div className="card planned" style={{ display: "grid", gap: 12 }}>
@@ -361,6 +361,157 @@ function ConnectShopify({ onDone }: { onDone: () => void }) {
         La connexion est testée avant d'être enregistrée : des identifiants
         invalides laissent la boutique en erreur plutôt que de la faire passer
         pour reliée. Le jeton d'accès dure 24 heures et se renouvelle tout seul.
+      </p>
+    </form>
+  );
+}
+
+/**
+ * Connexion eBay.
+ *
+ * Plus long que Shopify, et ce n'est pas évitable : les API vendeur d'eBay
+ * exigent un jeton UTILISATEUR obtenu après consentement dans un navigateur.
+ * On mémorise donc les identifiants, puis on renvoie vers eBay, qui nous
+ * rappelle avec un code.
+ */
+function ConnectEbay() {
+  const [open, setOpen] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [ruName, setRuName] = useState("");
+  const [marketplaceId, setMarketplaceId] = useState("EBAY_FR");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  if (!open) {
+    return (
+      <button
+        className="btn btn--wide"
+        style={{ marginTop: 9 }}
+        onClick={() => setOpen(true)}
+      >
+        <Icon name="plug" />
+        Relier un compte eBay
+      </button>
+    );
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.post<{ url: string }>("/engine/accounts/ebay/start", {
+        clientId,
+        clientSecret,
+        ruName,
+        marketplaceId,
+      });
+      // Les secrets quittent la mémoire du navigateur avant la redirection.
+      setClientSecret("");
+      window.location.href = r.url;
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : "Connexion impossible");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="card" style={{ marginTop: 9 }} onSubmit={submit}>
+      <h2 className="sec" style={{ marginTop: 0 }}>
+        Relier eBay
+      </h2>
+
+      <div className="banner banner--info" style={{ marginTop: 0 }}>
+        <span className="banner__t">Le piège du RuName</span>
+        <span className="banner__b">
+          eBay n'attend pas une URL de retour mais un <b>RuName</b>, créé dans
+          le portail développeur. Configurez-y l'URL d'acceptation vers{" "}
+          <code>/api/engine/accounts/ebay/callback</code>, puis copiez ici la
+          valeur affichée sous « RuName ».
+        </span>
+      </div>
+
+      {err && <div className="login__err">{err}</div>}
+
+      <div className="field">
+        <label htmlFor="ec">ID client (App ID)</label>
+        <input
+          id="ec"
+          className="input"
+          value={clientId}
+          onChange={(e) => setClientId(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          required
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="es">Secret client (Cert ID)</label>
+        <input
+          id="es"
+          className="input"
+          type="password"
+          value={clientSecret}
+          onChange={(e) => setClientSecret(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          required
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="er">RuName</label>
+        <input
+          id="er"
+          className="input"
+          placeholder="Prenom-Nom-appnam-abcdef"
+          value={ruName}
+          onChange={(e) => setRuName(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          required
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="em">Place de marché</label>
+        <select
+          id="em"
+          className="input"
+          value={marketplaceId}
+          onChange={(e) => setMarketplaceId(e.target.value)}
+        >
+          <option value="EBAY_FR">France</option>
+          <option value="EBAY_DE">Allemagne</option>
+          <option value="EBAY_GB">Royaume-Uni</option>
+          <option value="EBAY_US">États-Unis</option>
+          <option value="EBAY_IT">Italie</option>
+          <option value="EBAY_ES">Espagne</option>
+        </select>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        <button className="btn btn--primary" type="submit" disabled={busy}>
+          {busy ? "Redirection…" : "Autoriser sur eBay"}
+        </button>
+        <button
+          className="btn btn--ghost"
+          type="button"
+          onClick={() => {
+            setClientSecret("");
+            setOpen(false);
+          }}
+        >
+          Annuler
+        </button>
+      </div>
+
+      <p className="muted" style={{ margin: "12px 0 0", lineHeight: 1.55 }}>
+        Vous serez renvoyé vers eBay pour autoriser l'accès, puis ramené ici.
+        Le jeton dure deux heures et se renouvelle tout seul pendant dix-huit
+        mois.
       </p>
     </form>
   );

@@ -1,6 +1,7 @@
 import {
   createMarketplaceModule,
   MockAdapter,
+  EbayAdapter,
   ShopifyAdapter,
   VintedSafeAdapter,
   type MarketplaceAdapter,
@@ -30,8 +31,12 @@ import type { RateLimiter } from "../do/rate-limiter.js";
  *                  relevé des ventes et webhooks signés. Validé par 14 tests
  *                  sur un fetch simulé ; reste à éprouver en direct.
  *
+ *   ebay         — Sell APIs. Lecture, prix, stock, expédition avec suivi,
+ *                  relevé des ventes. Les notifications ECDSA ne sont pas
+ *                  vérifiées : le relevé prend le relais.
+ *
  * À VENIR, un par un, chacun validé en interne puis en direct :
- *   ebay, allegro, etsy, tiktok_shop
+ *   allegro, etsy, tiktok_shop
  *
  * Ajouter une plateforme se fait ici et dans son fichier d'adaptateur.
  * Aucun autre fichier n'a besoin de changer — c'est tout l'intérêt du contrat.
@@ -94,6 +99,7 @@ export function buildEngine(
       new MockAdapter(),
       new VintedSafeAdapter(),
       new ShopifyAdapter(),
+      new EbayAdapter(),
       ...extraAdapters,
     ],
 

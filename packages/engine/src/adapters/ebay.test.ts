@@ -1,0 +1,388 @@
+import { describe, expect, it } from "vitest";
+import { EbayAdapter, ebayConsentUrl } from "./ebay.js";
+import type { MarketplaceContext } from "../ports/marketplace.js";
+import type { Listing } from "../domain/types.js";
+
+/**
+ * Tests de l'adaptateur eBay, sur un `fetch` simulé.
+ *
+ * Ils valident la forme des requêtes, la gestion du jeton de 2 heures, la
+ * lecture en deux temps du catalogue et l'extraction des erreurs — sans
+ * toucher à un compte réel, donc sans créer d'annonce fantôme ni consommer
+ * de quota.
+ */
+
+function fakeHttp(responses: Array<{ status?: number; body: unknown }>) {
+  const sent: Array<{ url: string; method: string; body: any; headers: any }> = [];
+  let i = 0;
+  const http = async (url: string, init?: RequestInit) => {
+    sent.push({
+      url,
+      method: init?.method ?? "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+      headers: init?.headers,
+    });
+    const r = responses[i++] ?? { body: {} };
+    const status = r.status ?? 200;
+    // Une reponse 204 ne peut pas porter de corps : le constructeur leve.
+    // eBay repond justement 204 sur ses ecritures d'inventaire.
+    return new Response(status === 204 ? null : JSON.stringify(r.body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  return { http, sent };
+}
+
+const FUTUR = String(Math.floor(Date.now() / 1000) + 3600);
+
+function ctxWith(
+  http: MarketplaceContext["http"],
+  creds: Record<string, string> = {},
+  saved: Record<string, string>[] = [],
+): MarketplaceContext {
+  return {
+    account: {
+      id: "acc-ebay",
+      marketplace: "ebay",
+      slug: "ebay_test",
+      displayName: "eBay test",
+      enabled: true,
+    },
+    credentials: {
+      clientId: "cid",
+      clientSecret: "csec",
+      refreshToken: "rtok",
+      accessToken: "atok",
+      accessTokenExpiresAt: FUTUR,
+      marketplaceId: "EBAY_FR",
+      ...creds,
+    },
+    http,
+    saveCredentials: async (patch) => {
+      saved.push(patch);
+    },
+  };
+}
+
+const PUBLIABLE = {
+  merchantLocationKey: "entrepot-1",
+  fulfillmentPolicyId: "fp1",
+  paymentPolicyId: "pp1",
+  returnPolicyId: "rp1",
+};
+
+const adapter = new EbayAdapter();
+
+describe("consentement", () => {
+  it("envoie le RuName comme redirect_uri, pas une URL", () => {
+    const url = ebayConsentUrl({
+      clientId: "cid",
+      ruName: "Mon-App-RuName-xyz",
+      state: "s1",
+    });
+    const p = new URL(url).searchParams;
+    // C'est le piège eBay : y mettre l'URL de rappel produit une erreur
+    // incompréhensible côté plateforme.
+    expect(p.get("redirect_uri")).toBe("Mon-App-RuName-xyz");
+    expect(p.get("response_type")).toBe("code");
+    expect(p.get("scope")).toContain("sell.inventory");
+  });
+});
+
+describe("capacités", () => {
+  it("refuse la création tant que les politiques manquent", () => {
+    const c = adapter.capabilities(ctxWith(undefined));
+    expect(c.listingCreate).toBe(false);
+    // Le reste fonctionne : on peut lire, ajuster prix et stock, expédier.
+    expect(c.stockWrite).toBe(true);
+    expect(c.ordersFulfill).toBe(true);
+  });
+
+  it("autorise la création une fois le compte configuré", () => {
+    const c = adapter.capabilities(ctxWith(undefined, PUBLIABLE));
+    expect(c.listingCreate).toBe(true);
+    expect(c.listingActivate).toBe(true);
+  });
+
+  it("annonce le relevé, pas les webhooks", () => {
+    // Les notifications eBay sont signées en ECDSA et non vérifiées ici :
+    // prétendre les gérer ferait manquer des ventes en silence.
+    expect(adapter.capabilities(ctxWith(undefined)).inboundSales).toBe("poll");
+  });
+});
+
+describe("jeton d'accès", () => {
+  it("réutilise un jeton encore valide", async () => {
+    const { http, sent } = fakeHttp([{ body: { inventoryItems: [] } }]);
+    await adapter.testConnection(ctxWith(http));
+    expect(sent).toHaveLength(1);
+    expect((sent[0]?.headers as any)["Authorization"]).toBe("Bearer atok");
+  });
+
+  it("renouvelle un jeton expiré sans écraser le jeton de rafraîchissement", async () => {
+    const saved: Record<string, string>[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ access_token: "neuf", expires_in: 7200 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as typeof fetch;
+
+    try {
+      const { http, sent } = fakeHttp([{ body: { inventoryItems: [] } }]);
+      await adapter.testConnection(
+        ctxWith(http, { accessToken: "vieux", accessTokenExpiresAt: "1" }, saved),
+      );
+
+      expect((sent[0]?.headers as any)["Authorization"]).toBe("Bearer neuf");
+      expect(saved[0]?.accessToken).toBe("neuf");
+      // eBay ne renvoie pas de nouveau refresh_token : l'écraser
+      // déconnecterait le compte au premier renouvellement.
+      expect(saved[0]).not.toHaveProperty("refreshToken");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("dit qu'il faut relier à nouveau quand le rafraîchissement est refusé", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("{}", { status: 400 })) as typeof fetch;
+    try {
+      const { http } = fakeHttp([{ body: {} }]);
+      await expect(
+        adapter.testConnection(
+          ctxWith(http, { accessToken: "vieux", accessTokenExpiresAt: "1" }),
+        ),
+      ).rejects.toThrow(/relié à nouveau/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+describe("lecture du catalogue", () => {
+  it("croise l'inventaire et l'offre pour obtenir stock ET prix", async () => {
+    const { http, sent } = fakeHttp([
+      {
+        body: {
+          total: 1,
+          inventoryItems: [
+            {
+              sku: "AvionBBR",
+              product: { title: "Porte-clés avion", imageUrls: ["u1"] },
+              availability: { shipToLocationAvailability: { quantity: 29 } },
+            },
+          ],
+        },
+      },
+      {
+        body: {
+          offers: [
+            {
+              offerId: "off-1",
+              status: "PUBLISHED",
+              listing: { listingId: "1234" },
+              pricingSummary: { price: { value: "4.50", currency: "EUR" } },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const r = await adapter.fetchListings(ctxWith(http));
+
+    expect(r.items).toHaveLength(1);
+    const item = r.items[0]!;
+    // Le stock vient de l'inventaire, le prix de l'offre : eBay ne rend
+    // jamais les deux d'un seul appel.
+    expect(item.stock).toBe(29);
+    expect(item.price.amount).toBe(450);
+    expect(item.status).toBe("active");
+    // Le SKU sert d'identifiant stable : l'offerId change à chaque
+    // republication, le listingId n'existe qu'une fois publié.
+    expect(item.remoteId).toBe("AvionBBR");
+    expect(item.marketplaceData?.["offerId"]).toBe("off-1");
+    expect(sent[1]?.url).toContain("offer?sku=AvionBBR");
+  });
+
+  it("importe en brouillon un article sans offre", async () => {
+    const { http } = fakeHttp([
+      {
+        body: {
+          total: 1,
+          inventoryItems: [
+            {
+              sku: "SansOffre",
+              availability: { shipToLocationAvailability: { quantity: 3 } },
+            },
+          ],
+        },
+      },
+      { status: 404, body: { errors: [{ message: "not found" }] } },
+    ]);
+
+    const r = await adapter.fetchListings(ctxWith(http));
+    // Un article en stock jamais mis en vente est normal, pas une panne.
+    expect(r.items[0]?.status).toBe("draft");
+    expect(r.items[0]?.stock).toBe(3);
+  });
+});
+
+describe("écritures", () => {
+  const listing: Listing = {
+    id: "l1",
+    productId: "p1",
+    accountId: "acc-ebay",
+    remoteId: "AvionBBR",
+    status: "active",
+    price: { amount: 450, currency: "EUR" },
+    stock: 29,
+    marketplaceData: { offerId: "off-1" },
+  };
+
+  it("met à jour l'inventaire ET l'offre en un seul appel", async () => {
+    const { http, sent } = fakeHttp([{ status: 204, body: {} }]);
+    const r = await adapter.updateStock(ctxWith(http), listing, 26);
+
+    expect(r.status).toBe("success");
+    expect(sent[0]?.url).toContain("bulk_update_price_quantity");
+    const req = sent[0]?.body.requests[0];
+    expect(req.shipToLocationAvailability.quantity).toBe(26);
+    // Sans cette partie, l'offre publiée garderait l'ancienne quantité.
+    expect(req.offers[0].availableQuantity).toBe(26);
+  });
+
+  it("refuse d'écrire un prix sans offre, en expliquant pourquoi", async () => {
+    const { http } = fakeHttp([]);
+    const r = await adapter.updatePrice(
+      ctxWith(http),
+      { ...listing, marketplaceData: {} },
+      { amount: 500, currency: "EUR" },
+    );
+    expect(r.status).toBe("unsupported");
+    expect(r.message).toMatch(/prix vit sur l'offre/);
+  });
+
+  it("crée une offre en brouillon, sans la publier", async () => {
+    const { http, sent } = fakeHttp([
+      { status: 204, body: {} },
+      { body: { offerId: "off-9" } },
+    ]);
+
+    const r = await adapter.createListing(
+      ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }),
+      {
+        id: "p1",
+        sku: "NEW-1",
+        title: "Article de test",
+        price: { amount: 1990, currency: "EUR" },
+        stock: 4,
+      },
+      "k",
+    );
+
+    expect(r.status).toBe("success");
+    // Publier automatiquement engagerait un contrat de vente réel sur une
+    // annonce que personne n'a relue.
+    expect(r.message).toMatch(/brouillon/);
+    expect(sent.some((s) => s.url.includes("/publish"))).toBe(false);
+    expect(sent[1]?.body.pricingSummary.price.value).toBe("19.90");
+  });
+
+  it("demande une catégorie plutôt que d'échouer obscurément", async () => {
+    const { http } = fakeHttp([]);
+    const r = await adapter.createListing(
+      ctxWith(http, PUBLIABLE),
+      {
+        id: "p1",
+        sku: "X",
+        title: "T",
+        price: { amount: 100, currency: "EUR" },
+        stock: 1,
+      },
+      "k",
+    );
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toMatch(/catégorie/);
+  });
+
+  it("joint le transporteur dès qu'un numéro de suivi est fourni", async () => {
+    const { http, sent } = fakeHttp([{ body: { fulfillmentId: "f1" } }]);
+    await adapter.markShipped(ctxWith(http), {
+      remoteOrderId: "12-3456-7890",
+      trackingNumber: "6A123",
+      carrier: "Colissimo",
+    });
+    expect(sent[0]?.body.trackingNumber).toBe("6A123");
+    // Sans transporteur, eBay enregistre le suivi mais l'acheteur ne voit rien.
+    expect(sent[0]?.body.shippingCarrierCode).toBe("Colissimo");
+  });
+});
+
+describe("ventes et erreurs", () => {
+  it("fabrique un identifiant d'événement stable", async () => {
+    const { http } = fakeHttp([
+      {
+        body: {
+          total: 1,
+          orders: [
+            {
+              orderId: "12-3456",
+              creationDate: "2026-08-20T10:00:00Z",
+              orderPaymentStatus: "PAID",
+              lineItems: [{ lineItemId: "li1", sku: "AvionBBR", quantity: 2 }],
+            },
+          ],
+        },
+      },
+    ]);
+
+    const r = await adapter.pollOrderEvents(ctxWith(http));
+    expect(r.events[0]?.eventId).toBe("poll:12-3456:PAID");
+    expect(r.events[0]?.kind).toBe("paid");
+    expect(r.events[0]?.lines[0]?.sku).toBe("AvionBBR");
+  });
+
+  it("traduit une annulation", async () => {
+    const { http } = fakeHttp([
+      {
+        body: {
+          total: 1,
+          orders: [
+            {
+              orderId: "12-9999",
+              creationDate: "2026-08-20T10:00:00Z",
+              orderPaymentStatus: "PAID",
+              cancelStatus: { cancelState: "CANCELED" },
+              lineItems: [],
+            },
+          ],
+        },
+      },
+    ]);
+    const r = await adapter.pollOrderEvents(ctxWith(http));
+    expect(r.events[0]?.kind).toBe("cancelled");
+  });
+
+  it("remonte le message long d'eBay, pas un code nu", async () => {
+    const { http } = fakeHttp([
+      {
+        status: 400,
+        body: {
+          errors: [
+            {
+              errorId: 25709,
+              message: "Invalid value",
+              longMessage: "La quantité doit être un entier positif.",
+            },
+          ],
+        },
+      },
+    ]);
+    await expect(adapter.testConnection(ctxWith(http))).rejects.toThrow(
+      /quantité doit être un entier positif/,
+    );
+  });
+});

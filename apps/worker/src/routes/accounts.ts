@@ -6,6 +6,7 @@ import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
 import { contentHash, randomId } from "../lib/crypto.js";
 import { buildEngine } from "../engine/module.js";
+import { ebayConsentUrl, ebayExchangeCode } from "@hub/engine";
 import { d1Repositories } from "../engine/repositories.js";
 import { ensureSyncJobs } from "../engine/sync.js";
 
@@ -249,6 +250,156 @@ accounts.post("/:id/test", async (c) => {
 
   await db.update(shop).set({ status: "active" }).where(eq(shop.id, id));
   return c.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ */
+/* eBay — parcours d'autorisation                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * eBay n'a pas d'équivalent au jeton d'application de Shopify.
+ *
+ * Les API vendeur exigent un jeton UTILISATEUR, obtenu après consentement
+ * dans un navigateur. Le parcours est donc en deux temps : on mémorise les
+ * identifiants, on renvoie vers eBay, et eBay nous rappelle avec un code.
+ *
+ * Le `state` protège du CSRF : sans lui, un tiers pourrait vous faire relier
+ * SON compte eBay au vôtre, et lire ensuite tout ce qui y transite. Il est à
+ * usage unique et vit dix minutes.
+ */
+accounts.post("/ebay/start", async (c) => {
+  const body = await c.req
+    .json<{
+      clientId?: string;
+      clientSecret?: string;
+      ruName?: string;
+      marketplaceId?: string;
+      displayName?: string;
+    }>()
+    .catch(() => ({}) as Record<string, string>);
+
+  const clientId = (body.clientId ?? "").trim();
+  const clientSecret = (body.clientSecret ?? "").trim();
+  const ruName = (body.ruName ?? "").trim();
+
+  if (!clientId || !clientSecret || !ruName) {
+    return c.json(
+      {
+        error:
+          "ID client, secret et RuName sont requis. Le RuName se crée dans le portail développeur eBay ; ce n'est pas une URL.",
+      },
+      400,
+    );
+  }
+  // Un RuName ressemble à « Prenom-Nom-appnam-abcdef » : si l'on y trouve un
+  // schéma d'URL, c'est l'erreur classique, et eBay renverra un message
+  // parfaitement obscur.
+  if (/^https?:\/\//i.test(ruName)) {
+    return c.json(
+      {
+        error:
+          "Le RuName n'est pas une URL. Copiez la valeur affichée sous « RuName » dans le portail eBay.",
+      },
+      400,
+    );
+  }
+
+  const state = randomId(24);
+  await c.env.CACHE.put(
+    `ebay:${state}`,
+    JSON.stringify({
+      clientId,
+      clientSecret,
+      ruName,
+      marketplaceId: body.marketplaceId ?? "EBAY_FR",
+      displayName: body.displayName ?? "eBay",
+    }),
+    { expirationTtl: 600 },
+  );
+
+  return c.json({ url: ebayConsentUrl({ clientId, ruName, state }) });
+});
+
+/**
+ * Retour d'eBay après consentement.
+ *
+ * Atteint par une navigation du navigateur, donc le cookie de session est
+ * présent (`SameSite=Lax` autorise les navigations de premier niveau en GET).
+ * La garde d'authentification du routeur s'applique normalement.
+ */
+accounts.get("/ebay/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  if (!code || !state) return c.redirect("/shops?erreur=parametres", 302);
+
+  const pending = await c.env.CACHE.get(`ebay:${state}`);
+  if (!pending) return c.redirect("/shops?erreur=expire", 302);
+  await c.env.CACHE.delete(`ebay:${state}`); // usage unique
+
+  const p = JSON.parse(pending) as {
+    clientId: string;
+    clientSecret: string;
+    ruName: string;
+    marketplaceId: string;
+    displayName: string;
+  };
+
+  const db = drizzle(c.env.DB);
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+
+  try {
+    const tokens = await ebayExchangeCode({
+      clientId: p.clientId,
+      clientSecret: p.clientSecret,
+      ruName: p.ruName,
+      // eBay renvoie le code déjà encodé dans l'URL : Hono le décode, on le
+      // transmet tel quel. Le ré-encoder produirait un code invalide.
+      code,
+    });
+
+    const existing = await db
+      .select({ id: shop.id })
+      .from(shop)
+      .where(and(eq(shop.platform, "ebay"), eq(shop.externalId, p.marketplaceId)))
+      .limit(1);
+    const accountId = existing[0]?.id ?? randomId();
+
+    await db
+      .insert(shop)
+      .values({
+        id: accountId,
+        platform: "ebay",
+        externalId: p.marketplaceId,
+        displayName: p.displayName,
+        slug: `ebay_${p.marketplaceId.toLowerCase()}`,
+        status: "active",
+        config: "{}",
+        connectedAt: Math.floor(Date.now() / 1000),
+      })
+      .onConflictDoUpdate({
+        target: shop.id,
+        set: { displayName: p.displayName, status: "active" },
+      });
+
+    await repos.credentials.put(accountId, {
+      clientId: p.clientId,
+      clientSecret: p.clientSecret,
+      ruName: p.ruName,
+      marketplaceId: p.marketplaceId,
+      refreshToken: tokens.refreshToken,
+      accessToken: tokens.accessToken,
+      accessTokenExpiresAt: String(tokens.accessExpiresAt),
+      refreshTokenExpiresAt: String(tokens.refreshExpiresAt),
+    });
+
+    await ensureSyncJobs(c.env, accountId);
+    return c.redirect("/shops?relie=ebay", 302);
+  } catch (err) {
+    // Le message d'eBay est conservé dans le journal : l'utilisateur, lui,
+    // est renvoyé vers l'interface plutôt que sur une page blanche.
+    console.error("eBay callback", err);
+    return c.redirect("/shops?erreur=ebay", 302);
+  }
 });
 
 /**
