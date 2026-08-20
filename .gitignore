@@ -1,0 +1,23 @@
+# Dépendances et artefacts de construction
+node_modules/
+dist/
+.wrangler/
+
+# --- SECRETS — ne doivent JAMAIS être versionnés ---
+# .dev.vars contient la clé maître de chiffrement des jetons OAuth et la clé
+# VAPID privée. .secrets.generated.json contient les mêmes valeurs.
+# Leur fuite compromettrait toutes les boutiques connectées.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.secrets.generated.json
+.secrets.bulk.json
+.env
+.env.*
+!.env.example
+
+# Divers
+*.local
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,92 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "market-hub",
+  "main": "apps/worker/src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // --- PWA servie depuis la MEME origine que l'API (zéro CORS, cookies same-site) ---
+  // Plan gratuit : 20 000 fichiers max, 25 MiB par fichier. Bande passante illimitée.
+  "assets": {
+    "directory": "./apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // Le worker est consulté AVANT les assets : indispensable pour /api/*.
+    //
+    // /__scheduled sert à déclencher le cron à la main en développement
+    // (`wrangler dev --test-scheduled`). Sans cette entrée, la couche assets
+    // intercepte le chemin et renvoie index.html : on croit tester
+    // l'ordonnanceur alors qu'on ne teste rien. En production le chemin n'a
+    // aucun sens particulier — Cloudflare invoque scheduled() directement,
+    // sans passer par HTTP — et retombe simplement sur la PWA.
+    "run_worker_first": ["/api/*", "/__scheduled"]
+  },
+
+  // --- Base de données : D1 (SQLite). Gratuit : 5 Go, 5 M lignes lues/j, 100 k écrites/j ---
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "market-hub-db",
+      "database_id": "2a6b99cd-0bea-4ce0-9369-e4dbf69c8b02",
+      "migrations_dir": "apps/worker/migrations"
+    }
+  ],
+
+  // --- File d'attente : gratuit depuis le 04/02/2026. 10 000 opérations/jour, rétention 24 h ---
+  // C'est LA pièce qui contourne la limite de 50 sous-requêtes par invocation :
+  // le cron n'empile que des messages, chaque message est traité dans sa propre
+  // invocation qui dispose de son propre budget de 50 sous-requêtes.
+  "queues": {
+    "producers": [{ "binding": "SYNC_QUEUE", "queue": "market-hub-sync" }],
+    "consumers": [
+      {
+        "queue": "market-hub-sync",
+        // 5 messages max par lot => on reste largement sous les 50 sous-requêtes.
+        "max_batch_size": 5,
+        "max_batch_timeout": 10,
+        "max_retries": 3,
+        "max_concurrency": 2,
+        "dead_letter_queue": "market-hub-dlq"
+      }
+    ]
+  },
+
+  // --- Durable Objects (backend SQLite = disponible en gratuit) ---
+  // Un objet par (plateforme, boutique) : token bucket + verrou de refresh OAuth.
+  "durable_objects": {
+    "bindings": [{ "name": "RATE_LIMITER", "class_name": "RateLimiter" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }
+  ],
+
+  // --- Stockage objets (R2) : pas encore nécessaire, aucun code ne l'utilise.
+  // Volontairement absent du premier déploiement — activer R2 peut demander
+  // un moyen de paiement, et on ne provisionne rien dont on n'a pas besoin.
+  // Pour l'ajouter plus tard :
+  //   wrangler r2 bucket create market-hub-media
+  //   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "market-hub-media" }]
+
+  // --- Cache court / verrous idempotents. Gratuit : 100 k lectures/j, 1 000 écritures/j ---
+  "kv_namespaces": [
+    { "binding": "CACHE", "id": "b6eca16314f24aeba6db0cc929e658dd" }
+  ],
+
+  // --- Cron. Gratuit : 5 déclencheurs/compte, 10 ms CPU, 15 min d'horloge murale ---
+  // Le cron n'exécute JAMAIS le travail lui-même : il ne fait qu'empiler dans la Queue.
+  "triggers": {
+    "crons": [
+      "*/5 * * * *",   // tick : commandes + stock des boutiques dues
+      "17 * * * *",    // horaire : rafraîchissement des tokens OAuth proches d'expirer
+      "40 3 * * *"     // quotidien 03:40 UTC : catalogue complet, purge, réconciliation
+    ]
+  },
+
+  "observability": { "enabled": true },
+
+  "vars": {
+    "APP_NAME": "MarketHub",
+    "APP_URL": "https://market-hub.variety-tools.workers.dev",
+    "LOG_LEVEL": "info"
+  }
+}

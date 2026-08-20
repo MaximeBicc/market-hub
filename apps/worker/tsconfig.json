@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Runtime Workers : pas de DOM, pas de Node — les types Cloudflare
+    // (D1Database, Queue, DurableObjectStub...) viennent de @cloudflare/workers-types.
+    "types": ["@cloudflare/workers-types"],
+    "lib": ["ES2022", "WebWorker"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.ts"]
+}

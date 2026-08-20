@@ -1,0 +1,96 @@
+name: Déploiement
+
+# Déploiement automatique à chaque poussée sur `main`.
+#
+# GitHub Actions est gratuit sans limite sur un dépôt public, et offre
+# 2 000 minutes par mois sur un dépôt privé. Ce workflow tourne en 2 à 3
+# minutes : de l'ordre de 600 déploiements mensuels possibles.
+#
+# Deux secrets sont à renseigner dans
+#   Settings → Secrets and variables → Actions
+#     CLOUDFLARE_API_TOKEN    jeton créé dans le tableau de bord Cloudflare
+#     CLOUDFLARE_ACCOUNT_ID   identifiant de compte, visible dans l'URL du tableau de bord
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # permet aussi un déclenchement manuel depuis l'onglet Actions
+
+# Un seul déploiement à la fois. Sans ce verrou, deux poussées rapprochées
+# lancent deux déploiements concurrents : le plus lent écrase le plus récent.
+# `cancel-in-progress` abandonne le précédent — c'est le dernier commit qui doit
+# gagner, pas le premier arrivé.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # garde-fou : un job bloqué ne doit pas brûler le quota
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Aucune version indiquée : l'action lit `packageManager` dans
+      # package.json, ce qui garantit la même version de pnpm qu'en local.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Dépendances
+        run: pnpm install --frozen-lockfile
+
+      # Le typage passe avant tout : inutile de construire ou de déployer
+      # du code qui ne compile pas.
+      - name: Vérification des types
+        run: pnpm typecheck
+
+      - name: Construction de la PWA
+        run: pnpm build
+
+      # Les migrations passent AVANT le déploiement du code : le nouveau code
+      # peut dépendre de nouvelles colonnes, jamais l'inverse. Si cette étape
+      # échoue, le déploiement n'a pas lieu et la production reste cohérente.
+      - name: Migrations D1
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.124.0" # épinglé : même version qu'en local
+          command: d1 migrations apply market-hub-db --remote
+
+      - name: Déploiement
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.124.0"
+          command: deploy
+
+      # Un déploiement « réussi » qui sert une application cassée doit se voir
+      # ici, pas trois jours plus tard sur le téléphone.
+      - name: Vérification en production
+        run: |
+          URL=https://market-hub.variety-tools.workers.dev
+          echo "Attente de la propagation…"
+          sleep 5
+
+          HEALTH=$(curl -sf --retry 3 --retry-delay 5 "$URL/api/health")
+          echo "  /api/health      → $HEALTH"
+          echo "$HEALTH" | grep -q '"ok":true' || { echo "::error::Le point de santé ne répond pas correctement"; exit 1; }
+
+          # Cette route interroge réellement la base : elle échoue si D1 est
+          # inaccessible ou si le schéma n'a pas été appliqué.
+          STATE=$(curl -sf --retry 3 --retry-delay 5 "$URL/api/auth/state")
+          echo "  /api/auth/state  → $STATE"
+          echo "$STATE" | grep -q 'initialized' || { echo "::error::La base ne répond pas"; exit 1; }
+
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL/")
+          echo "  /                → HTTP $CODE"
+          [ "$CODE" = "200" ] || { echo "::error::La PWA ne se charge pas"; exit 1; }
+
+          echo "Production vérifiée."

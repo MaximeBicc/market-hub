@@ -1,0 +1,26 @@
+{
+  "name": "market-hub",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev": "pnpm --filter @hub/web build && wrangler dev",
+    "dev:web": "pnpm --filter @hub/web dev",
+    "build": "pnpm --filter @hub/web build",
+    "deploy": "node scripts/deploy.mjs",
+    "typecheck": "tsc -b",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply market-hub-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply market-hub-db --remote",
+    "cf-typegen": "wrangler types",
+    "setup": "node scripts/deploy.mjs",
+    "login": "wrangler login"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260819.1",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.124.0"
+  }
+}

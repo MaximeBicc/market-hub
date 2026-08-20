@@ -1,0 +1,12 @@
+# Normalisation des fins de ligne.
+#
+# Sans cette règle, les fichiers écrits sous Windows arrivent en CRLF sur les
+# runners Linux de GitHub Actions. Le bloc `run:` du workflow est un script
+# bash : un `\r` en fin de ligne le fait échouer avec des erreurs
+# incompréhensibles du type « $'\r': command not found ».
+* text=auto eol=lf
+
+# Fichiers binaires : jamais de conversion.
+*.png binary
+*.jpg binary
+*.woff2 binary

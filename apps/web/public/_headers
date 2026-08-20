@@ -1,0 +1,32 @@
+# En-têtes appliqués par la couche « static assets » de Cloudflare.
+#
+# Pourquoi ce fichier existe : les fichiers statiques sont servis AVANT que le
+# Worker ne s'exécute (seuls /api/* et /__scheduled passent par lui, cf.
+# `run_worker_first` dans wrangler.jsonc). Le middleware `secureHeaders()` de
+# Hono ne voit donc jamais le HTML de la PWA. Sans ce fichier, l'application
+# elle-même est servie sans aucune protection, alors que son API en a.
+
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
+
+# `img-src` autorise https: — les vignettes produits viennent des places de
+# marché. `connect-src 'self'` reste fermé : aucune API externe n'est appelée
+# depuis le navigateur, tout passe par le Worker.
+
+# Le service worker ne doit JAMAIS être mis en cache longtemps : c'est lui qui
+# porte la logique de mise à jour. Un sw.js figé dans le cache du navigateur
+# bloque toutes les futures versions de l'application.
+/sw.js
+  Cache-Control: no-cache
+
+/manifest.webmanifest
+  Cache-Control: no-cache
+
+# Les fichiers d'assets portent une empreinte dans leur nom : leur contenu ne
+# change jamais, on peut les garder indéfiniment.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

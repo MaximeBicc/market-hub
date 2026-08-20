@@ -1,0 +1,16 @@
+{
+  "name": "@hub/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
+    "@block65/webcrypto-web-push": "^1.0.2",
+    "@hub/connectors": "workspace:*",
+    "@hub/core": "workspace:*",
+    "@simplewebauthn/server": "^13.3.2",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.13.3",
+    "zod": "^4.4.3"
+  }
+}
