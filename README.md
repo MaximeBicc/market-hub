@@ -17,9 +17,11 @@ Conception détaillée et justification de chaque choix : [ARCHITECTURE.md](ARCH
 | Notifications push | Web Push (VAPID) | 0 € |
 | CI/CD | GitHub Actions | 0 € |
 | Nom de domaine | `*.workers.dev` | 0 € |
-| Assistant IA (optionnel) | Claude API | à l'usage, plafonné dans le code |
+| Panel d'IA | Workers AI, Gemini, Groq, OpenRouter | 0 € |
 
-Aucune carte bancaire n'est requise pour le plan gratuit Cloudflare.
+Aucune carte bancaire n'est requise, nulle part. Le panel d'IA n'a **aucun
+fournisseur payant dans le code** : quand une allocation gratuite est épuisée,
+l'analyse échoue et le dit, il n'y a rien vers quoi basculer.
 
 ---
 
@@ -42,8 +44,14 @@ Une page s'ouvre dans le navigateur : autorisez l'accès.
 ### 2. Provisionner et déployer
 
 ```bash
-pnpm setup
+pnpm run mise-en-ligne
 ```
+
+> Le `run` n'est pas décoratif, et le nom du script non plus. `deploy` et
+> `setup` sont des **commandes intégrées à pnpm** : un script portant l'un de
+> ces noms est silencieusement ignoré au profit de la commande interne, qui
+> échoue sur un message sans rapport (« No project was selected for
+> deployment »). D'où un nom qu'aucune commande pnpm ne peut masquer.
 
 Ce script fait tout, et il est rejouable sans risque :
 
@@ -81,7 +89,7 @@ Ouvrez ensuite l'URL dans un navigateur et créez votre accès par clé d'accès
 ## Développement local
 
 ```bash
-pnpm exec wrangler d1 migrations apply market-hub-db --local
+pnpm run db:migrate:local
 ```
 
 Puis, dans deux terminaux :
@@ -131,6 +139,41 @@ Webhooks (Shopify et eBay uniquement) : `{APP_URL}/api/webhooks/{plateforme}`.
 
 ---
 
+## Le panel d'IA
+
+Rien à configurer pour démarrer : Cloudflare Workers AI est une liaison du
+Worker, sans clé ni compte tiers, avec **10 000 neurones offerts par jour** —
+de l'ordre de 300 analyses de produit. C'est aussi le seul fournisseur autorisé
+à voir du texte écrit par un acheteur, puisque l'inférence tourne sur votre
+propre compte.
+
+Trois fournisseurs facultatifs s'ajoutent en inscrivant un secret, sans toucher
+au code :
+
+| Fournisseur | Où obtenir la clé | Ce qu'il apporte |
+|---|---|---|
+| Gemini | [aistudio.google.com](https://aistudio.google.com/apikey) | **la recherche web** — aucun autre ne sait le faire gratuitement |
+| Groq | [console.groq.com](https://console.groq.com/keys) | repli texte très rapide, 1 000 appels/jour |
+| OpenRouter | [openrouter.ai](https://openrouter.ai/keys) | dernier recours, 50 appels/jour seulement |
+
+Sans clé Gemini, « Comparer au marché » et « Trouver des fournisseurs »
+fonctionnent quand même — mais ne voient que vos propres annonces, et le
+disent. C'est la seule fonction du panel qui reste diminuée sans clé.
+
+```bash
+pnpm exec wrangler secret put GEMINI_API_KEY
+```
+
+Réserve sur Gemini : le palier gratuit autorise Google à utiliser le contenu
+envoyé pour améliorer ses produits. Le panel ne lui transmet donc jamais de
+texte écrit par un acheteur — cette règle est appliquée par le routeur, pas par
+convention.
+
+L'écran **Réglages → Panel d'IA** affiche ce qu'il reste d'allocation du jour,
+fournisseur par fournisseur. Aucune clé n'y apparaît, même tronquée.
+
+---
+
 ## Structure
 
 ```
@@ -139,6 +182,7 @@ apps/
   worker/       Cloudflare Worker — API, cron, consommateur de queue
     src/
       routes/   HTTP : auth, oauth, webhooks, api, ai
+      ai/       câblage D1 du panel : consommation, cache, journal, faits métier
       lib/      chiffrement, sessions, jetons, push, alertes, http instrumenté
       do/       Durable Object : limiteur de débit et verrou de rafraîchissement
       db/       schéma Drizzle
@@ -146,6 +190,9 @@ apps/
 packages/
   core/         modèle de domaine unifié — ne connaît aucune plateforme
   connectors/   un fichier par place de marché, derrière une interface unique
+  engine/       moteur multi-marketplace — ports, adaptateurs, orchestrateur
+  ai/           panel d'IA — routeur, budgets, skills. Aucune dépendance
+                à Cloudflare : testable en mémoire, sans clé et sans réseau
 ```
 
 ---
@@ -163,3 +210,9 @@ packages/
 | Connecteur eBay | OAuth et lecture ; signature des notifications à finir |
 | Connecteur Alibaba | OAuth et signature ; cartographie des données à faire |
 | Icônes PWA | générées (remplaçables) |
+| Panel d'IA — socle | complet : routeur, budgets, cache, journal, travaux différés |
+| Panel d'IA — analyses internes | complet : analyse produit, prix, réappro, anomalies |
+| Panel d'IA — recherche marché | complet : prix du marché, fournisseurs, preuves sourcées |
+| Panel d'IA — vision | non branché (lot suivant) |
+| Panel d'IA — autonomie nocturne | non branchée (lot suivant) |
+| Panel d'IA — messages et avis | impossible : aucune table ne les collecte |

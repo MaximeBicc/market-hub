@@ -893,3 +893,37 @@ h2.sec:first-child {
     transition: none !important;
   }
 }
+
+/* ================================================================
+   PASTILLE DE TRAVAIL EN COURS
+
+   Une analyse tourne sur Cloudflare, pas dans la page : sans repère
+   visible depuis les autres écrans, on l'oublie et on ne revient
+   jamais chercher le résultat.
+   ================================================================ */
+.tab__icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.pastille {
+  position: absolute;
+  top: -5px;
+  right: -9px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-on);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+  font-weight: 500;
+}
+/* Dans la barre latérale, la pastille suit le texte au lieu de le survoler. */
+.side-link .pastille {
+  position: static;
+  margin-left: auto;
+}

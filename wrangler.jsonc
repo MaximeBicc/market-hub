@@ -43,13 +43,47 @@
         "queue": "market-hub-sync",
         // 5 messages max par lot => on reste largement sous les 50 sous-requêtes.
         "max_batch_size": 5,
-        "max_batch_timeout": 10,
+        // 2 secondes d'attente avant de traiter un lot incomplet, et non 10.
+        //
+        // Le regroupement ne sert à rien pour les tâches de synchronisation :
+        // le cron en empile vingt d'un coup, le lot est plein instantanément.
+        // Il ne se déclenche donc qu'au cas où les messages arrivent au
+        // compte-gouttes — précisément celui d'une analyse lancée à la main,
+        // où ces dix secondes s'ajoutaient telles quelles au temps d'attente
+        // affiché à l'écran. Mesuré : 18 s d'attente perçue dont 9 de pure
+        // temporisation.
+        //
+        // Le coût du changement est nul : le quota gratuit des files se compte
+        // en messages, pas en invocations.
+        "max_batch_timeout": 2,
         "max_retries": 3,
         "max_concurrency": 2,
         "dead_letter_queue": "market-hub-dlq"
       }
     ]
   },
+
+  // --- Workers AI : le panel d'IA. Gratuit : 10 000 neurones/jour ---
+  //
+  // Aucune clé, aucun compte tiers : l'inférence tourne sur notre propre
+  // compte. C'est le seul fournisseur autorisé à voir du texte écrit par un
+  // client, et le seul qui fonctionne sans rien configurer.
+  //
+  // À SAVOIR SUR LA GRATUITÉ : sur le plan Workers *Free*, dépasser les 10 000
+  // neurones renvoie une erreur 3036 — rien n'est facturé. Sur Workers *Paid*
+  // (5 $/mois), l'excédent est facturé 0,011 $ les 1 000 neurones SANS
+  // avertissement. C'est pour ce cas que le panel tient son propre compteur en
+  // base et s'arrête avant la limite : le garde-fou ne dépend pas du plan.
+  //
+  // Ordre de grandeur : 10 000 neurones ≈ 0,11 $ d'inférence par jour, soit
+  // environ 300 analyses de produit, ou 40 comparaisons d'images.
+  //
+  // `remote: true` ne concerne QUE `wrangler dev`. Il n'existe pas d'inférence
+  // locale : sans ce drapeau, tout appel en développement échoue sur
+  // « Binding AI needs to be run remotely », ce qui rend le panel intestable
+  // hors production. En déploiement, le drapeau n'a aucun effet — la liaison
+  // pointe de toute façon sur le service réel.
+  "ai": { "binding": "AI", "remote": true },
 
   // --- Durable Objects (backend SQLite = disponible en gratuit) ---
   // Un objet par (plateforme, boutique) : token bucket + verrou de refresh OAuth.

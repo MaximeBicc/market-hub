@@ -1,33 +1,41 @@
 import { Hono } from "hono";
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
+import { drizzle } from "drizzle-orm/d1";
+import { desc, eq, inArray, sql } from "drizzle-orm";
+import { NoFreeModelError, UnknownSkillError } from "@hub/ai";
 import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
+import { buildAi } from "../ai/module.js";
+import {
+  aiFeedback,
+  aiJob,
+  aiRun,
+  inventory,
+  listing,
+  product,
+} from "../db/schema.js";
+import { randomId } from "../lib/crypto.js";
 
 /**
- * Proxy Claude.
+ * Panel d'IA — surface HTTP.
  *
- * DEUX RAISONS D'ÊTRE, et la première n'est pas négociable :
+ * TROIS PRINCIPES, dont aucun n'est négociable :
  *
- * 1. La clé API ne doit JAMAIS atteindre le navigateur. Une clé dans un bundle
- *    JavaScript est publique, point final — même derrière une authentification,
- *    même « juste pour tester ». Elle vit dans les secrets du Worker et n'en sort pas.
+ * 1. AUCUNE CLÉ NE SORT D'ICI. Ni entière, ni tronquée, ni « juste pour
+ *    vérifier ». L'écran de réglages apprend qu'un fournisseur est configuré,
+ *    jamais avec quoi.
  *
- * 2. C'est le SEUL poste payant de l'architecture. Tout le reste tient dans les
- *    offres gratuites ; les appels LLM sont facturés au jeton. Le garde-fou
- *    ci-dessous plafonne la dépense mensuelle : sans lui, une boucle mal écrite
- *    peut coûter cher pendant la nuit.
+ * 2. LE NAVIGATEUR ENVOIE DES IDENTIFIANTS, PAS DES CHIFFRES. Prix d'achat,
+ *    stock, ventes : tout est relu côté serveur depuis la base. Sans cette
+ *    règle, il suffirait de poster un prix d'achat de un centime pour obtenir
+ *    une recommandation de prix absurde et parfaitement argumentée.
  *
- * Modèle : claude-opus-5, avec réflexion adaptative. Le prompt système est
- * stable et mis en cache — sur des appels répétés, les jetons d'entrée
- * rejoués coûtent environ un dixième du prix normal.
+ * 3. QUOTA ÉPUISÉ N'EST PAS UNE PANNE. Le panel n'a aucun fournisseur payant
+ *    et donc aucun repli à déclencher : on répond 429 avec un message clair,
+ *    l'interface l'affiche, la journée reprend demain.
  */
 
 export const ai = new Hono<{ Bindings: Env }>();
-
-/** Plafond mensuel de jetons de sortie. À ~25 $/M, 200 000 jetons ≈ 5 $/mois. */
-const MONTHLY_OUTPUT_TOKEN_BUDGET = 200_000;
 
 ai.use("*", async (c, next) => {
   const me = await authenticate(c.env, c.req.raw);
@@ -35,130 +43,261 @@ ai.use("*", async (c, next) => {
   await next();
 });
 
-/** Compteur mensuel dans KV. Approximatif mais suffisant pour éviter la surprise. */
-async function checkBudget(env: Env): Promise<{ ok: boolean; used: number }> {
-  const slot = new Date().toISOString().slice(0, 7); // "2026-08"
-  const used = Number((await env.CACHE.get(`ai:tokens:${slot}`)) ?? "0");
-  return { ok: used < MONTHLY_OUTPUT_TOKEN_BUDGET, used };
-}
-
-async function recordUsage(env: Env, outputTokens: number): Promise<void> {
-  const slot = new Date().toISOString().slice(0, 7);
-  const key = `ai:tokens:${slot}`;
-  const used = Number((await env.CACHE.get(key)) ?? "0");
-  await env.CACHE.put(key, String(used + outputTokens), {
-    expirationTtl: 70 * 86400,
-  });
-}
-
-function client(env: Env): Anthropic {
-  return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-}
+const seconds = () => Math.floor(Date.now() / 1000);
 
 /**
- * Prompt système figé — il ne doit contenir NI date, NI identifiant, NI rien
- * de variable, sinon le cache est invalidé à chaque appel et l'économie
- * disparaît sans qu'aucune erreur ne le signale.
+ * Enveloppe d'une demande d'analyse.
+ *
+ * `input` reste libre : chaque skill valide ce qui la concerne, et un schéma
+ * central devrait être modifié à chaque skill ajoutée — exactement le couplage
+ * que le registre existe pour éviter.
  */
-const SYSTEM = `Tu assistes un vendeur qui gère plusieurs boutiques en ligne (Shopify, Etsy, eBay).
-Tu rédiges en français, dans un registre commercial sobre : pas de superlatifs creux,
-pas d'emphase artificielle. Tu respectes les contraintes de longueur données.
-Tu n'inventes jamais de caractéristique produit qui ne figure pas dans les données fournies.`;
-
-const ListingCopy = z.object({
-  title: z.string().describe("Titre optimisé, 60 caractères maximum"),
-  description: z.string().describe("Description en 3 à 5 phrases"),
-  bullets: z.array(z.string()).describe("3 à 5 arguments courts"),
-  tags: z.array(z.string()).describe("Jusqu'à 13 mots-clés, style Etsy"),
+const RunRequest = z.object({
+  skill: z.string().min(1).max(80),
+  input: z.record(z.string(), z.unknown()).default({}),
+  bypassCache: z.boolean().optional(),
 });
 
-/** Génère une fiche produit à partir des données brutes d'une annonce. */
-ai.post("/listing-copy", async (c) => {
-  const budget = await checkBudget(c.env);
-  if (!budget.ok) {
-    return c.json(
-      { error: "budget_exceeded", used: budget.used, limit: MONTHLY_OUTPUT_TOKEN_BUDGET },
-      429,
-    );
+/** Traduit une erreur du panel en réponse HTTP compréhensible. */
+function explain(error: unknown): { status: 404 | 422 | 429 | 500; body: Record<string, unknown> } {
+  if (error instanceof UnknownSkillError) {
+    return { status: 404, body: { error: "skill_inconnue", message: error.message } };
+  }
+  if (error instanceof NoFreeModelError) {
+    return {
+      status: 429,
+      body: {
+        error: "quota_gratuit_epuise",
+        message:
+          "Aucun modèle gratuit n'est disponible pour le moment. Les quotas repartent à zéro à minuit UTC.",
+        // La trace dit précisément ce qui a bloqué : allocation de neurones,
+        // plafond d'un fournisseur, clé absente. Sans elle, « quota épuisé »
+        // ne se diagnostique pas.
+        trace: error.trace,
+      },
+    };
+  }
+  const message = String(error);
+  if (message.includes("PRODUIT_INTROUVABLE")) {
+    return { status: 404, body: { error: "produit_introuvable" } };
+  }
+  return { status: 500, body: { error: "echec_analyse", message: message.slice(0, 300) } };
+}
+
+/* ------------------------------------------------------------------ */
+/* État du panel                                                       */
+/* ------------------------------------------------------------------ */
+
+/** Ce qui est configuré, ce qui reste de gratuit aujourd'hui. Jamais une clé. */
+ai.get("/health", async (c) => c.json(await buildAi(c.env).health()));
+
+/** Catalogue des modèles : capacités et confidentialité, ni prix ni note interne. */
+ai.get("/models", (c) => c.json({ modeles: buildAi(c.env).catalogue() }));
+
+/** Skills disponibles, telles que l'interface doit les proposer. */
+ai.get("/skills", (c) => c.json({ skills: buildAi(c.env).registry.list() }));
+
+/**
+ * Produits analysables.
+ *
+ * Ce sont les lignes de la table `product`, pas les annonces : le panel
+ * raisonne sur l'article, pas sur ses vitrines. Une annonce synchronisée
+ * rejoint son produit par SKU lors de la synchronisation ; celles dont le SKU
+ * ne correspond à rien restent sans produit et n'apparaissent pas ici.
+ */
+ai.get("/products", async (c) => {
+  const db = drizzle(c.env.DB);
+  const rows = await db
+    .select({
+      productId: product.id,
+      sku: product.sku,
+      title: product.title,
+      costPrice: product.costPrice,
+      referencePrice: product.priceAmount,
+      onHand: inventory.onHand,
+      reserved: inventory.reserved,
+      canaux: sql<number>`(SELECT count(*) FROM ${listing} WHERE ${listing.productId} = ${product.id})`,
+    })
+    .from(product)
+    .leftJoin(inventory, eq(inventory.productId, product.id))
+    .orderBy(product.title)
+    .limit(300);
+
+  return c.json({
+    produits: rows.map((r) => ({
+      ...r,
+      onHand: r.onHand ?? 0,
+      reserved: r.reserved ?? 0,
+    })),
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Exécution                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Analyse immédiate.
+ *
+ * Convient aux skills du premier lot : elles font un seul appel de modèle et
+ * répondent en quelques secondes. Une recherche marché, qui enchaîne plusieurs
+ * appels et une recherche web, devra passer par `/jobs`.
+ */
+ai.post("/run", async (c) => {
+  const parsed = RunRequest.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "requete_invalide" }, 422);
+
+  try {
+    return c.json(await buildAi(c.env).run(parsed.data));
+  } catch (error) {
+    const { status, body } = explain(error);
+    return c.json(body, status);
+  }
+});
+
+/**
+ * Analyse différée.
+ *
+ * Passe par la file d'attente existante et non par une seconde file : le
+ * consommateur répartit déjà par type de tâche, et le quota gratuit de 10 000
+ * opérations par jour est commun à toutes les files. En ouvrir une deuxième
+ * aurait ajouté une liaison et un point de panne pour le même budget.
+ */
+ai.post("/jobs", async (c) => {
+  const parsed = RunRequest.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "requete_invalide" }, 422);
+
+  const module = buildAi(c.env);
+  if (!module.registry.get(parsed.data.skill)) {
+    return c.json({ error: "skill_inconnue" }, 404);
   }
 
-  const input = await c.req.json<{
-    title: string;
-    attributes?: Record<string, string>;
-    audience?: string;
-  }>();
-
-  const response = await client(c.env).messages.parse({
-    model: "claude-opus-5",
-    max_tokens: 4000,
-    thinking: { type: "adaptive" },
-    output_config: { effort: "medium", format: zodOutputFormat(ListingCopy) },
-    system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }],
-    messages: [
-      {
-        role: "user",
-        content: `Produit : ${input.title}
-Attributs : ${JSON.stringify(input.attributes ?? {})}
-Cible : ${input.audience ?? "grand public"}`,
-      },
-    ],
+  const id = randomId();
+  await drizzle(c.env.DB).insert(aiJob).values({
+    id,
+    skill: parsed.data.skill,
+    status: "queued",
+    automatic: 0,
+    input: JSON.stringify(parsed.data.input),
+    createdAt: seconds(),
   });
 
-  await recordUsage(c.env, response.usage.output_tokens);
-  return c.json({ copy: response.parsed_output, usage: response.usage });
+  await c.env.SYNC_QUEUE.send({ kind: "ai", jobId: id });
+  return c.json({ jobId: id, status: "queued" }, 202);
 });
 
-const PriceAdvice = z.object({
-  recommendation: z.enum(["raise", "lower", "hold"]),
-  suggestedPrice: z.number().describe("Prix conseillé en centimes"),
-  reasoning: z.string().describe("Deux phrases maximum"),
-  confidence: z.enum(["low", "medium", "high"]),
+ai.get("/jobs/:id", async (c) => {
+  const [row] = await drizzle(c.env.DB)
+    .select()
+    .from(aiJob)
+    .where(eq(aiJob.id, c.req.param("id")))
+    .limit(1);
+
+  if (!row) return c.json({ error: "job_introuvable" }, 404);
+
+  return c.json({
+    jobId: row.id,
+    skill: row.skill,
+    status: row.status,
+    result: row.result ? (JSON.parse(row.result) as unknown) : null,
+    error: row.error,
+    createdAt: row.createdAt,
+    startedAt: row.startedAt,
+    finishedAt: row.finishedAt,
+  });
 });
 
 /**
- * Conseil de prix multi-canal. Le modèle ne voit que les données fournies :
- * aucun accès réseau, aucune place de marché interrogée depuis ici.
+ * Travaux encore en cours.
+ *
+ * Le navigateur retient ses propres identifiants, mais il peut les perdre :
+ * cache vidé, autre appareil, réinstallation de la PWA. Cette route est le
+ * filet — elle permet de retrouver un travail lancé depuis le téléphone et de
+ * le consulter depuis l'ordinateur.
  */
-ai.post("/price-advice", async (c) => {
-  const budget = await checkBudget(c.env);
-  if (!budget.ok) return c.json({ error: "budget_exceeded" }, 429);
+ai.get("/jobs", async (c) => {
+  const rows = await drizzle(c.env.DB)
+    .select({
+      jobId: aiJob.id,
+      skill: aiJob.skill,
+      status: aiJob.status,
+      input: aiJob.input,
+      createdAt: aiJob.createdAt,
+    })
+    .from(aiJob)
+    .where(inArray(aiJob.status, ["queued", "running"]))
+    .orderBy(desc(aiJob.createdAt))
+    .limit(20);
 
-  const input = await c.req.json<{
-    sku: string;
-    listings: Array<{ platform: string; price: number; quantity: number }>;
-    costPrice?: number;
-    salesLast30d?: number;
-  }>();
-
-  const response = await client(c.env).messages.parse({
-    model: "claude-opus-5",
-    max_tokens: 2000,
-    thinking: { type: "adaptive" },
-    output_config: { effort: "medium", format: zodOutputFormat(PriceAdvice) },
-    system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }],
-    messages: [
-      {
-        role: "user",
-        content: `SKU ${input.sku}. Tous les montants sont en centimes.
-Présences : ${JSON.stringify(input.listings)}
-Prix d'achat : ${input.costPrice ?? "inconnu"}
-Ventes sur 30 jours : ${input.salesLast30d ?? "inconnu"}
-
-Recommande un prix unique cohérent entre les canaux.`,
-      },
-    ],
+  return c.json({
+    jobs: rows.map((r) => ({
+      jobId: r.jobId,
+      skill: r.skill,
+      status: r.status,
+      input: JSON.parse(r.input) as Record<string, unknown>,
+      createdAt: r.createdAt,
+    })),
   });
-
-  await recordUsage(c.env, response.usage.output_tokens);
-  return c.json({ advice: response.parsed_output, usage: response.usage });
 });
 
-/** Consommation du mois — affichée dans les réglages. */
-ai.get("/usage", async (c) => {
-  const b = await checkBudget(c.env);
-  return c.json({
-    outputTokensUsed: b.used,
-    limit: MONTHLY_OUTPUT_TOKEN_BUDGET,
-    estimatedCostUsd: ((b.used / 1_000_000) * 25).toFixed(2),
+/* ------------------------------------------------------------------ */
+/* Historique et retour                                                */
+/* ------------------------------------------------------------------ */
+
+/** Dernières analyses calculées. Les réponses servies du cache n'y figurent pas. */
+ai.get("/runs", async (c) => {
+  const rows = await drizzle(c.env.DB)
+    .select({
+      id: aiRun.id,
+      skill: aiRun.skill,
+      status: aiRun.status,
+      provider: aiRun.provider,
+      model: aiRun.model,
+      confidence: aiRun.confidence,
+      neurons: aiRun.neurons,
+      startedAt: aiRun.startedAt,
+      finishedAt: aiRun.finishedAt,
+      error: aiRun.error,
+    })
+    .from(aiRun)
+    .orderBy(desc(aiRun.startedAt))
+    .limit(50);
+
+  return c.json({ runs: rows });
+});
+
+const Feedback = z.object({
+  runId: z.string().min(1),
+  verdict: z.enum(["utile", "partiel", "inutile"]),
+  reason: z.string().max(500).optional(),
+});
+
+/**
+ * Retour de l'utilisateur sur une analyse.
+ *
+ * C'est la seule mesure de qualité qui ne vienne pas du modèle lui-même. Un
+ * modèle annonce sa propre confiance avec le même aplomb qu'il ait raison ou
+ * tort ; seul ce bouton dit si la recommandation a servi.
+ */
+ai.post("/feedback", async (c) => {
+  const parsed = Feedback.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "requete_invalide" }, 422);
+
+  const db = drizzle(c.env.DB);
+  const [run] = await db
+    .select({ id: aiRun.id })
+    .from(aiRun)
+    .where(eq(aiRun.id, parsed.data.runId))
+    .limit(1);
+  if (!run) return c.json({ error: "analyse_introuvable" }, 404);
+
+  await db.insert(aiFeedback).values({
+    id: randomId(),
+    runId: parsed.data.runId,
+    verdict: parsed.data.verdict,
+    reason: parsed.data.reason ?? null,
+    at: seconds(),
   });
+
+  return c.json({ ok: true });
 });

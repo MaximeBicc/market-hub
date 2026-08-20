@@ -8,15 +8,14 @@
     "dev": "pnpm --filter @hub/web build && wrangler dev",
     "dev:web": "pnpm --filter @hub/web dev",
     "build": "pnpm --filter @hub/web build",
-    "deploy": "node scripts/deploy.mjs",
+    "mise-en-ligne": "node scripts/deploy.mjs",
     "typecheck": "tsc -b",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply market-hub-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply market-hub-db --remote",
     "cf-typegen": "wrangler types",
-    "setup": "node scripts/deploy.mjs",
     "login": "wrangler login",
-    "test": "pnpm --filter @hub/engine test"
+    "test": "pnpm --filter @hub/engine --filter @hub/ai test"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260819.1",

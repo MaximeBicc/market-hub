@@ -102,7 +102,20 @@ export interface WriteTask {
   value: number;
 }
 
-export type QueueTask = SyncTask | WebhookTask | WriteTask;
+/**
+ * Analyse différée par le panel d'IA.
+ *
+ * Le message ne transporte QUE l'identifiant du travail. Tout le reste — la
+ * skill, ses paramètres — est relu en base au moment de l'exécution : un
+ * message de file peut être livré deux fois et rejoué plusieurs minutes plus
+ * tard, et une charge utile figée finirait par contredire l'état réel.
+ */
+export interface AiTask {
+  kind: "ai";
+  jobId: string;
+}
+
+export type QueueTask = SyncTask | WebhookTask | WriteTask | AiTask;
 
 /** Erreur métier qui distingue « réessayable » de « définitivement cassé ». */
 export class ConnectorError extends Error {
