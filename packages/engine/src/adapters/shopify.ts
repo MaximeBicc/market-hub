@@ -5,6 +5,7 @@ import type {
   Listing,
   Money,
   Product,
+  RemoteListing,
   TargetResult,
 } from "../domain/types.js";
 import type {
@@ -592,6 +593,95 @@ export class ShopifyAdapter implements MarketplaceAdapter {
   /* ---------------------------------------------------------------- */
   /* Ventes entrantes                                                  */
   /* ---------------------------------------------------------------- */
+
+  /**
+   * Lit le catalogue par VARIANTES et non par produits.
+   *
+   * Un produit Shopify porte plusieurs variantes (tailles, coloris), et c'est
+   * la variante qui a un SKU, un prix et un stock. Lire au niveau produit
+   * ferait perdre la granularité sur laquelle repose tout le rapprochement.
+   *
+   * L'identifiant produit parent est mémorisé dans `marketplaceData` : les
+   * écritures de prix et de statut en ont besoin, et le relire à chaque fois
+   * coûterait une requête supplémentaire par annonce.
+   */
+  async fetchListings(
+    ctx: MarketplaceContext,
+    cursor?: string,
+  ): Promise<{ items: RemoteListing[]; cursor?: string | undefined }> {
+    const d = await this.gql<{
+      productVariants: {
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        nodes: Array<{
+          id: string;
+          sku: string | null;
+          title: string;
+          price: string;
+          inventoryQuantity: number | null;
+          inventoryItem: { id: string } | null;
+          product: {
+            id: string;
+            title: string;
+            status: string;
+            onlineStoreUrl: string | null;
+            featuredMedia: { preview: { image: { url: string } | null } | null } | null;
+          } | null;
+        }>;
+      };
+    }>(
+      ctx,
+      `query Catalogue($cursor: String) {
+        productVariants(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id sku title price inventoryQuantity
+            inventoryItem { id }
+            product {
+              id title status onlineStoreUrl
+              featuredMedia { preview { image { url } } }
+            }
+          }
+        }
+      }`,
+      { cursor: cursor ?? null },
+    );
+
+    const currency = ctx.credentials?.["currency"] ?? "EUR";
+
+    const items: RemoteListing[] = d.productVariants.nodes.map((v) => {
+      const qty = v.inventoryQuantity ?? 0;
+      const active = v.product?.status === "ACTIVE";
+      return {
+        remoteId: v.id,
+        sku: v.sku || null,
+        // « Default Title » est le libellé d'une variante unique : l'afficher
+        // ferait apparaître « Sac — Default Title » dans toute l'interface.
+        title:
+          v.title && v.title !== "Default Title"
+            ? `${v.product?.title ?? ""} — ${v.title}`
+            : (v.product?.title ?? v.sku ?? v.id),
+        price: {
+          amount: Math.round(Number(v.price) * 100),
+          currency,
+        },
+        stock: qty,
+        status: active ? (qty > 0 ? "active" : "sold") : "draft",
+        url: v.product?.onlineStoreUrl ?? undefined,
+        imageUrl: v.product?.featuredMedia?.preview?.image?.url ?? undefined,
+        marketplaceData: {
+          productId: v.product?.id,
+          inventoryItemId: v.inventoryItem?.id,
+        },
+      };
+    });
+
+    return {
+      items,
+      cursor: d.productVariants.pageInfo.hasNextPage
+        ? (d.productVariants.pageInfo.endCursor ?? undefined)
+        : undefined,
+    };
+  }
 
   async pollOrderEvents(
     ctx: MarketplaceContext,

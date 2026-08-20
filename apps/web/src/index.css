@@ -195,7 +195,12 @@ body {
   right: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* Colonnes déduites du nombre d'onglets, et non figées à cinq : la liste de
+     navigation est définie une seule fois dans App.tsx et alimente les deux
+     dispositions. Un compte codé en dur ici ferait passer le sixième onglet à
+     la ligne, sans erreur et sans avertissement. */
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   background: color-mix(in srgb, var(--paper) 92%, transparent);
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--rule);
@@ -654,6 +659,24 @@ h2.sec:first-child {
   gap: 7px;
   text-decoration: none;
   transition: transform 0.12s ease, border-color 0.12s ease;
+}
+/* Une icône dans un bouton doit être bornée.
+   Sans dimensions, un SVG inline placé dans un conteneur flex ne se contente
+   pas de sa taille naturelle : il s'étire pour remplir l'espace disponible.
+   Sur un bouton pleine largeur, il occupe alors tout l'écran. */
+.btn svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.btn--small svg {
+  width: 14px;
+  height: 14px;
 }
 .btn:active {
   transform: scale(0.985);

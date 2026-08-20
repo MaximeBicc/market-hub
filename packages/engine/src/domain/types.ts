@@ -192,3 +192,27 @@ export interface FulfillmentInput {
   /** Prévenir l'acheteur par e-mail. Vrai par défaut chez la plupart des plateformes. */
   notifyBuyer?: boolean | undefined;
 }
+
+/**
+ * Une annonce telle que la plateforme la décrit.
+ *
+ * Distincte de `Listing` : celui-ci est notre représentation interne, liée à un
+ * produit maître. Une annonce lue chez la plateforme n'a pas encore de produit
+ * maître — c'est justement le rapprochement par SKU qui va le lui donner.
+ *
+ * Sans cette lecture, on ne peut relier qu'une boutique vide : impossible
+ * d'importer un catalogue déjà garni, donc impossible de commencer à surveiller
+ * un stock existant.
+ */
+export interface RemoteListing {
+  remoteId: string;
+  sku: string | null;
+  title: string;
+  price: Money;
+  stock: number;
+  status: Listing["status"];
+  url?: string | undefined;
+  imageUrl?: string | undefined;
+  /** Identifiants propres à la plateforme, mémorisés pour éviter des relectures. */
+  marketplaceData?: Record<string, unknown> | undefined;
+}

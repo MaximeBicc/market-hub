@@ -3,6 +3,7 @@ import type {
   CanonicalOrderEvent,
   FulfillmentInput,
   Listing,
+  RemoteListing,
   MarketplaceAccount,
   MarketplaceId,
   Money,
@@ -108,6 +109,19 @@ export interface MarketplaceAdapter {
     input: FulfillmentInput,
     idempotencyKey: string,
   ): Promise<TargetResult>;
+
+  /**
+   * Lit une page du catalogue existant chez la plateforme.
+   *
+   * Optionnelle : Vinted ne sait rien lire sans accès Pro. Mais sans elle, on
+   * ne peut relier qu'une boutique VIDE — or une boutique qu'on relie a
+   * presque toujours déjà des produits, et c'est précisément leur stock qu'on
+   * veut surveiller.
+   */
+  fetchListings?(
+    ctx: MarketplaceContext,
+    cursor?: string,
+  ): Promise<{ items: RemoteListing[]; cursor?: string | undefined }>;
 
   /** Relevé des ventes, pour les plateformes sans webhook fiable. */
   pollOrderEvents?(

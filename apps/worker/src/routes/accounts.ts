@@ -246,6 +246,92 @@ accounts.post("/:id/test", async (c) => {
 });
 
 /**
+ * SONDE — lit réellement la boutique, sans rien y écrire.
+ *
+ * C'est l'étape de validation en direct : elle prouve que les identifiants,
+ * les portées accordées et la traduction des données fonctionnent contre le
+ * vrai compte, avant qu'une seule commande d'écriture ne soit envoyée.
+ *
+ * Strictement en lecture. Aucune annonce n'est créée, aucun prix modifié,
+ * aucun stock touché — on peut donc la lancer sans risque sur une boutique
+ * en activité.
+ */
+accounts.get("/:id/probe", async (c) => {
+  const id = c.req.param("id");
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Compte inconnu" }, 404);
+
+  const mod = buildEngine(c.env);
+  const adapter = mod.registry.get(account.marketplace);
+  const current = await repos.credentials.get(id);
+
+  const ctx = {
+    account,
+    credentials: current,
+    saveCredentials: async (patch: Record<string, string>) => {
+      await repos.credentials.put(id, { ...current, ...patch });
+    },
+  };
+
+  const report: Record<string, unknown> = {
+    account: { id, marketplace: account.marketplace, name: account.displayName },
+    capabilities: await adapter.capabilities(ctx),
+  };
+
+  // Chaque lecture est isolée : une portée manquante sur les commandes ne doit
+  // pas masquer le fait que le catalogue, lui, se lit parfaitement.
+  try {
+    const page = await adapter.fetchListings?.(ctx);
+    report["catalogue"] = page
+      ? {
+          ok: true,
+          lus: page.items.length,
+          autresPages: Boolean(page.cursor),
+          sansSku: page.items.filter((i) => !i.sku).length,
+          exemples: page.items.slice(0, 5).map((i) => ({
+            sku: i.sku,
+            titre: i.title,
+            prix: i.price.amount / 100,
+            stock: i.stock,
+            statut: i.status,
+          })),
+        }
+      : { ok: false, raison: "lecture de catalogue non gérée par l'adaptateur" };
+  } catch (err) {
+    report["catalogue"] = {
+      ok: false,
+      erreur: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  try {
+    const page = await adapter.pollOrderEvents?.(ctx);
+    report["ventes"] = page
+      ? {
+          ok: true,
+          lues: page.events.length,
+          autresPages: Boolean(page.cursor),
+          exemples: page.events.slice(0, 3).map((e) => ({
+            commande: e.remoteOrderId,
+            type: e.kind,
+            date: e.occurredAt,
+            lignes: e.lines.length,
+          })),
+        }
+      : { ok: false, raison: "relevé des ventes non géré par l'adaptateur" };
+  } catch (err) {
+    report["ventes"] = {
+      ok: false,
+      erreur: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  return c.json(report);
+});
+
+/**
  * Met un compte en pause.
  *
  * On ne supprime rien : l'historique des commandes et des annonces reste
