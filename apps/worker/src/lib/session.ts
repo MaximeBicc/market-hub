@@ -75,7 +75,8 @@ export function clearCookie(): string {
 
 export interface AuthedUser {
   id: string;
-  email: string;
+  username: string;
+  displayName: string;
 }
 
 /** Renvoie l'utilisateur si la requête porte une session valide, sinon null. */
@@ -101,7 +102,12 @@ export async function authenticate(
 
   const db = drizzle(env.DB);
   const rows = await db
-    .select({ userId: session.userId, expiresAt: session.expiresAt, email: user.email })
+    .select({
+      userId: session.userId,
+      expiresAt: session.expiresAt,
+      username: user.username,
+      displayName: user.displayName,
+    })
     .from(session)
     .innerJoin(user, eq(user.id, session.userId))
     .where(eq(session.id, id))
@@ -114,7 +120,24 @@ export async function authenticate(
     return null;
   }
 
-  return { id: row.userId, email: row.email };
+  return {
+    id: row.userId,
+    username: row.username,
+    displayName: row.displayName,
+  };
+}
+
+/**
+ * Ferme toutes les sessions d'un utilisateur.
+ * Appelé après un changement de mot de passe : si celui-ci a été changé parce
+ * qu'il était compromis, laisser vivre les sessions ouvertes ailleurs viderait
+ * la mesure de son sens.
+ */
+export async function destroyAllSessions(
+  env: Env,
+  userId: string,
+): Promise<void> {
+  await drizzle(env.DB).delete(session).where(eq(session.userId, userId));
 }
 
 export async function destroySession(env: Env, req: Request): Promise<void> {

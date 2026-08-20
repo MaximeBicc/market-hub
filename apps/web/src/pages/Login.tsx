@@ -1,93 +1,85 @@
 import { useState } from "react";
-import { startRegistration, startAuthentication } from "@simplewebauthn/browser";
 import { api } from "../lib/api.js";
 
 /**
- * Connexion par clé d'accès.
+ * Connexion par identifiant et mot de passe.
  *
- * Aucun mot de passe n'est demandé ni stocké nulle part. Sur téléphone, le
- * navigateur déclenche Face ID ou l'empreinte ; sur ordinateur, Windows Hello
- * ou Touch ID.
+ * Deux comptes existent, créés côté serveur. Il n'y a volontairement aucune
+ * page d'inscription : pour un outil privé à deux, elle ne serait qu'une
+ * surface d'attaque supplémentaire.
  *
- * Le premier enregistrement crée le compte. Ensuite, seul le bouton de
- * connexion reste visible.
+ * `autoComplete="username"` et `"current-password"` ne sont pas décoratifs :
+ * ils permettent aux gestionnaires de mots de passe du téléphone de proposer
+ * le remplissage, ce qui est la seule façon réaliste de saisir un mot de passe
+ * aléatoire de 24 caractères sur un écran tactile.
  */
-export function Login({ initialized }: { initialized: boolean }) {
-  const [email, setEmail] = useState("");
+export function Login() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function register() {
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const options = await api.post<{ challenge: string }>(
-        "/auth/register/options",
-        { email },
+      await api.post("/auth/login", { username, password });
+      window.location.href = "/";
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Connexion impossible.",
       );
-      const response = await startRegistration({ optionsJSON: options as never });
-      await api.post("/auth/register/verify", {
-        response,
-        challenge: options.challenge,
-        label: navigator.userAgent.slice(0, 60),
-      });
-      window.location.href = "/";
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Échec de l'enregistrement");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function login() {
-    setBusy(true);
-    setError(null);
-    try {
-      const options = await api.post<{ challenge: string }>("/auth/login/options");
-      const response = await startAuthentication({
-        optionsJSON: options as never,
-      });
-      await api.post("/auth/login/verify", {
-        response,
-        challenge: options.challenge,
-      });
-      window.location.href = "/";
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Échec de la connexion");
-    } finally {
       setBusy(false);
     }
   }
 
   return (
     <div className="login">
-      <h1>MarketHub</h1>
-      <p className="muted">Vos boutiques, au même endroit.</p>
+      <form className="login__box" onSubmit={submit}>
+        <img className="login__logo" src="/icons/icon-192.png" alt="" />
+        <h1 className="login__n">MarketHub</h1>
+        <p className="login__s">Vos boutiques, au même endroit.</p>
 
-      {initialized ? (
-        <button className="btn btn--primary" onClick={login} disabled={busy}>
-          Se connecter
-        </button>
-      ) : (
-        <>
+        {error && <div className="login__err">{error}</div>}
+
+        <div className="field">
+          <label htmlFor="u">Identifiant</label>
           <input
-            type="email"
-            placeholder="votre@email.fr"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            id="u"
             className="input"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            required
           />
-          <button
-            className="btn btn--primary"
-            onClick={register}
-            disabled={busy || !email}
-          >
-            Créer mon accès
-          </button>
-        </>
-      )}
+        </div>
 
-      {error && <p className="error">{error}</p>}
+        <div className="field">
+          <label htmlFor="p">Mot de passe</label>
+          <input
+            id="p"
+            type="password"
+            className="input"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            required
+          />
+        </div>
+
+        <button
+          type="submit"
+          className="btn btn--primary btn--wide"
+          disabled={busy || !username || !password}
+          style={{ marginTop: 4 }}
+        >
+          {busy ? "Vérification…" : "Se connecter"}
+        </button>
+      </form>
     </div>
   );
 }

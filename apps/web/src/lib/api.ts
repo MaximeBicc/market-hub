@@ -62,6 +62,7 @@ export interface OrderRow {
   currency: string;
   buyer: string | null;
   placedAt: number;
+  shopId: string;
   shopName: string;
   platform: string;
 }

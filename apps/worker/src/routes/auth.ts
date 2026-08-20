@@ -1,225 +1,180 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import { eq, sql } from "drizzle-orm";
-import {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse,
-} from "@simplewebauthn/server";
-import { passkey, user, alertRule } from "../db/schema.js";
+import { user } from "../db/schema.js";
 import type { Env } from "../env.js";
-import { randomId } from "../lib/crypto.js";
 import {
   authenticate,
   clearCookie,
   createSession,
+  destroyAllSessions,
   destroySession,
   sessionCookie,
 } from "../lib/session.js";
-import { DEFAULT_RULES } from "../lib/alerts.js";
+import { checkPasswordStrength } from "../lib/password.js";
+import type { RateLimiter } from "../do/rate-limiter.js";
 
 /**
- * Authentification par clé d'accès (WebAuthn / passkey).
+ * Authentification par identifiant et mot de passe.
  *
- * Pourquoi ce choix pour un outil personnel :
- *   - Rien à retenir, rien à saisir : Face ID sur le téléphone, Windows Hello
- *     sur le PC. C'est plus rapide qu'un mot de passe, et plus sûr.
- *   - Résistant au hameçonnage par construction : la clé est liée au domaine.
- *     Un faux site ne peut pas la solliciter, même s'il est parfaitement imité.
- *   - Rien à stocker de sensible côté serveur. La base ne contient que des clés
- *     PUBLIQUES : leur fuite n'a aucune conséquence.
+ * Deux comptes nommés, créés par migration : l'outil est utilisé à deux, et
+ * savoir qui a modifié quoi vaut mieux qu'un compte partagé.
  *
- * La première clé enregistrée crée le compte. Ensuite l'enregistrement exige
- * une session valide — sinon n'importe qui pourrait s'ajouter une clé.
- * ⚠️ Enregistrez DEUX appareils : perdre l'unique téléphone enregistré revient
- * à perdre l'accès (voir la procédure de secours dans ARCHITECTURE.md).
+ * Les comptes ne se créent pas depuis l'application : il n'existe aucune route
+ * d'inscription. Ajouter une personne se fait par migration. Pour un outil
+ * privé à deux, une page d'inscription n'est qu'une surface d'attaque.
  */
 
 export const auth = new Hono<{ Bindings: Env }>();
 
-function rp(env: Env) {
-  const url = new URL(env.APP_URL);
-  return { id: url.hostname, name: env.APP_NAME, origin: url.origin };
+/**
+ * Limitation des tentatives, par identifiant.
+ *
+ * Sans elle, un attaquant peut essayer des mots de passe aussi vite que le
+ * réseau le permet. On réutilise le Durable Object du limiteur de débit :
+ * il est déjà le point de rendez-vous global du système.
+ *
+ * Réglage : 5 tentatives immédiates, puis une toutes les 10 secondes, et
+ * 40 par jour au maximum. Assez souple pour une faute de frappe, assez strict
+ * pour rendre toute attaque par dictionnaire inopérante.
+ */
+function authObject(env: Env, key: string): DurableObjectStub<RateLimiter> {
+  const id = env.RATE_LIMITER.idFromName(`login:${key.toLowerCase()}`);
+  return env.RATE_LIMITER.get(id) as DurableObjectStub<RateLimiter>;
 }
 
-/** Y a-t-il déjà un compte ? Détermine si l'écran d'accueil propose « créer ». */
 auth.get("/state", async (c) => {
-  const rows = await drizzle(c.env.DB)
-    .select({ n: sql<number>`count(*)` })
-    .from(user);
   const me = await authenticate(c.env, c.req.raw);
   return c.json({
-    initialized: (rows[0]?.n ?? 0) > 0,
     authenticated: me !== null,
-    email: me?.email ?? null,
+    username: me?.username ?? null,
+    displayName: me?.displayName ?? null,
   });
 });
 
-/* -------------------- Enregistrement d'une clé -------------------- */
+auth.post("/login", async (c) => {
+  const body = await c.req
+    .json<{ username?: string; password?: string }>()
+    .catch(() => ({}) as { username?: string; password?: string });
 
-auth.post("/register/options", async (c) => {
-  const db = drizzle(c.env.DB);
-  const { email } = await c.req.json<{ email: string }>();
+  const username = (body.username ?? "").trim();
+  const password = body.password ?? "";
 
-  const count = (
-    await db.select({ n: sql<number>`count(*)` }).from(user)
-  )[0]?.n ?? 0;
-
-  const me = await authenticate(c.env, c.req.raw);
-  // Compte déjà créé et pas de session → refus. Un seul utilisateur.
-  if (count > 0 && !me) return c.json({ error: "unauthorized" }, 401);
-
-  const userId = me?.id ?? randomId();
-  const { id: rpID, name: rpName } = rp(c.env);
-
-  const existing = me
-    ? await db.select().from(passkey).where(eq(passkey.userId, me.id))
-    : [];
-
-  const options = await generateRegistrationOptions({
-    rpName,
-    rpID,
-    userID: new TextEncoder().encode(userId),
-    userName: me?.email ?? email,
-    attestationType: "none",
-    // Empêche d'enregistrer deux fois le même appareil.
-    excludeCredentials: existing.map((p) => ({ id: p.id })),
-    authenticatorSelection: {
-      residentKey: "required", // clé découvrable : connexion sans saisir d'identifiant
-      userVerification: "preferred",
-    },
-  });
-
-  await c.env.CACHE.put(
-    `webauthn:reg:${options.challenge}`,
-    JSON.stringify({ userId, email: me?.email ?? email }),
-    { expirationTtl: 300 },
-  );
-
-  return c.json(options);
-});
-
-auth.post("/register/verify", async (c) => {
-  const db = drizzle(c.env.DB);
-  const body = await c.req.json<{ response: any; challenge: string; label?: string }>();
-
-  const pending = await c.env.CACHE.get(`webauthn:reg:${body.challenge}`);
-  if (!pending) return c.json({ error: "challenge expiré" }, 400);
-  await c.env.CACHE.delete(`webauthn:reg:${body.challenge}`);
-  const { userId, email } = JSON.parse(pending) as { userId: string; email: string };
-
-  const { id: rpID, origin } = rp(c.env);
-  const verification = await verifyRegistrationResponse({
-    response: body.response,
-    expectedChallenge: body.challenge,
-    expectedOrigin: origin,
-    expectedRPID: rpID,
-  });
-
-  if (!verification.verified || !verification.registrationInfo) {
-    return c.json({ error: "vérification échouée" }, 400);
+  if (!username || !password) {
+    return c.json({ error: "Identifiant et mot de passe requis." }, 400);
   }
 
-  const now = Math.floor(Date.now() / 1000);
-  const cred = verification.registrationInfo.credential;
-
-  // Création du compte au premier enregistrement, avec les règles d'alerte par défaut.
-  const exists = await db.select().from(user).where(eq(user.id, userId)).limit(1);
-  if (exists.length === 0) {
-    await db.insert(user).values({ id: userId, email, createdAt: now });
-    await db.insert(alertRule).values(
-      DEFAULT_RULES.map((r) => ({
-        id: randomId(),
-        userId,
-        name: r.name,
-        kind: r.kind,
-        params: JSON.stringify(r.params),
-        shopId: null,
-        enabled: 1,
-        cooldownSec: r.cooldownSec,
-        lastFiredAt: null,
-      })),
+  const guard = authObject(c.env, username);
+  const gate = await guard.acquire(1, 0.1, 5, 40);
+  if (!gate.ok) {
+    const seconds = Math.ceil(gate.waitMs / 1000);
+    return c.json(
+      {
+        error: `Trop de tentatives. Réessayez dans ${seconds} seconde${seconds > 1 ? "s" : ""}.`,
+      },
+      429,
     );
   }
 
-  await db.insert(passkey).values({
-    id: cred.id,
-    userId,
-    publicKey: btoa(String.fromCharCode(...cred.publicKey)),
-    counter: cred.counter,
-    transports: JSON.stringify(cred.transports ?? []),
-    label: body.label ?? "Appareil",
-    createdAt: now,
-    lastUsedAt: now,
-  });
-
-  const token = await createSession(c.env, userId);
-  return c.json({ ok: true }, 200, { "Set-Cookie": sessionCookie(token) });
-});
-
-/* -------------------------- Connexion -------------------------- */
-
-auth.post("/login/options", async (c) => {
-  const { id: rpID } = rp(c.env);
-  const options = await generateAuthenticationOptions({
-    rpID,
-    userVerification: "preferred",
-    // allowCredentials vide : le navigateur propose les clés découvrables.
-  });
-  await c.env.CACHE.put(`webauthn:auth:${options.challenge}`, "1", {
-    expirationTtl: 300,
-  });
-  return c.json(options);
-});
-
-auth.post("/login/verify", async (c) => {
   const db = drizzle(c.env.DB);
-  const body = await c.req.json<{ response: any; challenge: string }>();
-
-  const pending = await c.env.CACHE.get(`webauthn:auth:${body.challenge}`);
-  if (!pending) return c.json({ error: "challenge expiré" }, 400);
-  await c.env.CACHE.delete(`webauthn:auth:${body.challenge}`);
-
   const rows = await db
     .select()
-    .from(passkey)
-    .where(eq(passkey.id, body.response.id))
+    .from(user)
+    // Comparaison sans casse : « mxb_market-hub » doit fonctionner.
+    .where(sql`lower(${user.username}) = lower(${username})`)
     .limit(1);
-  const stored = rows[0];
-  if (!stored) return c.json({ error: "clé inconnue" }, 401);
 
-  const { id: rpID, origin } = rp(c.env);
-  const verification = await verifyAuthenticationResponse({
-    response: body.response,
-    expectedChallenge: body.challenge,
-    expectedOrigin: origin,
-    expectedRPID: rpID,
-    credential: {
-      id: stored.id,
-      publicKey: Uint8Array.from(atob(stored.publicKey), (ch) => ch.charCodeAt(0)),
-      counter: stored.counter,
-    },
-  });
+  const found = rows[0];
 
-  if (!verification.verified) return c.json({ error: "échec" }, 401);
+  /**
+   * Message d'erreur identique que l'identifiant existe ou non, et
+   * vérification du mot de passe menée même sur un compte inexistant :
+   * sans cela, le temps de réponse révèle quels identifiants sont valides.
+   */
+  const record = found
+    ? {
+        hash: found.passwordHash,
+        salt: found.passwordSalt,
+        iterations: found.passwordIterations,
+      }
+    : {
+        // Empreinte factice, pour dépenser le même temps de calcul.
+        hash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        salt: "AAAAAAAAAAAAAAAAAAAAAA==",
+        iterations: 100_000,
+      };
 
-  // Le compteur croissant détecte une clé clonée : s'il recule, on refuse.
-  const newCounter = verification.authenticationInfo.newCounter;
-  if (stored.counter > 0 && newCounter <= stored.counter) {
-    return c.json({ error: "compteur invalide" }, 401);
+  // Vérification déléguée au Durable Object : PBKDF2 dépasse largement les
+  // 10 ms de CPU d'un Worker gratuit, alors qu'un DO en reçoit 30 secondes.
+  const valid = await guard.checkPassword(password, record);
+
+  if (!found || !valid) {
+    return c.json({ error: "Identifiant ou mot de passe incorrect." }, 401);
   }
 
   await db
-    .update(passkey)
-    .set({ counter: newCounter, lastUsedAt: Math.floor(Date.now() / 1000) })
-    .where(eq(passkey.id, stored.id));
+    .update(user)
+    .set({ lastLoginAt: Math.floor(Date.now() / 1000) })
+    .where(eq(user.id, found.id));
 
-  const token = await createSession(c.env, stored.userId);
-  return c.json({ ok: true }, 200, { "Set-Cookie": sessionCookie(token) });
+  const token = await createSession(c.env, found.id);
+  return c.json(
+    { ok: true, username: found.username, displayName: found.displayName },
+    200,
+    { "Set-Cookie": sessionCookie(token) },
+  );
 });
 
 auth.post("/logout", async (c) => {
   await destroySession(c.env, c.req.raw);
   return c.json({ ok: true }, 200, { "Set-Cookie": clearCookie() });
+});
+
+/** Changement de mot de passe. Exige l'ancien : une session volée ne suffit pas. */
+auth.post("/password", async (c) => {
+  const me = await authenticate(c.env, c.req.raw);
+  if (!me) return c.json({ error: "unauthorized" }, 401);
+
+  const body = await c.req
+    .json<{ current?: string; next?: string }>()
+    .catch(() => ({}) as { current?: string; next?: string });
+
+  const current = body.current ?? "";
+  const next = body.next ?? "";
+
+  const weak = checkPasswordStrength(next);
+  if (weak) return c.json({ error: weak }, 400);
+
+  const db = drizzle(c.env.DB);
+  const rows = await db.select().from(user).where(eq(user.id, me.id)).limit(1);
+  const found = rows[0];
+  if (!found) return c.json({ error: "unauthorized" }, 401);
+
+  const guard = authObject(c.env, found.username);
+  const ok = await guard.checkPassword(current, {
+    hash: found.passwordHash,
+    salt: found.passwordSalt,
+    iterations: found.passwordIterations,
+  });
+  if (!ok) return c.json({ error: "Mot de passe actuel incorrect." }, 401);
+
+  const rec = await guard.makePassword(next);
+  const now = Math.floor(Date.now() / 1000);
+  await db
+    .update(user)
+    .set({
+      passwordHash: rec.hash,
+      passwordSalt: rec.salt,
+      passwordIterations: rec.iterations,
+      passwordChangedAt: now,
+    })
+    .where(eq(user.id, me.id));
+
+  // Toutes les autres sessions tombent : si le mot de passe a été changé
+  // parce qu'il était compromis, laisser vivre les sessions ouvertes
+  // ailleurs viderait la mesure de son sens.
+  await destroyAllSessions(c.env, me.id);
+  const token = await createSession(c.env, me.id);
+
+  return c.json({ ok: true }, 200, { "Set-Cookie": sessionCookie(token) });
 });

@@ -107,6 +107,7 @@ api.get("/orders", async (c) => {
       currency: order.totalCurrency,
       buyer: order.buyerName,
       placedAt: order.placedAt,
+      shopId: order.shopId,
       shopName: shop.displayName,
       platform: shop.platform,
     })
@@ -115,6 +116,87 @@ api.get("/orders", async (c) => {
     .orderBy(desc(order.placedAt))
     .limit(limit);
   return c.json({ orders: rows });
+});
+
+/**
+ * Séries pour la page Croissance.
+ *
+ * L'agrégation par jour se fait en SQL, dans D1 : y regrouper quelques
+ * milliers de lignes coûte des millisecondes, alors que renvoyer toutes les
+ * commandes au téléphone pour qu'il les additionne coûterait de la bande
+ * passante et du budget CPU sur un appareil bien plus lent.
+ */
+api.get("/growth", async (c) => {
+  const db = drizzle(c.env.DB);
+  const days = Math.min(Math.max(Number(c.req.query("days") ?? 30), 7), 90);
+  const now = Math.floor(Date.now() / 1000);
+  const from = now - days * 86400;
+  const prevFrom = from - days * 86400;
+
+  // Les statuts annulés et remboursés sont exclus : ils ne sont pas du
+  // chiffre d'affaires, et les inclure gonflerait artificiellement la courbe.
+  const realised = sql`${order.status} NOT IN ('cancelled', 'refunded')`;
+
+  const [daily, previous, byShop] = await Promise.all([
+    db
+      .select({
+        date: sql<string>`date(${order.placedAt}, 'unixepoch')`,
+        total: sql<number>`coalesce(sum(${order.totalAmount}), 0)`,
+        count: sql<number>`count(*)`,
+      })
+      .from(order)
+      .where(and(gte(order.placedAt, from), realised))
+      .groupBy(sql`date(${order.placedAt}, 'unixepoch')`),
+
+    db
+      .select({ total: sql<number>`coalesce(sum(${order.totalAmount}), 0)` })
+      .from(order)
+      .where(
+        and(gte(order.placedAt, prevFrom), lte(order.placedAt, from), realised),
+      ),
+
+    db
+      .select({
+        shopId: order.shopId,
+        name: shop.displayName,
+        platform: shop.platform,
+        total: sql<number>`coalesce(sum(${order.totalAmount}), 0)`,
+        count: sql<number>`count(*)`,
+      })
+      .from(order)
+      .innerJoin(shop, eq(shop.id, order.shopId))
+      .where(and(gte(order.placedAt, from), realised))
+      .groupBy(order.shopId)
+      .orderBy(desc(sql`sum(${order.totalAmount})`)),
+  ]);
+
+  // La série est complétée jour par jour : SQL ne renvoie que les journées
+  // ayant au moins une commande, or un graphique avec des jours manquants
+  // ment sur la régularité des ventes.
+  const map = new Map(daily.map((d) => [d.date, d]));
+  const series = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date((now - i * 86400) * 1000);
+    const key = d.toISOString().slice(0, 10);
+    const hit = map.get(key);
+    series.push({
+      date: key,
+      label: new Intl.DateTimeFormat("fr-FR", {
+        day: "numeric",
+        month: "short",
+      }).format(d),
+      total: hit?.total ?? 0,
+      count: hit?.count ?? 0,
+    });
+  }
+
+  return c.json({
+    days: series,
+    total: series.reduce((s, d) => s + d.total, 0),
+    count: series.reduce((s, d) => s + d.count, 0),
+    previousTotal: previous[0]?.total ?? 0,
+    byShop,
+  });
 });
 
 api.get("/inventory", async (c) => {

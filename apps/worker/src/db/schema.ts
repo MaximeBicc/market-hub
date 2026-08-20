@@ -12,8 +12,24 @@ import {
 
 export const user = sqliteTable("user", {
   id: text("id").primaryKey(),
-  email: text("email").notNull().unique(),
+  /** Identifiant de connexion, ex. « MXB_Market-hub ». Comparé sans casse. */
+  username: text("username").notNull().unique(),
+  /** Nom affiché dans l'interface. */
+  displayName: text("display_name").notNull(),
+  email: text("email"),
+
+  /* --- Mot de passe : PBKDF2-HMAC-SHA256, voir lib/password.ts --- */
+  passwordHash: text("password_hash").notNull(),
+  passwordSalt: text("password_salt").notNull(),
+  /**
+   * Stocké par utilisateur, et non en constante : permet d'augmenter le
+   * coût du hachage plus tard sans invalider les comptes existants.
+   */
+  passwordIterations: integer("password_iterations").notNull(),
+  passwordChangedAt: integer("password_changed_at"),
+
   createdAt: integer("created_at").notNull(),
+  lastLoginAt: integer("last_login_at"),
 });
 
 /** Clés d'accès WebAuthn (Face ID / Touch ID / Windows Hello). Pas de mot de passe. */

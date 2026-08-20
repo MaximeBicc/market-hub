@@ -1,4 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  hashPassword,
+  verifyPassword,
+  type PasswordRecord,
+} from "../lib/password.js";
 
 /**
  * Un Durable Object par couple (plateforme, boutique).
@@ -112,5 +117,37 @@ export class RateLimiter extends DurableObject {
   /** Remet le seau à plat — utile après une erreur de configuration. */
   async reset(): Promise<void> {
     await this.ctx.storage.delete("bucket");
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Hachage des mots de passe                                          */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * POURQUOI LE HACHAGE VIT ICI ET NON DANS LE WORKER.
+   *
+   * PBKDF2 est délibérément lent : c'est ce qui le rend utile. À 100 000
+   * itérations il consomme de l'ordre de 50 ms de CPU — cinq fois le budget
+   * de 10 ms qu'un Worker reçoit sur le plan gratuit. La vérification
+   * échouerait donc en production, alors qu'elle passe en développement local
+   * où la limite n'est pas appliquée : exactement le genre de panne qui ne se
+   * découvre qu'après la mise en ligne.
+   *
+   * Les Durable Objects suivent un modèle différent : 30 secondes de CPU par
+   * invocation, y compris sur le plan gratuit. C'est le seul endroit de cette
+   * architecture où une opération coûteuse en calcul peut s'exécuter.
+   *
+   * L'objet sollicité est déjà celui qui limite les tentatives de connexion :
+   * aucune infrastructure supplémentaire n'est nécessaire.
+   */
+  async checkPassword(
+    password: string,
+    record: PasswordRecord,
+  ): Promise<boolean> {
+    return verifyPassword(password, record);
+  }
+
+  async makePassword(password: string): Promise<PasswordRecord> {
+    return hashPassword(password);
   }
 }
