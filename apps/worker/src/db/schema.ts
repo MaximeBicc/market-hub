@@ -67,9 +67,11 @@ export const shop = sqliteTable(
   "shop",
   {
     id: text("id").primaryKey(),
-    platform: text("platform").notNull(), // shopify | etsy | ebay | alibaba
+    platform: text("platform").notNull(), // shopify | etsy | ebay | allegro | tiktok_shop | vinted
     externalId: text("external_id").notNull(),
     displayName: text("display_name").notNull(),
+    /** Identifiant lisible, ex. « ebay_electronique ». Sert aux journaux et à l'URL. */
+    slug: text("slug"),
     status: text("status").notNull().default("active"),
     /** Réglages propres à la plateforme (région eBay, version d'API...). JSON. */
     config: text("config").notNull().default("{}"),
@@ -111,7 +113,15 @@ export const product = sqliteTable(
     sku: text("sku").notNull().unique(),
     title: text("title").notNull(),
     description: text("description"),
-    costPrice: integer("cost_price"), // centimes, prix d'achat (Alibaba)
+    costPrice: integer("cost_price"), // centimes, prix d'achat fournisseur
+    /** Prix de vente de référence, dont héritent les annonces créées. */
+    priceAmount: integer("price_amount").notNull().default(0),
+    priceCurrency: text("price_currency").notNull().default("EUR"),
+    /** Stock de référence à la création d'une annonce. Le stock VIVANT est dans `inventory`. */
+    stock: integer("stock").notNull().default(0),
+    images: text("images"), // JSON: string[]
+    tags: text("tags"), // JSON: string[]
+    marketplaceData: text("marketplace_data"), // JSON, champs propres à une plateforme
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
@@ -134,6 +144,8 @@ export const listing = sqliteTable(
     status: text("status").notNull(),
     url: text("url"),
     imageUrl: text("image_url"),
+    /** Champs propres à la plateforme (offerId eBay, variantId Shopify...). JSON. */
+    marketplaceData: text("marketplace_data"),
     /**
      * Empreinte SHA-256 du payload normalisé.
      * Sert à n'écrire QUE ce qui a réellement changé : c'est ce qui garde
@@ -282,3 +294,76 @@ export const alertRule = sqliteTable("alert_rule", {
   cooldownSec: integer("cooldown_sec").notNull().default(3600),
   lastFiredAt: integer("last_fired_at"),
 });
+
+/* ------------------------------------------------------------------ */
+/* Moteur multi-marketplace                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Stock central, source de vérité unique.
+ *
+ * `reserved` couvre le laps entre vente constatée et expédition : la
+ * marchandise est encore physiquement là mais n'est plus vendable.
+ * `version` porte le verrouillage optimiste — deux ventes simultanées sur
+ * deux plateformes ne doivent pas se perdre l'une l'autre.
+ */
+export const inventory = sqliteTable("inventory", {
+  productId: text("product_id").primaryKey().references(() => product.id),
+  onHand: integer("on_hand").notNull().default(0),
+  reserved: integer("reserved").notNull().default(0),
+  version: integer("version").notNull().default(1),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+/**
+ * Déduplication des ventes entrantes.
+ * Les plateformes garantissent « au moins une fois », jamais « exactement
+ * une fois » : sans cette table, une vente livrée deux fois décrémenterait
+ * le stock deux fois.
+ */
+export const salesEvent = sqliteTable(
+  "sales_event",
+  {
+    id: text("id").primaryKey(), // hash(account_id + event_id)
+    accountId: text("account_id").notNull(),
+    eventId: text("event_id").notNull(),
+    marketplace: text("marketplace").notNull(),
+    remoteOrderId: text("remote_order_id").notNull(),
+    kind: text("kind").notNull(), // paid | cancelled | returned
+    occurredAt: text("occurred_at").notNull(),
+    receivedAt: integer("received_at").notNull(),
+    /** Lignes vendues qu'on n'a pas su rattacher à un produit. */
+    unmatchedLines: integer("unmatched_lines").notNull().default(0),
+  },
+  (t) => [
+    uniqueIndex("sales_event_account_evt_idx").on(t.accountId, t.eventId),
+    index("sales_event_received_idx").on(t.receivedAt),
+  ],
+);
+
+/**
+ * Journal des commandes de l'orchestrateur, une ligne par cible.
+ *
+ * Sans trace, une commande partie vers cinq plateformes devient indébogable :
+ * on ne sait plus laquelle a réussi, laquelle demande une action manuelle,
+ * laquelle a échoué et pourquoi.
+ */
+export const commandLog = sqliteTable(
+  "command_log",
+  {
+    id: text("id").primaryKey(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    command: text("command").notNull(),
+    productId: text("product_id"),
+    accountId: text("account_id").notNull(),
+    marketplace: text("marketplace").notNull(),
+    status: text("status").notNull(),
+    message: text("message"),
+    remoteId: text("remote_id"),
+    at: integer("at").notNull(),
+  },
+  (t) => [
+    index("command_log_at_idx").on(t.at),
+    index("command_log_key_idx").on(t.idempotencyKey),
+  ],
+);

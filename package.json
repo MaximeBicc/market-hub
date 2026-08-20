@@ -15,7 +15,8 @@
     "db:migrate:remote": "wrangler d1 migrations apply market-hub-db --remote",
     "cf-typegen": "wrangler types",
     "setup": "node scripts/deploy.mjs",
-    "login": "wrangler login"
+    "login": "wrangler login",
+    "test": "pnpm --filter @hub/engine test"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260819.1",

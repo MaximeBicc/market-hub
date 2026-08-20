@@ -49,6 +49,12 @@ jobs:
       - name: Vérification des types
         run: pnpm typecheck
 
+      # Le socle du moteur est teste avant tout deploiement : orchestrateur,
+      # capacites, isolation des erreurs, deduplication et propagation de
+      # stock. Un socle casse ne doit jamais atteindre la production.
+      - name: Tests du moteur
+        run: pnpm test
+
       - name: Construction de la PWA
         run: pnpm build
 
