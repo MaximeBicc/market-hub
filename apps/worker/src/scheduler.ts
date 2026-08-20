@@ -1,7 +1,17 @@
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq, lte, sql, isNotNull, lt } from "drizzle-orm";
+import { and, eq, inArray, lte, sql, isNotNull, lt } from "drizzle-orm";
 import type { QueueTask, SyncResource } from "@hub/core";
-import { syncJob, shop, oauthToken, eventLog } from "./db/schema.js";
+import {
+  aiCache,
+  aiEvidence,
+  aiFeedback,
+  aiJob,
+  aiRun,
+  eventLog,
+  oauthToken,
+  shop,
+  syncJob,
+} from "./db/schema.js";
 import type { Env } from "./env.js";
 import { randomId } from "./lib/crypto.js";
 import { sendPushToUser } from "./lib/push.js";
@@ -18,7 +28,8 @@ import { sendPushToUser } from "./lib/push.js";
  * Trois horaires, trois rôles (plan gratuit : 5 déclencheurs maximum) :
  *   toutes les 5 min   commandes et stock des boutiques dues
  *   à h+17             rafraîchissement préventif des jetons OAuth
- *   à 03h40 UTC        catalogue complet, purge du journal, alerte de réautorisation
+ *   à 03h40 UTC        catalogue complet, purge des journaux et du cache d'analyses,
+ *                      alerte de réautorisation
  *
  * Les expressions cron exactes sont dans wrangler.jsonc et dans le `switch`
  * ci-dessous — volontairement pas répétées ici : une expression cron contient
@@ -150,9 +161,35 @@ async function refreshExpiringTokens(env: Env): Promise<void> {
 
 /** Le journal est utile 30 jours ; au-delà il ne fait que consommer les 5 Go. */
 async function purgeOldLogs(env: Env): Promise<void> {
-  const cutoff = Math.floor(Date.now() / 1000) - 30 * 86400;
+  const now = Math.floor(Date.now() / 1000);
   const db = drizzle(env.DB);
-  await db.delete(eventLog).where(lt(eventLog.at, cutoff));
+
+  await db.delete(eventLog).where(lt(eventLog.at, now - 30 * 86400));
+
+  // Cache d'analyses : les entrées périmées ne sont jamais servies — le filtre
+  // d'expiration est dans la requête de lecture — mais elles occupent de la
+  // place dans les 5 Go offerts. Une passe par nuit suffit.
+  await db.delete(aiCache).where(lt(aiCache.expiresAt, now));
+
+  // Journal des analyses : même durée que le journal d'événements. Les preuves
+  // partent avec, sans quoi elles resteraient orphelines.
+  const cutoff = now - 30 * 86400;
+  const perimes = await db
+    .select({ id: aiRun.id })
+    .from(aiRun)
+    .where(lt(aiRun.startedAt, cutoff))
+    .limit(500);
+
+  if (perimes.length > 0) {
+    const ids = perimes.map((r) => r.id);
+    await db.delete(aiEvidence).where(inArray(aiEvidence.runId, ids));
+    await db.delete(aiFeedback).where(inArray(aiFeedback.runId, ids));
+    await db.delete(aiRun).where(inArray(aiRun.id, ids));
+  }
+
+  // Travaux différés : sept jours suffisent, l'interface ne remonte pas plus
+  // loin et un résultat d'analyse vieux d'une semaine est de toute façon faux.
+  await db.delete(aiJob).where(lt(aiJob.createdAt, now - 7 * 86400));
 }
 
 /**

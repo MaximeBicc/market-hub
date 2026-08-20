@@ -2,8 +2,18 @@ import { drizzle } from "drizzle-orm/d1";
 import { and, eq, sql } from "drizzle-orm";
 import { getConnector } from "@hub/connectors";
 import { ConnectorError } from "@hub/core";
+import { NoFreeModelError } from "@hub/ai";
 import type { QueueTask, SyncTask, UnifiedListing, UnifiedOrder } from "@hub/core";
-import { eventLog, listing, order, orderLine, shop, syncJob } from "./db/schema.js";
+import {
+  aiJob,
+  eventLog,
+  listing,
+  order,
+  orderLine,
+  shop,
+  syncJob,
+} from "./db/schema.js";
+import { buildAi } from "./ai/module.js";
 import type { Env } from "./env.js";
 import { contentHash, randomId } from "./lib/crypto.js";
 import { createHttp, SubrequestBudgetExceeded } from "./lib/http.js";
@@ -63,6 +73,8 @@ async function handleTask(
       return runWebhook(env, task, counter);
     case "write":
       return runWrite(env, task, counter);
+    case "ai":
+      return runAi(env, task, counter);
   }
 }
 
@@ -305,6 +317,90 @@ async function runWrite(
       amount: task.value,
       currency: "EUR",
     });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Analyses différées du panel d'IA                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Exécute une analyse empilée par `/api/ai/jobs`.
+ *
+ * Le message ne porte qu'un identifiant : la skill et ses paramètres sont
+ * relus en base ici, au moment où le travail commence réellement.
+ *
+ * Un job déjà terminé est ignoré sans bruit. Les files garantissent « au moins
+ * une fois », jamais « exactement une fois » : sans ce garde, un message
+ * livré deux fois consommerait deux fois l'allocation gratuite pour produire
+ * exactement le même résultat.
+ */
+async function runAi(
+  env: Env,
+  task: Extract<QueueTask, { kind: "ai" }>,
+  counter: { used: number },
+): Promise<void> {
+  const db = drizzle(env.DB);
+  const [job] = await db.select().from(aiJob).where(eq(aiJob.id, task.jobId)).limit(1);
+
+  // Un travail déjà classé n'est jamais rejoué, qu'il ait réussi ou échoué.
+  // Les files garantissent « au moins une fois », jamais « exactement une
+  // fois » : sans ce garde, un message livré deux fois consommerait deux fois
+  // l'allocation gratuite pour produire exactement le même résultat.
+  if (!job || job.status === "success" || job.status === "failed") return;
+
+  // Réservation prudente : l'appel au modèle et un éventuel ancrage web
+  // comptent dans le budget de 50 sous-requêtes de cette invocation.
+  counter.used += 3;
+
+  const now = Math.floor(Date.now() / 1000);
+  await db
+    .update(aiJob)
+    .set({ status: "running", startedAt: now })
+    .where(eq(aiJob.id, task.jobId));
+
+  try {
+    const outcome = await buildAi(env).run({
+      skill: job.skill,
+      input: JSON.parse(job.input) as unknown,
+      automatic: job.automatic === 1,
+    });
+
+    await db
+      .update(aiJob)
+      .set({
+        status: "success",
+        result: JSON.stringify(outcome),
+        finishedAt: Math.floor(Date.now() / 1000),
+      })
+      .where(eq(aiJob.id, task.jobId));
+  } catch (err) {
+    /**
+     * ON N'INSISTE JAMAIS, et c'est délibéré.
+     *
+     * Le réflexe habituel — laisser la file réessayer trois fois — coûterait
+     * ici de l'argent sans rien apporter. Quand cette erreur remonte,
+     * l'orchestrateur a déjà tenté tous les modèles autorisés, chacun ayant pu
+     * consommer des neurones au passage. Un réessai rejouerait la même
+     * cascade : jusqu'à quatre appels de plus, pour la même issue.
+     *
+     * Quota épuisé, en particulier, n'est pas une panne : il n'existe aucun
+     * repli payant à déclencher, et rien ne changera avant minuit UTC.
+     *
+     * On classe donc le travail et on acquitte le message. L'interface montre
+     * l'échec, et c'est à l'utilisateur de relancer s'il le souhaite.
+     */
+    await db
+      .update(aiJob)
+      .set({
+        status: "failed",
+        error: (err instanceof NoFreeModelError ? "quota_gratuit_epuise" : String(err)).slice(
+          0,
+          500,
+        ),
+        finishedAt: Math.floor(Date.now() / 1000),
+      })
+      .where(eq(aiJob.id, task.jobId));
   }
 }
 

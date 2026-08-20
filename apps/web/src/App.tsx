@@ -7,6 +7,7 @@ import { Overview } from "./pages/Overview.js";
 import { Orders } from "./pages/Orders.js";
 import { Inventory } from "./pages/Inventory.js";
 import { Growth } from "./pages/Growth.js";
+import { Analyse } from "./pages/Analyse.js";
 import { Shops } from "./pages/Shops.js";
 import { Settings } from "./pages/Settings.js";
 import { Icon } from "./components/Icon.js";
@@ -28,6 +29,7 @@ const NAV = [
   { to: "/orders", label: "Commandes", icon: "orders" as const, end: false },
   { to: "/inventory", label: "Stock", icon: "box" as const, end: false },
   { to: "/growth", label: "Croissance", icon: "chart" as const, end: false },
+  { to: "/analyse", label: "Analyse", icon: "sparkle" as const, end: false },
   { to: "/shops", label: "Boutiques", icon: "shops" as const, end: false },
 ];
 
@@ -36,6 +38,7 @@ const TITLES: Record<string, string> = {
   "/orders": "Commandes",
   "/inventory": "Stock",
   "/growth": "Croissance",
+  "/analyse": "Analyse",
   "/shops": "Boutiques",
   "/settings": "Réglages",
 };
@@ -44,6 +47,27 @@ interface AuthState {
   authenticated: boolean;
   username: string | null;
   displayName: string | null;
+}
+
+/**
+ * Analyses en cours, vues depuis n'importe quel écran.
+ *
+ * Interrogé au serveur et non lu dans le stockage du navigateur : une analyse
+ * lancée depuis le téléphone doit se signaler sur l'ordinateur. C'est tout
+ * l'intérêt de la faire tourner sur Cloudflare plutôt que dans l'onglet.
+ *
+ * React Query suspend l'intervalle quand la fenêtre n'a pas le focus : une
+ * application posée sur le bureau n'interroge rien.
+ */
+function useTravauxEnCours(actif: boolean): number {
+  const { data } = useQuery({
+    queryKey: ["ai-jobs-running"],
+    queryFn: () => api.get<{ jobs: unknown[] }>("/ai/jobs"),
+    refetchInterval: 20_000,
+    enabled: actif,
+    retry: false,
+  });
+  return data?.jobs.length ?? 0;
 }
 
 export function App() {
@@ -62,6 +86,7 @@ export function App() {
   }, []);
 
   const location = useLocation();
+  const travaux = useTravauxEnCours(Boolean(auth?.authenticated));
 
   if (isLoading) return <div className="boot">…</div>;
   if (!auth?.authenticated) return <Login />;
@@ -92,6 +117,7 @@ export function App() {
             <NavLink key={n.to} to={n.to} end={n.end} className="side-link">
               <Icon name={n.icon} />
               {n.label}
+              {n.to === "/analyse" && travaux > 0 && <Pastille n={travaux} />}
             </NavLink>
           ))}
           <NavLink to="/settings" className="side-link">
@@ -119,6 +145,7 @@ export function App() {
             <Route path="/orders" element={<Orders />} />
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/growth" element={<Growth />} />
+            <Route path="/analyse" element={<Analyse />} />
             <Route path="/shops" element={<Shops />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -129,7 +156,10 @@ export function App() {
         <nav className="tabbar" aria-label="Navigation principale">
           {NAV.map((n) => (
             <NavLink key={n.to} to={n.to} end={n.end} className="tab">
-              <Icon name={n.icon} />
+              <span className="tab__icon">
+                <Icon name={n.icon} />
+                {n.to === "/analyse" && travaux > 0 && <Pastille n={travaux} />}
+              </span>
               {n.label}
             </NavLink>
           ))}
@@ -138,5 +168,14 @@ export function App() {
 
       <Toast />
     </>
+  );
+}
+
+/** Compteur discret : une analyse tourne, il y a quelque chose à venir chercher. */
+function Pastille({ n }: { n: number }) {
+  return (
+    <span className="pastille" aria-label={`${n} analyse${n > 1 ? "s" : ""} en cours`}>
+      {n}
+    </span>
   );
 }

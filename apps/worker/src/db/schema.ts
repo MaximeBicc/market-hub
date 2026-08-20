@@ -2,7 +2,9 @@ import {
   sqliteTable,
   text,
   integer,
+  real,
   index,
+  primaryKey,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
@@ -366,4 +368,123 @@ export const commandLog = sqliteTable(
     index("command_log_at_idx").on(t.at),
     index("command_log_key_idx").on(t.idempotencyKey),
   ],
+);
+
+/* ------------------------------------------------------------------ */
+/* Panel d'IA                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Consommation quotidienne par modèle.
+ *
+ * `neurons` est la colonne qui rend le « zéro euro » vérifiable plutôt que
+ * déclaratif : Cloudflare offre 10 000 neurones par jour, et sans compteur on
+ * ne sait ni ce qu'il en reste, ni qu'une comparaison d'images en coûte dix
+ * fois plus qu'une classification.
+ */
+export const aiUsage = sqliteTable(
+  "ai_usage",
+  {
+    /** AAAA-MM-JJ UTC — la journée telle que Cloudflare la remet à zéro. */
+    day: text("day").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    requests: integer("requests").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    /** Fractionnaire : Workers AI facture 7,0213 neurones, pas 7. */
+    neurons: real("neurons").notNull().default(0),
+    searchRequests: integer("search_requests").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.day, t.provider, t.model] })],
+);
+
+/** Cache des résultats de skills. En base et non en KV : voir migration 0003. */
+export const aiCache = sqliteTable(
+  "ai_cache",
+  {
+    key: text("key").primaryKey(),
+    value: text("value").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+  },
+  (t) => [index("ai_cache_expires_idx").on(t.expiresAt)],
+);
+
+/** Une ligne par analyse réellement calculée. Le cache n'en crée aucune. */
+export const aiRun = sqliteTable(
+  "ai_run",
+  {
+    id: text("id").primaryKey(),
+    skill: text("skill").notNull(),
+    skillVersion: text("skill_version").notNull(),
+    status: text("status").notNull(), // running | success | failed
+    dataClass: text("data_class").notNull(),
+    impact: text("impact").notNull(),
+    automatic: integer("automatic").notNull().default(0),
+    inputHash: text("input_hash").notNull(),
+    provider: text("provider"),
+    model: text("model"),
+    confidence: real("confidence"),
+    neurons: real("neurons").notNull().default(0),
+    sourceCount: integer("source_count").notNull().default(0),
+    error: text("error"),
+    startedAt: integer("started_at").notNull(),
+    finishedAt: integer("finished_at"),
+  },
+  (t) => [
+    index("ai_run_started_idx").on(t.startedAt),
+    index("ai_run_skill_idx").on(t.skill, t.startedAt),
+  ],
+);
+
+/** D'où vient un prix montré à l'utilisateur. Sans URL ni date, il ne s'affiche pas. */
+export const aiEvidence = sqliteTable(
+  "ai_evidence",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull().references(() => aiRun.id),
+    url: text("url").notNull(),
+    title: text("title"),
+    kind: text("kind").notNull(),
+    observedAt: text("observed_at").notNull(),
+    snippet: text("snippet"),
+    price: integer("price"), // centimes
+    currency: text("currency"),
+    reliability: real("reliability"),
+  },
+  (t) => [index("ai_evidence_run_idx").on(t.runId)],
+);
+
+/** Analyses différées, empilées dans la file existante. */
+export const aiJob = sqliteTable(
+  "ai_job",
+  {
+    id: text("id").primaryKey(),
+    skill: text("skill").notNull(),
+    status: text("status").notNull(), // queued | running | success | failed
+    automatic: integer("automatic").notNull().default(0),
+    input: text("input").notNull(), // JSON
+    result: text("result"), // JSON
+    error: text("error"),
+    createdAt: integer("created_at").notNull(),
+    startedAt: integer("started_at"),
+    finishedAt: integer("finished_at"),
+  },
+  (t) => [index("ai_job_status_idx").on(t.status, t.createdAt)],
+);
+
+/**
+ * Retour de l'utilisateur sur une analyse.
+ * Seule mesure de qualité qui ne vienne pas du modèle lui-même.
+ */
+export const aiFeedback = sqliteTable(
+  "ai_feedback",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull().references(() => aiRun.id),
+    verdict: text("verdict").notNull(), // utile | partiel | inutile
+    reason: text("reason"),
+    at: integer("at").notNull(),
+  },
+  (t) => [index("ai_feedback_run_idx").on(t.runId)],
 );

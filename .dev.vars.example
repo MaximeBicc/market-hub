@@ -30,5 +30,39 @@ EBAY_RU_NAME=
 ALIBABA_APP_KEY=
 ALIBABA_APP_SECRET=
 
-# Claude (seul poste payant du projet) : https://console.anthropic.com
-ANTHROPIC_API_KEY=
+# ------------------------------------------------------------------
+# Panel d'IA : fournisseurs gratuits complementaires
+# ------------------------------------------------------------------
+# TOUT EST OPTIONNEL ICI. Sans aucune de ces cles, le panel tourne sur
+# Cloudflare Workers AI seul, dans son allocation gratuite de 10 000
+# neurones par jour. Il perd seulement la recherche web.
+#
+# Aucun de ces comptes ne demande de carte bancaire, et le code n'a aucun
+# repli payant : quand un quota gratuit est epuise, l'appel echoue et
+# l'interface le dit.
+
+# Gemini : https://aistudio.google.com/apikey
+# SEULE route de recherche web du panel. Reserve : le palier gratuit
+# autorise Google a utiliser le contenu envoye — le panel ne lui transmet
+# donc jamais de texte ecrit par un acheteur.
+GEMINI_API_KEY=
+
+# Groq : https://console.groq.com/keys
+# Repli texte tres rapide. 1 000 appels/jour sur gpt-oss-120b.
+GROQ_API_KEY=
+
+# OpenRouter : https://openrouter.ai/keys
+# Dernier recours. 50 appels/jour seulement, echecs compris.
+# Sans OPENROUTER_MODEL explicite, le fournisseur n'entre pas au catalogue :
+# le catalogue gratuit d'OpenRouter tourne, et un identifiant code en dur
+# finirait par designer un modele disparu ou un homonyme payant.
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=
+
+# Modeles, surchargeables sans toucher au code (facultatif).
+# ATTENTION sur GEMINI_RESEARCH_MODEL : la generation 2.5 est retenue parce
+# que son ancrage Google Search reste gratuit a 1 500 requetes par JOUR. Sur
+# la generation 3.x, l'offre tombe a 5 000 par MOIS puis devient payante.
+# GEMINI_GENERAL_MODEL=gemini-3.7-flash
+# GEMINI_RESEARCH_MODEL=gemini-2.5-flash
+# GROQ_MODEL=openai/gpt-oss-120b

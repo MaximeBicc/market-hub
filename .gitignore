@@ -22,3 +22,11 @@ dist/
 .DS_Store
 Thumbs.db
 .accounts.tmp.json
+
+# Cache de compilation incrementale de TypeScript.
+#
+# Genere, propre a chaque machine, et reecrit a chaque `tsc -b`. Le versionner
+# n'apporte rien et cree un conflit de fusion a chaque fois que deux branches
+# ont compile : c'est exactement ce qui est arrive entre `main` et `panel-ia`,
+# ou ce fichier etait le SEUL conflit de toute la fusion.
+*.tsbuildinfo

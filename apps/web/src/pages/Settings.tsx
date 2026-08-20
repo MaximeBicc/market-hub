@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api.js";
+import type { PanelHealth } from "../lib/ai.js";
 import { checkPushStatus, subscribeToPush, type PushStatus } from "../lib/push.js";
 import { Icon } from "../components/Icon.js";
 import { toast } from "../components/Toast.js";
 
 /**
- * Réglages : compte, mot de passe, notifications, IA, feuille de route.
+ * Réglages : compte, mot de passe, notifications, panel d'IA, feuille de route.
  *
  * La section « à construire » est volontairement présente. Un produit qui
  * cache ce qu'il ne sait pas encore faire pousse à le redécouvrir écran par
@@ -23,15 +24,6 @@ export function Settings() {
     queryFn: () =>
       api.get<{ username: string; displayName: string }>("/auth/state"),
   });
-  const { data: usage } = useQuery({
-    queryKey: ["ai-usage"],
-    queryFn: () =>
-      api.get<{ outputTokensUsed: number; limit: number; estimatedCostUsd: string }>(
-        "/ai/usage",
-      ),
-    retry: false,
-  });
-
   return (
     <>
       <div className="page-head">
@@ -102,26 +94,7 @@ export function Settings() {
         )}
       </div>
 
-      <h2 className="sec">Assistant IA</h2>
-      <div className="card">
-        {usage ? (
-          <>
-            <span className="stat__l">Consommation du mois</span>
-            <span className="stat__v">
-              {usage.outputTokensUsed.toLocaleString("fr-FR")}
-            </span>
-            <span className="stat__d">
-              sur {usage.limit.toLocaleString("fr-FR")} jetons — environ{" "}
-              {usage.estimatedCostUsd} $
-            </span>
-          </>
-        ) : (
-          <p className="muted" style={{ margin: 0 }}>
-            Non configuré. C'est le seul poste payant du projet, et il est
-            optionnel : le plafond mensuel est appliqué côté serveur.
-          </p>
-        )}
-      </div>
+      <PanelIA />
 
       <h2 className="sec">Prévu, pas encore construit</h2>
       <div className="card planned" style={{ display: "grid", gap: 12 }}>
@@ -130,7 +103,10 @@ export function Settings() {
           ["Produit maître", "Un produit, plusieurs annonces : propagation du stock entre canaux."],
           ["Rentabilité par commande", "Marge réelle après frais de plateforme, port et achat."],
           ["Suivi des colis", "État des expéditions et retours, toutes plateformes confondues."],
-          ["Avis et messages", "Centralisation des avis clients et des messages acheteurs."],
+          [
+            "Avis et messages",
+            "Centralisation des avis clients et des messages acheteurs. C'est aussi ce qui manque au panel d'IA pour trier et étiqueter automatiquement : sans table de messages, ces analyses n'ont rien à lire.",
+          ],
           ["Calendrier", "Échéances, arrivées de conteneurs, opérations commerciales."],
         ].map(([t, d]) => (
           <div key={t}>
@@ -244,5 +220,110 @@ function ChangePassword() {
         vous le stockez dans un gestionnaire.
       </p>
     </form>
+  );
+}
+
+/**
+ * État du panel d'IA.
+ *
+ * Ce qui est affiché : quels fournisseurs répondent, et ce qu'il reste
+ * d'allocation gratuite aujourd'hui. Ce qui ne l'est jamais : la moindre clé,
+ * même tronquée. Une clé partiellement affichée reste une clé divulguée, et le
+ * serveur ne la renvoie de toute façon pas.
+ */
+function PanelIA() {
+  const { data: health } = useQuery({
+    queryKey: ["ai-health"],
+    queryFn: () => api.get<PanelHealth>("/ai/health"),
+    retry: false,
+  });
+
+  if (!health) {
+    return (
+      <>
+        <h2 className="sec">Panel d'IA</h2>
+        <div className="card">
+          <p className="muted" style={{ margin: 0 }}>
+            État indisponible.
+          </p>
+        </div>
+      </>
+    );
+  }
+
+  const { consommes, alloues, restants, equivalentUsd } = health.neurones;
+
+  return (
+    <>
+      <h2 className="sec">
+        Panel d'IA <span>coût zéro</span>
+      </h2>
+
+      <div className="card">
+        <span className="stat__l">Allocation gratuite du jour</span>
+        <span className="stat__v">
+          {restants.toLocaleString("fr-FR")}
+          <span className="muted" style={{ fontSize: 13 }}>
+            {" "}
+            / {alloues.toLocaleString("fr-FR")} neurones
+          </span>
+        </span>
+        <span className="stat__d">
+          {consommes.toLocaleString("fr-FR")} consommés, soit environ{" "}
+          {equivalentUsd.toFixed(3)} $ d'inférence — jamais facturés sur le plan
+          Workers gratuit. Remise à zéro à minuit UTC.
+        </span>
+      </div>
+
+      <div className="rows" style={{ marginTop: 9 }}>
+        {health.fournisseurs.map((f) => (
+          <div className="row" key={f.id}>
+            <span className="mono-badge">{f.id.slice(0, 2).toUpperCase()}</span>
+            <div className="row__main">
+              <div className="row__t">{f.id}</div>
+              <div className="row__s">
+                {f.configure
+                  ? f.modeles.join(", ") || "aucun modèle au catalogue"
+                  : "clé absente — ce fournisseur n'est jamais tenté"}
+              </div>
+            </div>
+            <div className="row__end">
+              {f.configure ? (
+                <>
+                  <span className="amount">{f.appelsAujourdhui}</span>
+                  <span className="muted">
+                    {f.plafond === null ? "sans plafond d'appels" : `/ ${f.plafond} aujourd'hui`}
+                  </span>
+                </>
+              ) : (
+                <span className="pill pill--mute">non configuré</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card" style={{ marginTop: 9 }}>
+        <span className="stat__l">Recherche web</span>
+        <span className="stat__v">
+          {health.rechercheWeb.consommees}
+          <span className="muted" style={{ fontSize: 13 }}>
+            {" "}
+            / {health.rechercheWeb.plafond}
+          </span>
+        </span>
+        <span className="stat__d">
+          Dont {health.rechercheWeb.reserveManuelle} réservées à vos demandes :
+          une nuit d'analyse automatique ne peut pas vider le quota avant votre
+          première recherche du matin.
+        </span>
+      </div>
+
+      <p className="muted" style={{ marginTop: 10, lineHeight: 1.55 }}>
+        Aucun fournisseur payant n'existe dans le code. Quand une allocation
+        gratuite est épuisée, l'analyse échoue et le dit — il n'y a rien vers
+        quoi basculer, et c'est ce qui garantit le coût nul.
+      </p>
+    </>
   );
 }
