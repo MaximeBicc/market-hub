@@ -7,6 +7,7 @@ import { authenticate } from "../lib/session.js";
 import { contentHash, randomId } from "../lib/crypto.js";
 import { buildEngine } from "../engine/module.js";
 import { d1Repositories } from "../engine/repositories.js";
+import { ensureSyncJobs } from "../engine/sync.js";
 
 /**
  * Connexion des comptes marchands.
@@ -205,6 +206,11 @@ accounts.post("/shopify", async (c) => {
   }
 
   await db.update(shop).set({ status: "active" }).where(eq(shop.id, accountId));
+
+  // Les tâches périodiques sont créées ici et pas ailleurs : une boutique
+  // connectée mais absente de l'ordonnanceur ne se synchronise jamais, sans
+  // que rien ne le signale. Leur cadence dépend des capacités déclarées.
+  await ensureSyncJobs(c.env, accountId);
 
   // Le jeton ne figure PAS dans la réponse. Il est entré, il ne ressort plus.
   return c.json({
@@ -522,6 +528,9 @@ accounts.post("/:id/import", async (c) => {
     // Une portée manquante sur les commandes ne doit pas annuler l'import
     // du catalogue, qui lui a réussi.
   }
+
+  // Après un import, la synchronisation doit prendre le relais.
+  await ensureSyncJobs(c.env, id);
 
   return c.json({
     ok: true,

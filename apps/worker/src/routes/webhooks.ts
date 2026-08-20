@@ -1,11 +1,11 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq } from "drizzle-orm";
-import { getConnector } from "@hub/connectors";
-import { PLATFORMS, type Platform, type QueueTask } from "@hub/core";
-import { shop, webhookReceipt } from "../db/schema.js";
-import { credentialsFor, type Env } from "../env.js";
-import { contentHash } from "../lib/crypto.js";
+import { eq } from "drizzle-orm";
+import type { CanonicalOrderEvent } from "@hub/engine";
+import { shop } from "../db/schema.js";
+import type { Env } from "../env.js";
+import { buildEngine } from "../engine/module.js";
+import { d1Repositories } from "../engine/repositories.js";
 
 /**
  * Réception des webhooks — les seules routes PUBLIQUES de l'application.
@@ -33,58 +33,68 @@ import { contentHash } from "../lib/crypto.js";
 export const webhooks = new Hono<{ Bindings: Env }>();
 
 webhooks.post("/:platform", async (c) => {
-  const platform = c.req.param("platform") as Platform;
-  if (!PLATFORMS.includes(platform)) return c.text("Not found", 404);
-
-  const connector = getConnector(platform);
+  const platform = c.req.param("platform");
   const rawBody = await c.req.text(); // lu une fois, jamais re-sérialisé
-  const creds = credentialsFor(c.env, platform);
-
-  const valid = await connector.verifyWebhook({
-    creds,
-    headers: c.req.raw.headers,
-    rawBody,
-  });
-  if (!valid) return c.text("Unauthorized", 401);
-
-  const event = connector.parseWebhook({
-    headers: c.req.raw.headers,
-    rawBody,
-  });
-  if (!event) return c.text("OK", 200); // sujet non géré : on acquitte quand même
 
   const db = drizzle(c.env.DB);
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const mod = buildEngine(c.env);
 
-  const found = await db
+  if (!mod.registry.has(platform)) return c.text("Not found", 404);
+  const adapter = mod.registry.get(platform);
+  if (!adapter.verifyAndParseWebhook) return c.text("OK", 200);
+
+  /**
+   * Le webhook n'identifie pas le compte de façon exploitable avant
+   * vérification : on essaie donc chaque compte de cette plateforme, et la
+   * signature elle-même désigne le bon. Avec une poignée de comptes c'est
+   * négligeable ; et surtout, aucune signature n'est acceptée sur la foi
+   * d'un en-tête que l'appelant contrôle.
+   */
+  const candidats = await db
     .select({ id: shop.id })
     .from(shop)
-    .where(
-      and(eq(shop.platform, platform), eq(shop.externalId, event.externalShopId)),
-    )
-    .limit(1);
+    .where(eq(shop.platform, platform));
 
-  const shopRow = found[0];
-  if (!shopRow) return c.text("OK", 200); // boutique déconnectée : on ignore
+  let events: CanonicalOrderEvent[] | null = null;
+  let accountId: string | null = null;
 
-  // Déduplication : la clé primaire fait le travail, un doublon lève un conflit.
-  const receiptId = await contentHash({ p: platform, e: event.eventId });
-  try {
-    await db.insert(webhookReceipt).values({
-      id: receiptId,
-      shopId: shopRow.id,
-      topic: event.topic,
-      receivedAt: Math.floor(Date.now() / 1000),
-    });
-  } catch {
-    return c.text("OK", 200); // déjà traité
+  for (const cand of candidats) {
+    const account = await repos.accounts.get(cand.id);
+    if (!account) continue;
+    try {
+      const parsed = await adapter.verifyAndParseWebhook(
+        { account, credentials: await repos.credentials.get(cand.id) },
+        c.req.raw,
+        rawBody,
+      );
+      events = parsed;
+      accountId = cand.id;
+      break;
+    } catch {
+      // Signature invalide pour ce compte : on essaie le suivant.
+    }
   }
 
+  // Aucun compte n'a reconnu la signature. On ne dit pas pourquoi : indiquer
+  // à un attaquant ce qui n'allait pas dans sa signature l'aiderait.
+  if (!events || !accountId) return c.text("Unauthorized", 401);
+  if (events.length === 0) return c.text("OK", 200);
+
+  /**
+   * On empile plutôt que de traiter ici. Shopify considère le webhook comme
+   * échoué au-delà d'environ cinq secondes et finit par désactiver
+   * l'abonnement ; or la propagation vers les autres canaux prend des appels
+   * réseau. Vérifier puis rendre la main est la seule tenue possible.
+   */
   await c.env.SYNC_QUEUE.send({
     kind: "webhook",
-    shopId: shopRow.id,
-    topic: event.topic,
-    payload: rawBody,
-  } satisfies QueueTask);
+    shopId: accountId,
+    topic: c.req.header("X-Shopify-Topic") ?? platform,
+    // Le corps transporté est l'événement CANONIQUE, déjà vérifié : le
+    // consommateur n'a plus de signature à contrôler.
+    payload: JSON.stringify(events),
+  });
 
   return c.text("OK", 200);
 });

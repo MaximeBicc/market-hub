@@ -9,6 +9,9 @@ import { contentHash, randomId } from "./lib/crypto.js";
 import { createHttp, SubrequestBudgetExceeded } from "./lib/http.js";
 import { getValidAccessToken } from "./lib/tokens.js";
 import { evaluateAlerts } from "./lib/alerts.js";
+import { runEngineSync } from "./engine/sync.js";
+import { buildEngine } from "./engine/module.js";
+import type { CanonicalOrderEvent } from "@hub/engine";
 import type { RateLimiter } from "./do/rate-limiter.js";
 
 /**
@@ -73,62 +76,21 @@ function limiterFor(env: Env, shopId: string): DurableObjectStub<RateLimiter> {
 /* Synchronisation                                                     */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Synchronisation — déléguée au moteur.
+ *
+ * L'ancienne implémentation lisait la plateforme et écrivait en base, sans
+ * plus. Le moteur, lui, fait entrer chaque vente par le point d'entrée
+ * canonique : elle est dédupliquée, elle décrémente le stock central, et
+ * elle est PROPAGÉE aux autres canaux. C'est toute la différence entre un
+ * tableau de bord et un outil qui empêche de survendre.
+ */
 async function runSync(
   env: Env,
   task: SyncTask,
   counter: { used: number },
 ): Promise<void> {
-  const db = drizzle(env.DB);
-  const limiter = limiterFor(env, task.shopId);
-  const resolved = await getValidAccessToken(env, task.shopId, limiter);
-  const connector = getConnector(resolved.platform);
-
-  const ctx = {
-    shopId: resolved.id,
-    externalId: resolved.externalId,
-    accessToken: resolved.accessToken,
-    config: resolved.config,
-    http: createHttp({
-      limiter,
-      limits: connector.limits,
-      counter,
-      platform: resolved.platform,
-    }),
-  };
-
-  let nextCursor: string | null = null;
-
-  if (task.resource === "orders") {
-    const page = await connector.fetchOrders(ctx, task.cursor);
-    const changed = await upsertOrders(env, task.shopId, page.items);
-    if (changed.length) await evaluateAlerts(env, task.shopId, { orders: changed });
-    nextCursor = page.nextCursor;
-  } else {
-    // "listings" et "inventory" partagent la même lecture ; seule la fréquence
-    // et la profondeur de pagination changent.
-    const page = await connector.fetchListings(ctx, task.cursor);
-    const changed = await upsertListings(env, task.shopId, page.items);
-    if (changed.length) await evaluateAlerts(env, task.shopId, { listings: changed });
-    nextCursor = task.resource === "inventory" ? null : page.nextCursor;
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-
-  // Page suivante : nouveau message, budget neuf.
-  if (nextCursor && task.depth < MAX_PAGE_DEPTH) {
-    await env.SYNC_QUEUE.send({ ...task, cursor: nextCursor, depth: task.depth + 1 });
-    await db
-      .update(syncJob)
-      .set({ cursor: nextCursor, lastRunAt: now })
-      .where(and(eq(syncJob.shopId, task.shopId), eq(syncJob.resource, task.resource)));
-    return;
-  }
-
-  // Fin du parcours : on repart du début au prochain cycle et on efface l'échec.
-  await db
-    .update(syncJob)
-    .set({ cursor: null, lastOkAt: now, failureCount: 0, lastError: null })
-    .where(and(eq(syncJob.shopId, task.shopId), eq(syncJob.resource, task.resource)));
+  return runEngineSync(env, task, counter);
 }
 
 /* ------------------------------------------------------------------ */
@@ -295,39 +257,23 @@ async function upsertOrders(
 /* Webhooks et écritures sortantes                                     */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Webhook déjà vérifié et traduit par la route.
+ *
+ * Le corps transporte des événements canoniques, pas la charge utile brute :
+ * la signature a été contrôlée au moment de la réception, sur le corps
+ * original. La refaire ici serait impossible — re-sérialiser le JSON casse le
+ * HMAC — et inutile.
+ */
 async function runWebhook(
   env: Env,
   task: Extract<QueueTask, { kind: "webhook" }>,
-  counter: { used: number },
+  _counter: { used: number },
 ): Promise<void> {
-  const limiter = limiterFor(env, task.shopId);
-  const resolved = await getValidAccessToken(env, task.shopId, limiter);
-  const connector = getConnector(resolved.platform);
-
-  const result = await connector.applyWebhook(
-    {
-      shopId: resolved.id,
-      externalId: resolved.externalId,
-      accessToken: resolved.accessToken,
-      config: resolved.config,
-      http: createHttp({
-        limiter,
-        limits: connector.limits,
-        counter,
-        platform: resolved.platform,
-      }),
-    },
-    task.topic,
-    task.payload,
-  );
-
-  if (result.orders?.length) {
-    const changed = await upsertOrders(env, task.shopId, result.orders);
-    if (changed.length) await evaluateAlerts(env, task.shopId, { orders: changed });
-  }
-  if (result.listings?.length) {
-    const changed = await upsertListings(env, task.shopId, result.listings);
-    if (changed.length) await evaluateAlerts(env, task.shopId, { listings: changed });
+  const events = JSON.parse(task.payload) as CanonicalOrderEvent[];
+  const mod = buildEngine(env);
+  for (const event of events) {
+    await mod.salesSync.ingest(event);
   }
 }
 
