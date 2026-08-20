@@ -1,6 +1,7 @@
 import type {
   CapabilitySet,
   CanonicalOrderEvent,
+  FulfillmentInput,
   Listing,
   MarketplaceAccount,
   MarketplaceId,
@@ -73,6 +74,20 @@ export interface MarketplaceAdapter {
   deactivateListing(
     ctx: MarketplaceContext,
     listing: Listing,
+    idempotencyKey: string,
+  ): Promise<TargetResult>;
+
+  /**
+   * Marque une commande expédiée, avec éventuellement un numéro de suivi.
+   *
+   * Volontairement OBLIGATOIRE et non optionnelle : chaque adaptateur doit
+   * prendre position explicitement. Une méthode absente se remarque moins
+   * qu'un `manual_required` assumé, et c'est ainsi qu'une plateforme se
+   * retrouve sans expédition sans que personne s'en aperçoive.
+   */
+  markShipped(
+    ctx: MarketplaceContext,
+    input: FulfillmentInput,
     idempotencyKey: string,
   ): Promise<TargetResult>;
 

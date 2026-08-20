@@ -130,6 +130,10 @@ export interface CapabilitySet {
   priceRead: boolean;
   priceWrite: boolean;
   ordersRead: boolean;
+  /** Marquer une commande expédiée chez la plateforme. */
+  ordersFulfill: boolean;
+  /** Poser un numéro de suivi. Certaines plateformes acceptent l'un sans l'autre. */
+  trackingWrite: boolean;
   /** Comment les ventes entrantes arrivent, si elles arrivent. */
   inboundSales: "webhook" | "poll" | "both" | "manual" | "none";
   messagesRead?: boolean | undefined;
@@ -160,3 +164,31 @@ export type TargetResult = {
   remoteId?: string | undefined;
   message?: string | undefined;
 };
+
+/**
+ * Expédition d'une commande.
+ *
+ * Contrairement aux commandes de catalogue, celle-ci ne se diffuse pas : une
+ * commande n'existe que sur une plateforme. On vise donc un compte précis.
+ *
+ * `lines` vide signifie « tout le contenu de la commande ». Les expéditions
+ * partielles existent (rupture sur un article), et les plateformes les gèrent
+ * différemment : Shopify passe par des « fulfillment orders », eBay par une
+ * simple mise à jour. Le contrat expose l'intention, l'adaptateur traduit.
+ */
+export interface FulfillmentInput {
+  remoteOrderId: string;
+  trackingNumber?: string | undefined;
+  /** Transporteur, tel que la plateforme l'attend (« Colissimo », « DHL »...). */
+  carrier?: string | undefined;
+  trackingUrl?: string | undefined;
+  lines?:
+    | Array<{
+        remoteLineId?: string | undefined;
+        sku?: string | undefined;
+        quantity: number;
+      }>
+    | undefined;
+  /** Prévenir l'acheteur par e-mail. Vrai par défaut chez la plupart des plateformes. */
+  notifyBuyer?: boolean | undefined;
+}

@@ -1,5 +1,6 @@
 import type {
   CapabilitySet,
+  FulfillmentInput,
   Listing,
   Money,
   Product,
@@ -22,7 +23,13 @@ import type {
  * « le stock a bien été propagé vers ce compte-là, avec cette valeur-là ».
  */
 export interface MockCall {
-  op: "createListing" | "updatePrice" | "updateStock" | "activate" | "deactivate";
+  op:
+    | "createListing"
+    | "updatePrice"
+    | "updateStock"
+    | "activate"
+    | "deactivate"
+    | "markShipped";
   accountId: string;
   idempotencyKey: string;
   value?: number | Money;
@@ -50,6 +57,8 @@ export class MockAdapter implements MarketplaceAdapter {
       priceRead: true,
       priceWrite: true,
       ordersRead: true,
+      ordersFulfill: true,
+      trackingWrite: true,
       inboundSales: "both",
       ...this.caps,
     };
@@ -133,5 +142,18 @@ export class MockAdapter implements MarketplaceAdapter {
       idempotencyKey,
     });
     return this.ok(ctx);
+  }
+
+  async markShipped(
+    ctx: MarketplaceContext,
+    input: FulfillmentInput,
+    idempotencyKey: string,
+  ): Promise<TargetResult> {
+    this.calls.push({
+      op: "markShipped",
+      accountId: ctx.account.id,
+      idempotencyKey,
+    });
+    return this.ok(ctx, input.remoteOrderId);
   }
 }

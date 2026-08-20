@@ -1,6 +1,7 @@
 import type {
   AccountId,
   CapabilitySet,
+  FulfillmentInput,
   Listing,
   Money,
   ProductId,
@@ -310,6 +311,33 @@ export class MarketplaceOrchestrator {
       return r;
     });
     await this.report("setActive", input.idempotencyKey, input.productId, outcome);
+    return outcome;
+  }
+
+  /**
+   * Marque une commande expédiée.
+   *
+   * Cible UNIQUE, contrairement aux commandes de catalogue : une commande
+   * n'existe que sur la plateforme où elle a été passée. La diffuser vers
+   * plusieurs comptes n'aurait aucun sens.
+   */
+  async fulfillOrder(input: {
+    accountId: AccountId;
+    fulfillment: FulfillmentInput;
+    idempotencyKey: string;
+  }): Promise<CommandOutcome> {
+    const need: CapabilityKey = input.fulfillment.trackingNumber
+      ? "trackingWrite"
+      : "ordersFulfill";
+
+    const outcome = await this.fanOut([input.accountId], need, (ctx, adapter) =>
+      adapter.markShipped(
+        ctx,
+        input.fulfillment,
+        `${input.idempotencyKey}:${ctx.account.id}`,
+      ),
+    );
+    await this.report("fulfillOrder", input.idempotencyKey, null, outcome);
     return outcome;
   }
 

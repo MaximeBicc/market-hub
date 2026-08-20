@@ -137,6 +137,44 @@ engine.post("/active", async (c) => {
   return c.json({ ...outcome, idempotencyKey: key });
 });
 
+/**
+ * Marque une commande expédiée, avec éventuellement un numéro de suivi.
+ *
+ * Cible unique : une commande n'existe que sur la plateforme où elle a été
+ * passée. La diffuser vers plusieurs comptes n'aurait aucun sens.
+ */
+engine.post("/fulfill", async (c) => {
+  const body = await c.req.json<{
+    accountId: string;
+    remoteOrderId: string;
+    trackingNumber?: string;
+    carrier?: string;
+    trackingUrl?: string;
+    notifyBuyer?: boolean;
+    idempotencyKey?: string;
+  }>();
+
+  if (!body?.accountId || !body?.remoteOrderId) {
+    return c.json({ error: "accountId et remoteOrderId requis" }, 400);
+  }
+  const key = body.idempotencyKey ?? crypto.randomUUID();
+
+  const mod = buildEngine(c.env);
+  const outcome = await mod.orchestrator.fulfillOrder({
+    accountId: body.accountId,
+    fulfillment: {
+      remoteOrderId: body.remoteOrderId,
+      trackingNumber: body.trackingNumber,
+      carrier: body.carrier,
+      trackingUrl: body.trackingUrl,
+      notifyBuyer: body.notifyBuyer,
+    },
+    idempotencyKey: key,
+  });
+
+  return c.json({ ...outcome, idempotencyKey: key });
+});
+
 /* ------------------------------------------------------------------ */
 /* Ventes entrantes                                                    */
 /* ------------------------------------------------------------------ */

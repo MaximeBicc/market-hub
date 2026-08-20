@@ -42,6 +42,8 @@ export class VintedSafeAdapter implements MarketplaceAdapter {
       priceRead: false,
       priceWrite: false,
       ordersRead: false,
+      ordersFulfill: false,
+      trackingWrite: false,
       inboundSales: "manual",
     };
   }
@@ -72,5 +74,8 @@ export class VintedSafeAdapter implements MarketplaceAdapter {
   }
   async deactivateListing(ctx: MarketplaceContext): Promise<TargetResult> {
     return this.manual(ctx, "retrait de l'annonce");
+  }
+  async markShipped(ctx: MarketplaceContext): Promise<TargetResult> {
+    return this.manual(ctx, "marquage de l'expédition");
   }
 }

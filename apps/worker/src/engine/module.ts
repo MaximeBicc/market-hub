@@ -1,6 +1,7 @@
 import {
   createMarketplaceModule,
   MockAdapter,
+  ShopifyAdapter,
   VintedSafeAdapter,
   type MarketplaceAdapter,
   type MarketplaceModule,
@@ -25,9 +26,12 @@ import type { RateLimiter } from "../do/rate-limiter.js";
  *   vinted       — mode sûr. Déclare ne rien savoir faire et renvoie
  *                  `manual_required` : Vinted n'a pas d'API publique, et
  *                  l'API « Vinted Pro Integrations » est sur liste blanche.
+ *   shopify      — complet : annonces, prix, stock, expédition avec suivi,
+ *                  relevé des ventes et webhooks signés. Validé par 14 tests
+ *                  sur un fetch simulé ; reste à éprouver en direct.
  *
  * À VENIR, un par un, chacun validé en interne puis en direct :
- *   shopify, etsy, ebay, allegro, tiktok_shop
+ *   ebay, allegro, etsy, tiktok_shop
  *
  * Ajouter une plateforme se fait ici et dans son fichier d'adaptateur.
  * Aucun autre fichier n'a besoin de changer — c'est tout l'intérêt du contrat.
@@ -86,7 +90,12 @@ export function buildEngine(
         );
     },
 
-    adapters: [new MockAdapter(), new VintedSafeAdapter(), ...extraAdapters],
+    adapters: [
+      new MockAdapter(),
+      new VintedSafeAdapter(),
+      new ShopifyAdapter(),
+      ...extraAdapters,
+    ],
 
     // Chaque adaptateur reçoit un fetch déjà régulé par le Durable Object de
     // son compte. C'est ce qui protège des bannissements : aucune plateforme

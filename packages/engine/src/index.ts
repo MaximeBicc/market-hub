@@ -8,4 +8,5 @@ export * from "./services/inventory-service.js";
 export * from "./services/sales-sync-service.js";
 export * from "./adapters/mock.js";
 export * from "./adapters/vinted-safe.js";
+export * from "./adapters/shopify.js";
 export * from "./testing/memory-repositories.js";
