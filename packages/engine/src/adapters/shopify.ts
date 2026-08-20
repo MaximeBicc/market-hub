@@ -52,9 +52,20 @@ function creds(ctx: MarketplaceContext): ShopifyCreds {
   return { shopDomain, accessToken };
 }
 
+/**
+ * Shopify n'a pas UNE forme d'erreur, il en a deux.
+ *
+ * Erreur GraphQL (requête acceptée mais invalide) : `errors` est un TABLEAU
+ * d'objets. Erreur d'authentification ou d'autorisation : `errors` est une
+ * simple CHAÎNE, par exemple « [API] Invalid API key or access token ».
+ *
+ * Supposer le tableau fait planter le code sur le cas d'erreur le plus
+ * fréquent — un jeton invalide — et remplace un message clair par une erreur
+ * interne incompréhensible.
+ */
 interface GqlResponse<T> {
   data?: T;
-  errors?: Array<{ message: string; extensions?: { code?: string } }>;
+  errors?: Array<{ message: string; extensions?: { code?: string } }> | string;
 }
 
 /** Erreurs métier renvoyées dans le corps d'une mutation Shopify. */
@@ -107,19 +118,34 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       },
     );
 
+    // Le fetch instrumenté lève déjà sur un code HTTP anormal, mais le fetch
+    // nu utilisé lors d'un test de connexion ne le fait pas : on vérifie ici.
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const detail = body.slice(0, 200).trim();
+      throw new Error(
+        res.status === 401 || res.status === 403
+          ? "jeton refusé (401). Vérifiez le jeton d'accès Admin API et les portées accordées."
+          : `réponse ${res.status}${detail ? ` — ${detail}` : ""}`,
+      );
+    }
+
     const json = (await res.json()) as GqlResponse<T>;
 
-    if (json.errors?.length) {
+    if (typeof json.errors === "string") {
+      throw new Error(json.errors);
+    }
+    if (Array.isArray(json.errors) && json.errors.length > 0) {
       const throttled = json.errors.some(
         (e) => e.extensions?.code === "THROTTLED",
       );
       throw new Error(
-        `${throttled ? "Débit Shopify saturé" : "Shopify"} : ${json.errors
+        `${throttled ? "Débit Shopify saturé — " : ""}${json.errors
           .map((e) => e.message)
           .join(" ; ")}`,
       );
     }
-    if (!json.data) throw new Error("Shopify : réponse sans données");
+    if (!json.data) throw new Error("réponse sans données");
     return json.data;
   }
 

@@ -410,3 +410,36 @@ describe("relevé des ventes", () => {
     expect(r.cursor).toBeUndefined();
   });
 });
+
+describe("formes d'erreur Shopify", () => {
+  /**
+   * Shopify renvoie `errors` tantôt en tableau, tantôt en chaîne. Supposer le
+   * tableau faisait planter le code sur le cas le plus fréquent — un jeton
+   * invalide — et remplaçait le message par une erreur interne.
+   */
+  it("lit une erreur d'authentification renvoyée sous forme de chaîne", async () => {
+    const { http } = fakeHttp([
+      { errors: "[API] Invalid API key or access token" },
+    ]);
+    await expect(adapter.testConnection(ctxWith(http))).rejects.toThrow(
+      /Invalid API key or access token/,
+    );
+  });
+
+  it("lit une erreur GraphQL renvoyée sous forme de tableau", async () => {
+    const { http } = fakeHttp([
+      { errors: [{ message: "Field 'nope' doesn't exist" }] },
+    ]);
+    await expect(adapter.testConnection(ctxWith(http))).rejects.toThrow(
+      /doesn't exist/,
+    );
+  });
+
+  it("signale un jeton refusé quand le code HTTP est 401", async () => {
+    const http = async () =>
+      new Response("Unauthorized", { status: 401 });
+    await expect(adapter.testConnection(ctxWith(http))).rejects.toThrow(
+      /jeton refusé/,
+    );
+  });
+});

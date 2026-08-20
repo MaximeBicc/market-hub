@@ -7,6 +7,7 @@ import { oauth } from "./routes/oauth.js";
 import { api } from "./routes/api.js";
 import { ai } from "./routes/ai.js";
 import { engine } from "./routes/engine.js";
+import { accounts } from "./routes/accounts.js";
 import { webhooks } from "./routes/webhooks.js";
 import { handleScheduled } from "./scheduler.js";
 import { handleQueue } from "./consumer.js";
@@ -67,6 +68,7 @@ app.route("/api/auth", auth);
 app.route("/api/oauth", oauth);
 app.route("/api/webhooks", webhooks); // public, protégé par signature
 app.route("/api/ai", ai);
+app.route("/api/engine/accounts", accounts);
 app.route("/api/engine", engine);
 app.route("/api", api); // en dernier : les routes plus spécifiques d'abord
 
