@@ -67,8 +67,8 @@ export function Shops() {
       {data.accounts.length === 0 ? (
         <Empty icon="plug" title="Aucune boutique reliée">
           Reliez votre boutique Shopify ci-dessous. Il faut d'abord avoir créé
-          une application personnalisée dans son administration pour obtenir un
-          jeton d'accès.
+          une application dans le Dev Dashboard de Shopify, et l'avoir installée
+          sur la boutique.
         </Empty>
       ) : (
         <div className="rows">
@@ -150,7 +150,8 @@ export function Shops() {
 function ConnectShopify({ onDone }: { onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [domain, setDomain] = useState("");
-  const [token, setToken] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -175,12 +176,13 @@ function ConnectShopify({ onDone }: { onDone: () => void }) {
     try {
       await api.post("/engine/accounts/shopify", {
         shopDomain: domain,
-        accessToken: token,
+        clientId,
+        clientSecret,
         webhookSecret: secret || undefined,
       });
       toast("Boutique Shopify connectée");
-      // Le jeton est effacé de la mémoire du navigateur dès qu'il est parti.
-      setToken("");
+      // Les secrets sont effacés de la mémoire du navigateur dès qu'ils sont partis.
+      setClientSecret("");
       setSecret("");
       setOpen(false);
       onDone();
@@ -196,6 +198,15 @@ function ConnectShopify({ onDone }: { onDone: () => void }) {
       <h2 className="sec" style={{ marginTop: 0 }}>
         Relier Shopify
       </h2>
+
+      <div className="banner banner--info" style={{ marginTop: 0 }}>
+        <span className="banner__t">Où trouver ces valeurs</span>
+        <span className="banner__b">
+          Dev Dashboard → votre application → <b>Paramètres</b> → <b>Identifiants</b>.
+          L'application doit d'abord être <b>installée sur la boutique</b>, sinon
+          Shopify refusera l'échange.
+        </span>
+      </div>
 
       {err && <div className="login__err">{err}</div>}
 
@@ -218,14 +229,28 @@ function ConnectShopify({ onDone }: { onDone: () => void }) {
       </div>
 
       <div className="field">
-        <label htmlFor="st">Jeton d'accès Admin API</label>
+        <label htmlFor="ci">ID client</label>
         <input
-          id="st"
+          id="ci"
+          className="input"
+          value={clientId}
+          onChange={(e) => setClientId(e.target.value)}
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          required
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="cs">Secret client</label>
+        <input
+          id="cs"
           className="input"
           type="password"
-          placeholder="shpat_…"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
+          value={clientSecret}
+          onChange={(e) => setClientSecret(e.target.value)}
           // Pas un mot de passe de connexion : on ne veut ni proposition de
           // remplissage, ni enregistrement dans le gestionnaire du navigateur.
           autoComplete="off"
@@ -264,7 +289,7 @@ function ConnectShopify({ onDone }: { onDone: () => void }) {
           className="btn btn--ghost"
           type="button"
           onClick={() => {
-            setToken("");
+            setClientSecret("");
             setSecret("");
             setOpen(false);
           }}
@@ -274,8 +299,9 @@ function ConnectShopify({ onDone }: { onDone: () => void }) {
       </div>
 
       <p className="muted" style={{ margin: "12px 0 0", lineHeight: 1.55 }}>
-        La connexion est testée avant d'être enregistrée : un jeton invalide
-        laisse la boutique en erreur plutôt que de la faire passer pour reliée.
+        La connexion est testée avant d'être enregistrée : des identifiants
+        invalides laissent la boutique en erreur plutôt que de la faire passer
+        pour reliée. Le jeton d'accès dure 24 heures et se renouvelle tout seul.
       </p>
     </form>
   );

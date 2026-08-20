@@ -29,6 +29,24 @@ export interface MarketplaceContext {
    * bannissement.
    */
   http?: ((input: string, init?: RequestInit) => Promise<Response>) | undefined;
+
+  /**
+   * Persiste des identifiants DÉRIVÉS : jeton court, date d'expiration,
+   * jeton de rafraîchissement renouvelé.
+   *
+   * Nécessaire parce que la plupart des plateformes ont abandonné les jetons
+   * permanents. Shopify, depuis janvier 2026, ne délivre plus que des jetons
+   * valables 24 heures obtenus par `client_credentials` ; eBay expire en
+   * 2 heures, Etsy en 1 heure. Sans ce rappel, l'adaptateur devrait
+   * redemander un jeton à chaque invocation — un aller-retour réseau gaspillé
+   * sur chaque commande, et un quota consommé pour rien.
+   *
+   * Le patch est fusionné avec les identifiants existants, jamais substitué :
+   * l'ID client et le secret doivent survivre à l'écriture du jeton.
+   */
+  saveCredentials?:
+    | ((patch: Record<string, string>) => Promise<void>)
+    | undefined;
 }
 
 export interface PollResult {

@@ -16,15 +16,23 @@ import type {
 /**
  * Adaptateur Shopify — API GraphQL Admin.
  *
- * AUTHENTIFICATION : jeton d'application personnalisée, pas OAuth.
- * Pour une boutique que l'on possède, une « custom app » créée dans
- * l'admin Shopify donne un jeton permanent qui n'expire jamais. OAuth
- * n'a de sens que pour une application distribuée à des tiers ; ici il
- * ajouterait un cycle de rafraîchissement à maintenir pour rien.
+ * AUTHENTIFICATION : « client credentials », et non plus jeton permanent.
  *
- * Identifiants attendus : { shopDomain, accessToken }
- *   shopDomain   « maboutique.myshopify.com »
- *   accessToken  jeton Admin API commençant par « shpat_ »
+ * Depuis le 1er janvier 2026, Shopify ne permet plus de créer d'application
+ * personnalisée depuis l'administration d'une boutique. Les jetons `shpat_`
+ * permanents n'existent que pour les applications créées avant cette date.
+ * Toute nouvelle application se crée dans le Dev Dashboard, qui fournit un
+ * ID client et un secret — à échanger contre un jeton d'accès valable
+ * environ 24 heures.
+ *
+ * Identifiants attendus : { shopDomain, clientId, clientSecret }
+ *   shopDomain    « maboutique.myshopify.com »
+ *   clientId      Dev Dashboard → Paramètres → Identifiants
+ *   clientSecret  idem
+ *
+ * L'adaptateur obtient et renouvelle le jeton lui-même, et le mémorise via
+ * `saveCredentials`. Sans cette mise en cache, chaque commande consommerait
+ * un aller-retour réseau supplémentaire pour redemander un jeton encore valide.
  *
  * DÉBIT : Shopify facture un COÛT par requête GraphQL, pas un nombre de
  * requêtes — un seau percé restitué à 100 points/seconde. Le coût réel
@@ -35,21 +43,78 @@ import type {
 
 const API_VERSION = "2026-01";
 
-interface ShopifyCreds {
-  shopDomain: string;
-  accessToken: string;
+/** Marge de sécurité : on renouvelle avant l'expiration réelle. */
+const TOKEN_SKEW_SEC = 300;
+
+function shopDomainOf(ctx: MarketplaceContext): string {
+  const d =
+    ctx.credentials?.["shopDomain"] ?? ctx.account.externalAccountId ?? "";
+  if (!d) throw new Error("Shopify : domaine de boutique manquant");
+  return d;
 }
 
-function creds(ctx: MarketplaceContext): ShopifyCreds {
+/**
+ * Obtient un jeton d'accès valide, en le renouvelant si nécessaire.
+ *
+ * Le jeton dure environ 24 heures. On le conserve chiffré avec les autres
+ * identifiants, avec sa date d'expiration : tant qu'il est valable, aucun
+ * appel réseau supplémentaire n'est fait.
+ */
+async function accessToken(ctx: MarketplaceContext): Promise<string> {
   const c = ctx.credentials ?? {};
-  const shopDomain = c["shopDomain"] ?? ctx.account.externalAccountId ?? "";
-  const accessToken = c["accessToken"] ?? "";
-  if (!shopDomain || !accessToken) {
+  const now = Math.floor(Date.now() / 1000);
+
+  const cached = c["accessToken"];
+  const expiresAt = Number(c["accessTokenExpiresAt"] ?? 0);
+  if (cached && expiresAt > now + TOKEN_SKEW_SEC) return cached;
+
+  const clientId = c["clientId"] ?? "";
+  const clientSecret = c["clientSecret"] ?? "";
+  if (!clientId || !clientSecret) {
+    // Cas d'une application créée avant 2026 : le jeton permanent reste
+    // valable, il n'y a simplement rien à renouveler.
+    if (cached) return cached;
     throw new Error(
-      "Shopify : identifiants manquants (shopDomain et accessToken requis)",
+      "Shopify : identifiants manquants (clientId et clientSecret requis)",
     );
   }
-  return { shopDomain, accessToken };
+
+  const res = await fetch(
+    `https://${shopDomainOf(ctx)}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    },
+  );
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      res.status === 401 || res.status === 400
+        ? "identifiants refusés. Vérifiez l'ID client, le secret, et que l'application est bien installée sur la boutique."
+        : `échange de jeton refusé (${res.status}) ${body.slice(0, 150)}`,
+    );
+  }
+
+  const json = (await res.json()) as {
+    access_token?: string;
+    expires_in?: number;
+    scope?: string;
+  };
+  if (!json.access_token) throw new Error("Shopify : jeton absent de la réponse");
+
+  await ctx.saveCredentials?.({
+    accessToken: json.access_token,
+    accessTokenExpiresAt: String(now + (json.expires_in ?? 86_400)),
+    ...(json.scope ? { scope: json.scope } : {}),
+  });
+
+  return json.access_token;
 }
 
 /**
@@ -103,16 +168,16 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     query: string,
     variables: Record<string, unknown> = {},
   ): Promise<T> {
-    const { shopDomain, accessToken } = creds(ctx);
+    const token = await accessToken(ctx);
     const http = ctx.http ?? fetch;
 
     const res = await http(
-      `https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`,
+      `https://${shopDomainOf(ctx)}/admin/api/${API_VERSION}/graphql.json`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
+          "X-Shopify-Access-Token": token,
         },
         body: JSON.stringify({ query, variables }),
       },

@@ -37,9 +37,12 @@ accounts.use("*", async (c, next) => {
 
 interface ShopifyConnectBody {
   shopDomain?: string;
-  accessToken?: string;
+  clientId?: string;
+  clientSecret?: string;
   webhookSecret?: string;
   displayName?: string;
+  /** Applications créées avant 2026 : jeton permanent « shpat_ ». */
+  accessToken?: string;
 }
 
 /** Seuls les domaines Shopify sont acceptés, et sans schéma ni chemin. */
@@ -83,7 +86,9 @@ accounts.post("/shopify", async (c) => {
     .catch((): ShopifyConnectBody => ({}));
 
   const domain = normalizeShopDomain(body.shopDomain ?? "");
-  const accessToken = (body.accessToken ?? "").trim();
+  const clientId = (body.clientId ?? "").trim();
+  const clientSecret = (body.clientSecret ?? "").trim();
+  const legacyToken = (body.accessToken ?? "").trim();
 
   if (!domain) {
     return c.json(
@@ -94,14 +99,27 @@ accounts.post("/shopify", async (c) => {
       400,
     );
   }
-  if (!accessToken.startsWith("shpat_")) {
+
+  /**
+   * Deux chemins d'authentification, selon l'âge de l'application.
+   *
+   * Depuis le 1er janvier 2026, Shopify ne délivre plus de jeton permanent :
+   * le Dev Dashboard fournit un ID client et un secret, échangés contre un
+   * jeton de 24 heures. Les applications créées avant gardent leur jeton
+   * « shpat_ », qu'on accepte toujours plutôt que de casser une connexion
+   * qui fonctionne.
+   */
+  if (!clientId && !legacyToken) {
     return c.json(
       {
         error:
-          "Le jeton d'application Shopify commence par « shpat_ ». Vérifiez que vous avez copié le jeton d'accès Admin API, et non la clé d'API.",
+          "Renseignez l'ID client et le secret, visibles dans le Dev Dashboard sous Paramètres → Identifiants.",
       },
       400,
     );
+  }
+  if (clientId && !clientSecret) {
+    return c.json({ error: "Le secret client est requis avec l'ID client." }, 400);
   }
 
   const db = drizzle(c.env.DB);
@@ -117,7 +135,8 @@ accounts.post("/shopify", async (c) => {
 
   const credentials: Record<string, string> = {
     shopDomain: domain,
-    accessToken,
+    ...(clientId ? { clientId, clientSecret } : {}),
+    ...(legacyToken ? { accessToken: legacyToken } : {}),
     ...(body.webhookSecret?.trim()
       ? { webhookSecret: body.webhookSecret.trim() }
       : {}),
@@ -159,6 +178,11 @@ accounts.post("/shopify", async (c) => {
     await adapter.testConnection({
       account: { ...account, enabled: true },
       credentials,
+      // Le jeton dérivé de l'échange est mémorisé dès le test : sans cela, la
+      // première commande réelle devrait le redemander inutilement.
+      saveCredentials: async (patch) => {
+        await repos.credentials.put(accountId, { ...credentials, ...patch });
+      },
     });
   } catch (err) {
     await db
@@ -201,9 +225,13 @@ accounts.post("/:id/test", async (c) => {
   try {
     const mod = buildEngine(c.env);
     const adapter = mod.registry.get(account.marketplace);
+    const current = await repos.credentials.get(id);
     await adapter.testConnection({
       account: { ...account, enabled: true },
-      credentials: await repos.credentials.get(id),
+      credentials: current,
+      saveCredentials: async (patch) => {
+        await repos.credentials.put(id, { ...current, ...patch });
+      },
     });
   } catch (err) {
     await db.update(shop).set({ status: "error" }).where(eq(shop.id, id));

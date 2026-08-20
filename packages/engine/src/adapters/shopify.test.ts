@@ -443,3 +443,126 @@ describe("formes d'erreur Shopify", () => {
     );
   });
 });
+
+describe("client credentials (Dev Dashboard)", () => {
+  /**
+   * Depuis janvier 2026, une nouvelle application Shopify ne reçoit plus de
+   * jeton permanent : elle échange un ID client et un secret contre un jeton
+   * valable environ 24 heures.
+   */
+  function ctxCc(
+    http: MarketplaceContext["http"],
+    creds: Record<string, string>,
+    saved: Record<string, string>[],
+  ): MarketplaceContext {
+    return {
+      account: {
+        id: "acc1",
+        marketplace: "shopify",
+        slug: "s",
+        displayName: "s",
+        enabled: true,
+        externalAccountId: "test.myshopify.com",
+      },
+      credentials: { shopDomain: "test.myshopify.com", ...creds },
+      http,
+      saveCredentials: async (patch) => {
+        saved.push(patch);
+      },
+    };
+  }
+
+  it("échange l'ID client contre un jeton, puis le mémorise", async () => {
+    const calls: string[] = [];
+    const saved: Record<string, string>[] = [];
+
+    // Le premier appel est l'échange de jeton (fetch nu), le second la requête
+    // GraphQL (fetch instrumenté). On intercepte les deux.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url));
+      return new Response(
+        JSON.stringify({ access_token: "shpua_frais", expires_in: 86399 }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const { http, sent } = fakeHttp([
+        { data: { shop: { name: "T", myshopifyDomain: "test.myshopify.com" } } },
+      ]);
+      await adapter.testConnection(
+        ctxCc(http, { clientId: "cid", clientSecret: "csec" }, saved),
+      );
+
+      expect(calls[0]).toContain("/admin/oauth/access_token");
+      // Le jeton frais part bien dans l'en-tête de la requête GraphQL.
+      expect((sent[0]?.headers as any)["X-Shopify-Access-Token"]).toBe("shpua_frais");
+      // Et il est mémorisé avec son échéance, pour ne pas le redemander.
+      expect(saved[0]?.accessToken).toBe("shpua_frais");
+      expect(Number(saved[0]?.accessTokenExpiresAt)).toBeGreaterThan(
+        Math.floor(Date.now() / 1000),
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("réutilise un jeton encore valide sans rappeler Shopify", async () => {
+    const saved: Record<string, string>[] = [];
+    let exchanged = false;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      exchanged = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const { http, sent } = fakeHttp([
+        { data: { shop: { name: "T", myshopifyDomain: "test.myshopify.com" } } },
+      ]);
+      await adapter.testConnection(
+        ctxCc(
+          http,
+          {
+            clientId: "cid",
+            clientSecret: "csec",
+            accessToken: "encore_bon",
+            accessTokenExpiresAt: String(Math.floor(Date.now() / 1000) + 3600),
+          },
+          saved,
+        ),
+      );
+
+      expect(exchanged).toBe(false);
+      expect((sent[0]?.headers as any)["X-Shopify-Access-Token"]).toBe("encore_bon");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("dit quoi corriger quand les identifiants sont refusés", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("bad", { status: 401 })) as typeof fetch;
+
+    try {
+      const { http } = fakeHttp([{ data: {} }]);
+      await expect(
+        adapter.testConnection(
+          ctxCc(http, { clientId: "cid", clientSecret: "faux" }, []),
+        ),
+      ).rejects.toThrow(/installée sur la boutique/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("accepte encore un jeton permanent d'avant 2026", async () => {
+    const { http, sent } = fakeHttp([
+      { data: { shop: { name: "T", myshopifyDomain: "test.myshopify.com" } } },
+    ]);
+    await adapter.testConnection(ctxCc(http, { accessToken: "shpat_ancien" }, []));
+    expect((sent[0]?.headers as any)["X-Shopify-Access-Token"]).toBe("shpat_ancien");
+  });
+});

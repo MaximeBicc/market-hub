@@ -101,10 +101,16 @@ export class MarketplaceOrchestrator {
   private async ctx(accountId: AccountId): Promise<MarketplaceContext> {
     const account = await this.accounts.get(accountId);
     if (!account) throw new Error(`Compte inconnu : ${accountId}`);
+    const credentials = await this.credentials.get(accountId);
     return {
       account,
-      credentials: await this.credentials.get(accountId),
+      credentials,
       http: this.httpFor?.(account),
+      // Fusion, jamais substitution : écrire le jeton dérivé ne doit pas
+      // effacer l'ID client et le secret qui permettent de le renouveler.
+      saveCredentials: async (patch) => {
+        await this.credentials.put(accountId, { ...credentials, ...patch });
+      },
     };
   }
 
