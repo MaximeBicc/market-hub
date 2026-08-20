@@ -36,8 +36,15 @@ export default defineConfig({
         // fait que l'app ajoutée à l'écran d'accueil ressemble à une vraie app.
         display: "standalone",
         orientation: "portrait",
+        // `background_color` peint l'écran de démarrage. On garde le fond
+        // sombre de l'application plutôt que le blanc du logo : l'icône y
+        // apparaît comme une tuile claire centrée, ce qui est habituel — alors
+        // qu'un fond blanc provoquerait un éclair lumineux avant chaque
+        // ouverture d'une interface sombre.
         background_color: "#0b0d12",
-        theme_color: "#0b0d12",
+        // `theme_color` teinte la barre d'état Android et la vignette du
+        // sélecteur d'applications : c'est le bleu nuit du logo.
+        theme_color: "#081A46",
         icons: [
           { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
           { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
