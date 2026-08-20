@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { eq } from "drizzle-orm";
-import { shop } from "../db/schema.js";
+import { and, eq } from "drizzle-orm";
+import { inventory, listing, product, salesEvent, shop } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
-import { randomId } from "../lib/crypto.js";
+import { contentHash, randomId } from "../lib/crypto.js";
 import { buildEngine } from "../engine/module.js";
 import { d1Repositories } from "../engine/repositories.js";
 
@@ -329,6 +329,211 @@ accounts.get("/:id/probe", async (c) => {
   }
 
   return c.json(report);
+});
+
+/**
+ * IMPORT INITIAL d'une boutique déjà garnie.
+ *
+ * Trois opérations, dans cet ordre :
+ *
+ * 1. CATALOGUE. Chaque annonce distante devient une annonce locale, reliée à
+ *    un produit maître retrouvé ou créé par SKU. C'est ce rapprochement qui
+ *    permettra plus tard de reconnaître le même article sur eBay et Etsy.
+ *
+ * 2. STOCK CENTRAL. Initialisé à la valeur constatée chez la plateforme, mais
+ *    UNIQUEMENT s'il n'existe pas déjà : réimporter ne doit jamais écraser un
+ *    stock que d'autres canaux ont fait évoluer depuis.
+ *
+ * 3. VENTES PASSÉES — et c'est le point délicat. On les enregistre comme DÉJÀ
+ *    TRAITÉES, sans toucher au stock. Le stock lu chez la plateforme tient
+ *    déjà compte de ces ventes : les rejouer le décrémenterait une seconde
+ *    fois. Les marquer permet en revanche qu'un webhook livré plus tard pour
+ *    la même commande soit reconnu comme un doublon et ignoré.
+ */
+accounts.post("/:id/import", async (c) => {
+  const id = c.req.param("id");
+  const db = drizzle(c.env.DB);
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Compte inconnu" }, 404);
+
+  const mod = buildEngine(c.env);
+  const adapter = mod.registry.get(account.marketplace);
+  if (!adapter.fetchListings) {
+    return c.json(
+      { error: `${account.marketplace} ne permet pas de lire un catalogue.` },
+      400,
+    );
+  }
+
+  const current = await repos.credentials.get(id);
+  const ctx = {
+    account,
+    credentials: current,
+    saveCredentials: async (patch: Record<string, string>) => {
+      await repos.credentials.put(id, { ...current, ...patch });
+    },
+  };
+
+  const now = Math.floor(Date.now() / 1000);
+  let produitsCrees = 0;
+  let produitsExistants = 0;
+  let annonces = 0;
+  let stockInitialise = 0;
+  let sansSku = 0;
+
+  // Pagination bornée : chaque page coûte un appel réseau plus des écritures,
+  // et une invocation ne dispose que de 50 sous-requêtes. Au-delà, on rend la
+  // main avec un curseur plutôt que de se faire couper au milieu.
+  const MAX_PAGES = 6;
+  let cursor: string | undefined = c.req.query("cursor") ?? undefined;
+  let pages = 0;
+
+  while (pages < MAX_PAGES) {
+    const page = await adapter.fetchListings(ctx, cursor);
+    pages++;
+
+    for (const item of page.items) {
+      if (!item.sku) {
+        // Sans SKU, aucun rapprochement entre plateformes n'est possible.
+        // On l'importe quand même mais on le signale : c'est une action à
+        // mener côté boutique, pas un défaut de l'outil.
+        sansSku++;
+      }
+
+      let productId: string;
+      const existing = item.sku
+        ? await db
+            .select({ id: product.id })
+            .from(product)
+            .where(eq(product.sku, item.sku))
+            .limit(1)
+        : [];
+
+      if (existing[0]) {
+        productId = existing[0].id;
+        produitsExistants++;
+      } else {
+        productId = randomId();
+        await db.insert(product).values({
+          id: productId,
+          sku: item.sku ?? `${account.marketplace}-${item.remoteId}`,
+          title: item.title,
+          description: null,
+          priceAmount: item.price.amount,
+          priceCurrency: item.price.currency,
+          stock: item.stock,
+          images: JSON.stringify(item.imageUrl ? [item.imageUrl] : []),
+          tags: "[]",
+          marketplaceData: "{}",
+          createdAt: now,
+          updatedAt: now,
+        });
+        produitsCrees++;
+      }
+
+      const hash = await contentHash({
+        p: item.price.amount,
+        q: item.stock,
+        s: item.status,
+      });
+
+      await db
+        .insert(listing)
+        .values({
+          id: randomId(),
+          shopId: id,
+          productId,
+          externalId: item.remoteId,
+          sku: item.sku,
+          title: item.title,
+          priceAmount: item.price.amount,
+          priceCurrency: item.price.currency,
+          quantity: item.stock,
+          status: item.status,
+          url: item.url ?? null,
+          imageUrl: item.imageUrl ?? null,
+          marketplaceData: JSON.stringify(item.marketplaceData ?? {}),
+          contentHash: hash,
+          syncedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [listing.shopId, listing.externalId],
+          set: {
+            productId,
+            sku: item.sku,
+            title: item.title,
+            priceAmount: item.price.amount,
+            priceCurrency: item.price.currency,
+            quantity: item.stock,
+            status: item.status,
+            imageUrl: item.imageUrl ?? null,
+            marketplaceData: JSON.stringify(item.marketplaceData ?? {}),
+            contentHash: hash,
+            syncedAt: now,
+          },
+        });
+      annonces++;
+
+      // `ensure` ne crée que si le stock n'existe pas : un réimport ne doit
+      // pas effacer une valeur que d'autres canaux ont fait évoluer.
+      const before = await repos.inventory.get(productId);
+      await mod.inventoryService.ensure(productId, item.stock);
+      if (!before) stockInitialise++;
+    }
+
+    cursor = page.cursor;
+    if (!cursor) break;
+  }
+
+  /* --- Ventes passées : mémorisées, jamais rejouées --- */
+  let ventesMarquees = 0;
+  try {
+    const sales = await adapter.pollOrderEvents?.(ctx);
+    for (const e of sales?.events ?? []) {
+      const eid = await contentHash({ a: e.accountId, e: e.eventId });
+      const seen = await db
+        .select({ id: salesEvent.id })
+        .from(salesEvent)
+        .where(
+          and(
+            eq(salesEvent.accountId, e.accountId),
+            eq(salesEvent.eventId, e.eventId),
+          ),
+        )
+        .limit(1);
+      if (seen[0]) continue;
+
+      await db.insert(salesEvent).values({
+        id: eid,
+        accountId: e.accountId,
+        eventId: e.eventId,
+        marketplace: e.marketplace,
+        remoteOrderId: e.remoteOrderId,
+        kind: e.kind,
+        occurredAt: e.occurredAt,
+        receivedAt: now,
+        unmatchedLines: 0,
+      });
+      ventesMarquees++;
+    }
+  } catch {
+    // Une portée manquante sur les commandes ne doit pas annuler l'import
+    // du catalogue, qui lui a réussi.
+  }
+
+  return c.json({
+    ok: true,
+    produitsCrees,
+    produitsExistants,
+    annonces,
+    stockInitialise,
+    sansSku,
+    ventesMarquees,
+    // Un curseur non nul signifie qu'il reste des pages : l'appelant relance.
+    curseurSuivant: cursor ?? null,
+  });
 });
 
 /**

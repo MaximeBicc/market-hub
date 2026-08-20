@@ -34,6 +34,7 @@ const A_VENIR = [
 
 export function Shops() {
   const qc = useQueryClient();
+  const [importing, setImporting] = useState<string | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ["accounts"],
     queryFn: () => api.get<{ accounts: Account[] }>("/engine/accounts"),
@@ -49,6 +50,57 @@ export function Shops() {
       toast(e instanceof Error ? e.message : "Échec");
     }
     qc.invalidateQueries({ queryKey: ["accounts"] });
+  }
+
+  /**
+   * Import du catalogue existant.
+   *
+   * Relance tant qu'un curseur revient : une boutique de plusieurs milliers
+   * de variantes ne tient pas dans une seule invocation, bornée à 50
+   * sous-requêtes. La boucle est plafonnée pour qu'une pagination qui ne se
+   * termine jamais ne tourne pas indéfiniment.
+   */
+  async function importer(accountId: string) {
+    setImporting(accountId);
+    try {
+      let cursor: string | null = null;
+      let produits = 0;
+      let annonces = 0;
+      let ventes = 0;
+      let sansSku = 0;
+
+      for (let page = 0; page < 20; page++) {
+        const r: {
+          produitsCrees: number;
+          produitsExistants: number;
+          annonces: number;
+          sansSku: number;
+          ventesMarquees: number;
+          curseurSuivant: string | null;
+        } = await api.post(
+          `/engine/accounts/${accountId}/import${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+        );
+        produits += r.produitsCrees;
+        annonces += r.annonces;
+        ventes += r.ventesMarquees;
+        sansSku += r.sansSku;
+        cursor = r.curseurSuivant;
+        if (!cursor) break;
+      }
+
+      toast(
+        `${annonces} annonce${annonces > 1 ? "s" : ""} importée${annonces > 1 ? "s" : ""} · ${produits} produit${produits > 1 ? "s" : ""} créé${produits > 1 ? "s" : ""}` +
+          (sansSku > 0 ? ` · ${sansSku} sans SKU` : "") +
+          (ventes > 0 ? ` · ${ventes} vente${ventes > 1 ? "s" : ""} enregistrée${ventes > 1 ? "s" : ""}` : ""),
+      );
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Import impossible");
+    } finally {
+      setImporting(null);
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["inventory"] });
+      qc.invalidateQueries({ queryKey: ["overview"] });
+    }
   }
 
   return (
@@ -88,6 +140,13 @@ export function Shops() {
                 <div className="row__end">
                   <span className={`pill ${st.cls}`}>{st.label}</span>
                   <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      className="btn btn--small"
+                      disabled={importing !== null}
+                      onClick={() => void importer(a.id)}
+                    >
+                      {importing === a.id ? "Import…" : "Importer"}
+                    </button>
                     <button
                       className="btn btn--small"
                       onClick={() =>
