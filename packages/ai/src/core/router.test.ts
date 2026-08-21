@@ -106,18 +106,33 @@ describe("pression budgétaire", () => {
   });
 
   it("réserve une part de l'ancrage web aux demandes manuelles", () => {
-    const usage: DailyUsage = { ...emptyUsage(), searchRequests: 1_050 };
+    // Le quota Google se compte au MOIS : 5 000 partagés entre les modèles
+    // 3.x, dont on retient 4 500 par prudence. Un plafond journalier ne
+    // protégerait de rien — trente jours à 200 feraient 6 000.
+    const usage: DailyUsage = { ...emptyUsage(), searchRequestsThisMonth: 4_050 };
     const recherche = ask({
       dataClass: "public",
       webSearch: true,
       capabilities: ["web_search"],
     });
 
-    // Le travail automatique s'arrête à 1 000 ; l'utilisateur garde ses 200.
+    // Le travail automatique s'arrête à 4 000 ; l'utilisateur garde ses 500.
     expect(route(FULL_PANEL, { ...recherche, automatic: true }, usage).candidates).toHaveLength(0);
     expect(
       route(FULL_PANEL, { ...recherche, automatic: false }, usage).candidates.length,
     ).toBeGreaterThan(0);
+  });
+
+  it("écarte l'ancrage web quand le mois entier est consommé", () => {
+    const usage: DailyUsage = { ...emptyUsage(), searchRequestsThisMonth: 4_500 };
+    const { candidates, rejected } = route(
+      FULL_PANEL,
+      ask({ dataClass: "public", webSearch: true, capabilities: ["web_search"] }),
+      usage,
+    );
+
+    expect(candidates).toHaveLength(0);
+    expect(rejected.join(" ")).toContain("quota_ancrage_web_mensuel");
   });
 });
 

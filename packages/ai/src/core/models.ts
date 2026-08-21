@@ -107,20 +107,45 @@ export function modelCatalogue(env: ModelEnv): ModelDescriptor[] {
       note: "Le plus capable du panel. Reçoit nos chiffres assainis, jamais le texte d'un acheteur.",
     });
 
+    /* --- Recherche web ---
+     *
+     * DEUX modèles, et le second n'est pas du luxe.
+     *
+     * La première version n'en déclarait qu'un, `gemini-2.5-flash`, choisi
+     * parce que son ancrage Google Search restait gratuit à 1 500 requêtes par
+     * JOUR là où la génération 3.x n'en offre que 5 000 par MOIS. Google l'a
+     * retiré aux comptes nouvellement créés : il répond 404 « no longer
+     * available to new users ». Toute la recherche marché tombait avec lui,
+     * sans qu'aucun repli n'existe.
+     *
+     * D'où deux entrées. Un modèle retiré renvoie un 404, que l'orchestrateur
+     * ne classe ni en quota ni en configuration : il passe simplement au
+     * suivant. Le panel survit donc au prochain retrait sans intervention.
+     *
+     * Le plafond, lui, est mensuel — voir `budget.ts`. Ce n'est pas une
+     * préférence, c'est la forme du quota 3.x. */
     models.push({
       provider: "gemini",
-      model: env.GEMINI_RESEARCH_MODEL || "gemini-2.5-flash",
+      model: env.GEMINI_RESEARCH_MODEL || "gemini-3.5-flash",
       capabilities: ["structured", "reasoning", "web_search", "vision"],
       privacy: "public_only",
       quality: 92,
       speed: 89,
       price: { input: 0.3, output: 2.5 },
-      // Le choix de la génération 2.5 n'est pas de la nostalgie : c'est la
-      // seule dont l'ancrage Google Search reste gratuit à 1 500 requêtes par
-      // JOUR. Sur la génération 3.x l'offre tombe à 5 000 par MOIS, puis
-      // 14 $ les 1 000. Basculer ce modèle sans revoir le plafond de
-      // `budget.ts` transforme la recherche marché en poste de dépense.
-      note: "Seule route de recherche web du panel. Génération 2.5 pour son ancrage gratuit au jour.",
+      note: "Route de recherche web principale. Ancrage Google Search, quota mensuel partagé.",
+    });
+
+    models.push({
+      provider: "gemini",
+      model: "gemini-3.5-flash-lite",
+      capabilities: ["structured", "reasoning", "web_search"],
+      privacy: "public_only",
+      // Qualité volontairement sous la précédente : ce modèle ne sert que si
+      // la route principale disparaît à son tour.
+      quality: 84,
+      speed: 96,
+      price: { input: 0.3, output: 2.5 },
+      note: "Repli de recherche web, au cas où le modèle principal serait retiré.",
     });
   }
 

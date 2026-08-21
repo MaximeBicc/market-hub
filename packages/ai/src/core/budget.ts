@@ -76,13 +76,20 @@ export interface FreeLimits {
   /** Cloudflare ne limite pas le nombre d'appels, seulement les neurones. */
   neurons: number;
   requests: Record<ProviderId, number>;
-  /** Requêtes Gemini avec ancrage Google Search. */
-  searchRequests: number;
   /**
-   * Part de l'ancrage web gardée pour les demandes manuelles.
+   * Ancrage Google Search, compté au MOIS et non au jour.
    *
-   * Sans elle, une nuit d'analyse automatique consomme le quota et l'écran de
-   * recherche ne répond plus le matin — au moment précis où l'on s'en sert.
+   * Ce n'est pas un choix d'implémentation mais la forme du quota : la
+   * génération 3.x de Gemini offre 5 000 recherches mensuelles, partagées
+   * entre tous ses modèles, puis facture 14 $ les mille. Un plafond
+   * journalier ne protégerait de rien — trente jours à 200 feraient 6 000.
+   */
+  searchRequestsPerMonth: number;
+  /**
+   * Part de l'ancrage gardée pour les demandes manuelles, sur le mois.
+   *
+   * Sans elle, quelques nuits d'analyse automatique consomment le quota et
+   * l'écran de recherche ne répond plus — au moment précis où l'on s'en sert.
    */
   searchManualReserve: number;
 }
@@ -100,24 +107,28 @@ export const FREE_LIMITS: FreeLimits = {
     // 50 requêtes/jour sans achat de crédits. Les échecs comptent aussi.
     openrouter: 45,
   },
-  // Ancrage Google Search : gratuit jusqu'à 1 500 requêtes/jour sur Gemini 2.5.
-  // ATTENTION : sur la génération 3.x, l'offre passe à 5 000 par MOIS puis
-  // devient payante. Changer le modèle de recherche impose de revoir ce chiffre.
-  searchRequests: 1_200,
-  searchManualReserve: 200,
+  // 5 000 par mois annoncés, partagés entre tous les modèles Gemini 3.x, puis
+  // 14 $ les mille. On s'arrête à 4 500 : la marge absorbe l'écart inévitable
+  // entre notre compteur et celui de Google, et c'est le leur qui facture.
+  searchRequestsPerMonth: 4_500,
+  searchManualReserve: 500,
 };
 
 /** Ce que le registre de consommation sait du jour en cours. */
 export interface DailyUsage {
   neurons: number;
   requests: Record<ProviderId, number>;
+  /** Recherches web du jour. Sert à l'affichage, pas au plafond. */
   searchRequests: number;
+  /** Recherches web du mois en cours. C'est CE compteur qui plafonne. */
+  searchRequestsThisMonth: number;
 }
 
 export const emptyUsage = (): DailyUsage => ({
   neurons: 0,
   requests: { cloudflare: 0, gemini: 0, groq: 0, openrouter: 0 },
   searchRequests: 0,
+  searchRequestsThisMonth: 0,
 });
 
 /**
@@ -188,10 +199,10 @@ export function allows(
   if (options.webSearch) {
     // Le travail automatique n'a pas accès à la réserve manuelle.
     const searchCap = options.automatic
-      ? Math.max(0, limits.searchRequests - limits.searchManualReserve)
-      : limits.searchRequests;
-    if (usage.searchRequests >= searchCap) {
-      return { ok: false, reason: "quota_ancrage_web" };
+      ? Math.max(0, limits.searchRequestsPerMonth - limits.searchManualReserve)
+      : limits.searchRequestsPerMonth;
+    if (usage.searchRequestsThisMonth >= searchCap) {
+      return { ok: false, reason: "quota_ancrage_web_mensuel" };
     }
   }
 

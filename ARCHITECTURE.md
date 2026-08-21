@@ -350,7 +350,7 @@ d'armer, c'est l'absence de route vers la dépense.
 | Fournisseur | Clé requise | Voit la donnée client | Limite gratuite retenue |
 |---|---|---|---|
 | Cloudflare Workers AI | non | oui | 10 000 neurones/jour |
-| Gemini | oui | non | 1 200 appels/jour |
+| Gemini | oui | non | 1 200 appels/jour, 4 500 recherches web/mois |
 | Groq | oui | non | 900 appels/jour |
 | OpenRouter | oui + modèle explicite | non | 45 appels/jour |
 
@@ -517,6 +517,49 @@ L'instruction système le dit explicitement, et la vérification est structurell
 plutôt que déclarative : un candidat fournisseur dont l'URL ne figure dans
 aucune observation collectée est **écarté**, quelle que soit l'insistance du
 modèle. Un test vérifie précisément ce scénario.
+
+---
+
+### Le quota qui ne se compte pas comme les autres
+
+Toutes les allocations du panel se renouvellent chaque jour — sauf une.
+L'ancrage Google Search de Gemini 3.x offre **5 000 recherches par mois**,
+partagées entre tous ses modèles, puis facture 14 $ les mille. Un plafond
+journalier ne protégerait de rien : trente jours à deux cents feraient six
+mille. Le compteur de recherche web est donc mensuel, et lui seul.
+
+La première version du panel évitait le problème en pointant sur
+`gemini-2.5-flash`, dont l'ancrage restait gratuit à 1 500 requêtes par jour.
+Google l'a retiré aux comptes créés récemment : il répond 404, *no longer
+available to new users*. Deux enseignements en sont tirés dans le code.
+
+**Deux modèles de recherche sont déclarés, pas un.** Un modèle retiré renvoie
+un 404, que l'orchestrateur ne classe ni en quota ni en configuration : il
+passe simplement au suivant. Le panel survit au prochain retrait sans
+intervention.
+
+**Un échec de la couche web ne se met pas en cache six heures.** Ses causes —
+clé absente, API non activée, modèle retiré — sont celles qu'on répare en
+quelques minutes. Les figer pour la demi-journée signifie qu'après avoir
+corrigé, on revoit le même message et l'on croit la correction sans effet.
+Cinq minutes suffisent à éviter le martèlement.
+
+### Un message d'erreur faux coûte plus cher qu'un message absent
+
+Le moteur annonçait « quota de recherche web épuisé » dès qu'une clé était
+configurée et que le routage échouait — au motif qu'aucune autre cause n'était
+possible. C'était faux, et le message a envoyé chercher un problème de quota
+là où l'API Google n'était pas activée, puis là où le modèle avait été retiré.
+Deux fois, il a détourné de la vraie cause avec autorité.
+
+Le moteur lit désormais la trace du routage et distingue quatre situations :
+quota réellement atteint, API non activée, clé refusée, modèle retiré. Quand
+il ne reconnaît rien, il affiche le message brut du fournisseur — illisible
+mais vrai, ce qui vaut infiniment mieux que lisible et faux.
+
+La trace est filtrée sur les tentatives ayant réellement échoué : sans cela,
+quatre lignes rappelant que les modèles Cloudflare ne font pas de recherche
+web repoussaient l'erreur utile hors de la longueur affichée.
 
 ---
 

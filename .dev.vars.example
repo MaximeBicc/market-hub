@@ -60,9 +60,16 @@ OPENROUTER_API_KEY=
 OPENROUTER_MODEL=
 
 # Modeles, surchargeables sans toucher au code (facultatif).
-# ATTENTION sur GEMINI_RESEARCH_MODEL : la generation 2.5 est retenue parce
-# que son ancrage Google Search reste gratuit a 1 500 requetes par JOUR. Sur
-# la generation 3.x, l'offre tombe a 5 000 par MOIS puis devient payante.
+#
+# Google retire ses modeles sans preavis pour les comptes recents : la premiere
+# version du panel pointait sur gemini-2.5-flash, qui repond desormais 404
+# « no longer available to new users ». Ces variables existent pour reparer un
+# tel retrait en posant un secret, sans redeployer de code.
+#
+# ATTENTION sur GEMINI_RESEARCH_MODEL : l'ancrage Google Search de la
+# generation 3.x offre 5 000 recherches par MOIS, partagees entre tous ses
+# modeles, puis facture 14 $ les mille. Le plafond mensuel est applique dans
+# packages/ai/src/core/budget.ts.
 # GEMINI_GENERAL_MODEL=gemini-3.7-flash
-# GEMINI_RESEARCH_MODEL=gemini-2.5-flash
+# GEMINI_RESEARCH_MODEL=gemini-3.5-flash
 # GROQ_MODEL=openai/gpt-oss-120b

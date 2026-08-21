@@ -335,6 +335,15 @@ function expliquerEchecWeb(trace: string[]): string {
     return "Quota de recherche web épuisé pour aujourd'hui. Il repart à zéro à minuit UTC.";
   }
 
+  if (/no longer available|not found for API version|is not supported|404/i.test(brut)) {
+    return (
+      "Les modèles de recherche web déclarés ne répondent plus : Google les a retirés. " +
+      "Ce n'est ni votre clé ni votre configuration — le catalogue du panel doit être mis à jour. " +
+      "Détail : " +
+      brut.slice(0, 220)
+    );
+  }
+
   if (/SERVICE_DISABLED|has not been used|is disabled/i.test(brut)) {
     return (
       "L'API Gemini n'est pas activée sur le projet Google auquel appartient la clé. " +

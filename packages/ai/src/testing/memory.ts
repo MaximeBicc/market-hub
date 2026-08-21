@@ -42,6 +42,7 @@ export class MemoryLedger implements UsageLedger {
       neurons: this.usage.neurons,
       requests: { ...this.usage.requests },
       searchRequests: this.usage.searchRequests,
+      searchRequestsThisMonth: this.usage.searchRequestsThisMonth,
     };
   }
 
@@ -49,7 +50,10 @@ export class MemoryLedger implements UsageLedger {
     this.entries.push(entry);
     this.usage.requests[entry.provider] = (this.usage.requests[entry.provider] ?? 0) + 1;
     if (entry.provider === "cloudflare") this.usage.neurons += entry.neurons;
-    if (entry.webSearch) this.usage.searchRequests += 1;
+    if (entry.webSearch) {
+      this.usage.searchRequests += 1;
+      this.usage.searchRequestsThisMonth += 1;
+    }
   }
 
   async breakdown(): Promise<UsageRow[]> {

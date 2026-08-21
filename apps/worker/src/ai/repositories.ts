@@ -1,5 +1,5 @@
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
-import { and, eq, gte, lt, sql } from "drizzle-orm";
+import { and, eq, gte, like, lt, sql } from "drizzle-orm";
 import type {
   Catalogue,
   DailyUsage,
@@ -69,22 +69,32 @@ export class D1UsageLedger implements UsageLedger {
    * neuf, et l'offre gratuite D1 se compte en lignes lues.
    */
   async today(): Promise<DailyUsage> {
+    const jour = today();
+
+    // Le mois entier est lu en même temps que la journée, dans la MÊME requête.
+    //
+    // Deux quotas de formes différentes cohabitent : l'allocation Cloudflare
+    // se renouvelle chaque jour, l'ancrage Google Search se compte au mois. Un
+    // seul parcours des lignes du mois suffit à obtenir les deux, là où deux
+    // requêtes doubleraient les lignes lues pour rien.
     const rows = await this.db
       .select({
         provider: aiUsage.provider,
-        requests: sql<number>`sum(${aiUsage.requests})`,
-        neurons: sql<number>`sum(${aiUsage.neurons})`,
-        searchRequests: sql<number>`sum(${aiUsage.searchRequests})`,
+        requests: sql<number>`sum(case when ${aiUsage.day} = ${jour} then ${aiUsage.requests} else 0 end)`,
+        neurons: sql<number>`sum(case when ${aiUsage.day} = ${jour} then ${aiUsage.neurons} else 0 end)`,
+        searchToday: sql<number>`sum(case when ${aiUsage.day} = ${jour} then ${aiUsage.searchRequests} else 0 end)`,
+        searchMonth: sql<number>`sum(${aiUsage.searchRequests})`,
       })
       .from(aiUsage)
-      .where(eq(aiUsage.day, today()))
+      .where(like(aiUsage.day, `${jour.slice(0, 7)}%`))
       .groupBy(aiUsage.provider);
 
     const usage = emptyUsage();
     for (const row of rows) {
       const provider = row.provider as keyof DailyUsage["requests"];
       usage.requests[provider] = row.requests ?? 0;
-      usage.searchRequests += row.searchRequests ?? 0;
+      usage.searchRequests += row.searchToday ?? 0;
+      usage.searchRequestsThisMonth += row.searchMonth ?? 0;
       // Seuls les neurones Cloudflare comptent pour l'allocation : ceux des
       // autres fournisseurs sont une conversion d'affichage, pas une dépense.
       if (provider === "cloudflare") usage.neurons += row.neurons ?? 0;

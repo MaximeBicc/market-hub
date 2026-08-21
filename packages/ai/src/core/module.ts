@@ -128,8 +128,11 @@ export function createAiModule(deps: AiModuleDeps) {
           equivalentUsd: Math.round(neuronsToUsd(usage.neurons) * 10000) / 10000,
         },
         rechercheWeb: {
-          consommees: usage.searchRequests,
-          plafond: limits.searchRequests,
+          // Le plafond se compte au mois : c'est la forme du quota Google, pas
+          // un choix. Le chiffre du jour reste affiche pour situer l'usage.
+          consommeesCeMois: usage.searchRequestsThisMonth,
+          consommeesAujourdhui: usage.searchRequests,
+          plafondMensuel: limits.searchRequestsPerMonth,
           reserveManuelle: limits.searchManualReserve,
         },
         detail: breakdown,

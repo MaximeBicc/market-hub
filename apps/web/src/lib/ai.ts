@@ -26,8 +26,10 @@ export interface PanelHealth {
     equivalentUsd: number;
   };
   rechercheWeb: {
-    consommees: number;
-    plafond: number;
+    /** Le plafond Google se compte au MOIS : 5 000 partages entre les modeles 3.x. */
+    consommeesCeMois: number;
+    consommeesAujourdhui: number;
+    plafondMensuel: number;
     reserveManuelle: number;
   };
 }

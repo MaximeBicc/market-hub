@@ -306,16 +306,18 @@ function PanelIA() {
       <div className="card" style={{ marginTop: 9 }}>
         <span className="stat__l">Recherche web</span>
         <span className="stat__v">
-          {health.rechercheWeb.consommees}
+          {health.rechercheWeb.consommeesCeMois}
           <span className="muted" style={{ fontSize: 13 }}>
             {" "}
-            / {health.rechercheWeb.plafond}
+            / {health.rechercheWeb.plafondMensuel} ce mois-ci
           </span>
         </span>
         <span className="stat__d">
-          Dont {health.rechercheWeb.reserveManuelle} réservées à vos demandes :
-          une nuit d'analyse automatique ne peut pas vider le quota avant votre
-          première recherche du matin.
+          {health.rechercheWeb.consommeesAujourdhui} aujourd'hui. Le quota Google
+          se compte au mois, pas au jour — un plafond journalier ne protégerait
+          de rien. Dont {health.rechercheWeb.reserveManuelle} réservées à vos
+          demandes : quelques nuits d'analyse automatique ne peuvent pas vider
+          le mois avant que vous en ayez besoin.
         </span>
       </div>
 

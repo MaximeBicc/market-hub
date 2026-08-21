@@ -227,5 +227,8 @@ function applyLocally(
 ): void {
   usage.requests[provider] = (usage.requests[provider] ?? 0) + 1;
   if (provider === "cloudflare") usage.neurons += neurons;
-  if (webSearch) usage.searchRequests += 1;
+  if (webSearch) {
+    usage.searchRequests += 1;
+    usage.searchRequestsThisMonth += 1;
+  }
 }
