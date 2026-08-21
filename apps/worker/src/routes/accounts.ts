@@ -321,6 +321,124 @@ accounts.post("/ebay/start", async (c) => {
 });
 
 /**
+ * Voie directe : coller un jeton de rafraîchissement obtenu ailleurs.
+ *
+ * Le portail développeur eBay sait générer lui-même un couple de jetons
+ * (« Get a Token from eBay via Your Application »). Dans ce cas, le RuName
+ * n'a pas besoin de pointer vers nous : eBay gère le retour de bout en bout.
+ *
+ * C'est le chemin le plus court, et surtout le plus robuste : il ne dépend
+ * pas de la configuration exacte des URL d'acceptation du RuName, qui est
+ * l'endroit où l'on se trompe le plus souvent.
+ *
+ * Une fois le jeton de rafraîchissement en base, l'adaptateur renouvelle
+ * l'accès tout seul pendant dix-huit mois.
+ */
+accounts.post("/ebay/token", async (c) => {
+  const body = await c.req
+    .json<{
+      clientId?: string;
+      clientSecret?: string;
+      refreshToken?: string;
+      marketplaceId?: string;
+      displayName?: string;
+    }>()
+    .catch(() => ({}) as Record<string, string>);
+
+  const clientId = (body.clientId ?? "").trim();
+  const clientSecret = (body.clientSecret ?? "").trim();
+  const refreshToken = (body.refreshToken ?? "").trim();
+  const marketplaceId = body.marketplaceId ?? "EBAY_FR";
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return c.json(
+      { error: "ID client, secret et jeton de rafraîchissement sont requis." },
+      400,
+    );
+  }
+  // Un jeton d'application (« Application Token ») commence pareil mais ne
+  // donne accès qu'aux API d'achat : l'utiliser mènerait à des 403 obscurs
+  // sur toutes les routes vendeur.
+  if (!refreshToken.startsWith("v^1.1")) {
+    return c.json(
+      {
+        error:
+          "Ce jeton ne ressemble pas à un jeton de rafraîchissement eBay (il commence par « v^1.1 »). Vérifiez que vous avez copié le refresh token, et non le jeton d'accès.",
+      },
+      400,
+    );
+  }
+
+  const db = drizzle(c.env.DB);
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+
+  const existing = await db
+    .select({ id: shop.id })
+    .from(shop)
+    .where(and(eq(shop.platform, "ebay"), eq(shop.externalId, marketplaceId)))
+    .limit(1);
+  const accountId = existing[0]?.id ?? randomId();
+  const displayName = body.displayName?.trim() || `eBay ${marketplaceId.replace("EBAY_", "")}`;
+
+  const credentials: Record<string, string> = {
+    clientId,
+    clientSecret,
+    refreshToken,
+    marketplaceId,
+  };
+
+  await db
+    .insert(shop)
+    .values({
+      id: accountId,
+      platform: "ebay",
+      externalId: marketplaceId,
+      displayName,
+      slug: `ebay_${marketplaceId.toLowerCase()}`,
+      status: "connecting",
+      config: "{}",
+      connectedAt: Math.floor(Date.now() / 1000),
+    })
+    .onConflictDoUpdate({
+      target: shop.id,
+      set: { displayName, status: "connecting" },
+    });
+
+  await repos.credentials.put(accountId, credentials);
+
+  // On éprouve les identifiants avant de déclarer le compte actif : un jeton
+  // invalide laisserait sinon une boutique qui a l'air reliée et ne
+  // synchronise rien.
+  try {
+    const mod = buildEngine(c.env);
+    const account = await repos.accounts.get(accountId);
+    if (!account) throw new Error("Compte introuvable après création");
+
+    await mod.registry.get("ebay").testConnection({
+      account: { ...account, enabled: true },
+      credentials,
+      saveCredentials: async (patch) => {
+        await repos.credentials.put(accountId, { ...credentials, ...patch });
+      },
+    });
+  } catch (err) {
+    await db.update(shop).set({ status: "error" }).where(eq(shop.id, accountId));
+    return c.json(
+      {
+        error: `eBay a refusé la connexion : ${err instanceof Error ? err.message : String(err)}`,
+        accountId,
+      },
+      400,
+    );
+  }
+
+  await db.update(shop).set({ status: "active" }).where(eq(shop.id, accountId));
+  await ensureSyncJobs(c.env, accountId);
+
+  return c.json({ ok: true, account: { id: accountId, marketplace: "ebay", displayName } });
+});
+
+/**
  * Retour d'eBay après consentement.
  *
  * Atteint par une navigation du navigateur, donc le cookie de session est

@@ -380,6 +380,17 @@ function ConnectEbay() {
   const [clientSecret, setClientSecret] = useState("");
   const [ruName, setRuName] = useState("");
   const [marketplaceId, setMarketplaceId] = useState("EBAY_FR");
+  const [refreshToken, setRefreshToken] = useState("");
+  /**
+   * Deux voies, parce qu'eBay en offre deux.
+   *
+   * « jeton » : le portail eBay a déjà généré le couple de jetons, on le
+   * colle. Le RuName n'a alors pas besoin de pointer vers nous, ce qui évite
+   * l'erreur de configuration la plus fréquente.
+   *
+   * « redirection » : parcours classique, MarketHub renvoie vers eBay.
+   */
+  const [mode, setMode] = useState<"jeton" | "redirection">("jeton");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -401,6 +412,20 @@ function ConnectEbay() {
     setBusy(true);
     setErr(null);
     try {
+      if (mode === "jeton") {
+        await api.post("/engine/accounts/ebay/token", {
+          clientId,
+          clientSecret,
+          refreshToken,
+          marketplaceId,
+        });
+        setClientSecret("");
+        setRefreshToken("");
+        toast("Compte eBay relié");
+        window.location.reload();
+        return;
+      }
+
       const r = await api.post<{ url: string }>("/engine/accounts/ebay/start", {
         clientId,
         clientSecret,
@@ -422,15 +447,47 @@ function ConnectEbay() {
         Relier eBay
       </h2>
 
-      <div className="banner banner--info" style={{ marginTop: 0 }}>
-        <span className="banner__t">Le piège du RuName</span>
-        <span className="banner__b">
-          eBay n'attend pas une URL de retour mais un <b>RuName</b>, créé dans
-          le portail développeur. Configurez-y l'URL d'acceptation vers{" "}
-          <code>/api/engine/accounts/ebay/callback</code>, puis copiez ici la
-          valeur affichée sous « RuName ».
-        </span>
+      <div className="filters" style={{ paddingBottom: 10 }}>
+        <button
+          type="button"
+          className="chip"
+          aria-pressed={mode === "jeton"}
+          onClick={() => setMode("jeton")}
+        >
+          Coller un jeton
+        </button>
+        <button
+          type="button"
+          className="chip"
+          aria-pressed={mode === "redirection"}
+          onClick={() => setMode("redirection")}
+        >
+          Passer par eBay
+        </button>
       </div>
+
+      {mode === "jeton" ? (
+        <div className="banner banner--info" style={{ marginTop: 0 }}>
+          <span className="banner__t">La voie la plus courte</span>
+          <span className="banner__b">
+            Dans le portail eBay, à côté de votre App ID, cliquez{" "}
+            <b>User Tokens</b> → <b>Get a Token from eBay via Your Application</b>.
+            eBay vous fera créer un RuName au passage, puis vous donnera un{" "}
+            <b>refresh token</b>. Collez-le ici : peu importe alors vers quoi
+            pointe le RuName.
+          </span>
+        </div>
+      ) : (
+        <div className="banner banner--info" style={{ marginTop: 0 }}>
+          <span className="banner__t">Le piège du RuName</span>
+          <span className="banner__b">
+            eBay n'attend pas une URL de retour mais un <b>RuName</b>. Cette
+            voie exige d'y configurer l'URL d'acceptation vers{" "}
+            <code>/api/engine/accounts/ebay/callback</code>. C'est l'endroit où
+            l'on se trompe le plus souvent.
+          </span>
+        </div>
+      )}
 
       {err && <div className="login__err">{err}</div>}
 
@@ -461,19 +518,40 @@ function ConnectEbay() {
         />
       </div>
 
-      <div className="field">
-        <label htmlFor="er">RuName</label>
-        <input
-          id="er"
-          className="input"
-          placeholder="Prenom-Nom-appnam-abcdef"
-          value={ruName}
-          onChange={(e) => setRuName(e.target.value)}
-          autoComplete="off"
-          spellCheck={false}
-          required
-        />
-      </div>
+      {mode === "jeton" ? (
+        <div className="field">
+          <label htmlFor="et">Jeton de rafraîchissement</label>
+          <input
+            id="et"
+            className="input"
+            type="password"
+            placeholder="v^1.1#i^1#…"
+            value={refreshToken}
+            onChange={(e) => setRefreshToken(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            required
+          />
+          <span className="muted">
+            Le <b>refresh token</b>, pas le jeton d'accès : celui-ci vaut
+            18 mois, l'autre 2 heures.
+          </span>
+        </div>
+      ) : (
+        <div className="field">
+          <label htmlFor="er">RuName</label>
+          <input
+            id="er"
+            className="input"
+            placeholder="Prenom-Nom-appnam-abcdef"
+            value={ruName}
+            onChange={(e) => setRuName(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            required
+          />
+        </div>
+      )}
 
       <div className="field">
         <label htmlFor="em">Place de marché</label>
@@ -494,7 +572,11 @@ function ConnectEbay() {
 
       <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
         <button className="btn btn--primary" type="submit" disabled={busy}>
-          {busy ? "Redirection…" : "Autoriser sur eBay"}
+          {busy
+            ? "Vérification…"
+            : mode === "jeton"
+              ? "Tester et connecter"
+              : "Autoriser sur eBay"}
         </button>
         <button
           className="btn btn--ghost"
@@ -509,9 +591,8 @@ function ConnectEbay() {
       </div>
 
       <p className="muted" style={{ margin: "12px 0 0", lineHeight: 1.55 }}>
-        Vous serez renvoyé vers eBay pour autoriser l'accès, puis ramené ici.
-        Le jeton dure deux heures et se renouvelle tout seul pendant dix-huit
-        mois.
+        Le jeton d'accès dure deux heures et se renouvelle tout seul pendant
+        dix-huit mois. Passé ce délai, il faudra réautoriser le compte.
       </p>
     </form>
   );
