@@ -73,8 +73,10 @@ export function createAiModule(deps: AiModuleDeps) {
   const now = deps.now ?? (() => Date.now());
   const newId = deps.newId ?? (() => crypto.randomUUID());
 
+  const sources = deps.sources ?? new SourceRegistry();
+
   const research = new ResearchEngine({
-    sources: deps.sources ?? new SourceRegistry(),
+    sources,
     orchestrator,
     cache: deps.cache,
     now,
@@ -194,6 +196,19 @@ export function createAiModule(deps: AiModuleDeps) {
           confidentialite: m.privacy,
           fournisseurConfigure: providers.get(m.provider)?.configured() ?? false,
         })),
+        // Les moteurs de recherche enregistres, et s'ils repondent encore ce
+        // mois-ci. Sans cette ligne, impossible de verifier qu'une cle
+        // fraichement posee a bien ete prise en compte.
+        sourcesDeRecherche: await Promise.all(
+          sources.all().map(async (src) => ({
+            id: src.id,
+            couche: src.layer,
+            // `available` peut rendre un booleen ou une promesse selon la
+            // source : `Promise.resolve` normalise, et une source en panne ne
+            // doit pas faire echouer tout le diagnostic.
+            disponible: await Promise.resolve(src.available()).catch(() => false),
+          })),
+        ),
         rechercheWeb: {
           uneRouteExiste: orchestrator.canWebSearch(),
           modelesRetenus: decision.candidates.map((m) => `${m.provider}/${m.model}`),
