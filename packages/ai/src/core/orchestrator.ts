@@ -54,6 +54,15 @@ function isConfigurationError(error: unknown): boolean {
   );
 }
 
+/**
+ * Fournisseurs dont le quota est COMMUN à tous leurs modèles.
+ *
+ * Cloudflare facture une réserve unique de neurones : un refus vaut pour tout
+ * le catalogue. Les autres attachent leur quota à chaque modèle, et un refus
+ * sur l'un ne dit rien des autres.
+ */
+const QUOTA_PARTAGE = new Set<ProviderId>(["cloudflare"]);
+
 export class Orchestrator {
   constructor(
     private readonly catalogue: ModelDescriptor[],
@@ -77,6 +86,19 @@ export class Orchestrator {
         m.capabilities.includes("web_search") &&
         (this.providers.get(m.provider)?.configured() ?? false),
     );
+  }
+
+  /**
+   * Combien de recherches web NOUS avons passées ce mois-ci.
+   *
+   * Sert à trancher une ambiguïté que le message d'erreur de Google ne lève
+   * pas : « quota exceeded » se dit aussi bien quand on a tout consommé que
+   * quand l'allocation vaut zéro. Notre propre compteur départage — et
+   * l'écart entre « vous avez trop demandé » et « on ne vous a rien accordé »
+   * change complètement ce qu'il y a à faire.
+   */
+  async webSearchThisMonth(): Promise<number> {
+    return (await this.ledger.today()).searchRequestsThisMonth;
   }
 
   /**
@@ -196,11 +218,27 @@ export class Orchestrator {
           trace.push(`${id} : ${Math.round(neurons)} neurones consommés malgré l'échec`);
         }
 
-        // Quota atteint ou clé invalide : le problème est au niveau du
-        // fournisseur, pas du modèle. Insister sur ses autres modèles ne
-        // ferait que répéter la même erreur.
-        if (isQuotaError(error) || isConfigurationError(error)) {
+        // Clé invalide, service non activé : le problème est au niveau du
+        // COMPTE. Aucun modèle de ce fournisseur ne répondra.
+        if (isConfigurationError(error)) {
           ecartes.add(model.provider);
+          continue;
+        }
+
+        // Quota atteint : la portée dépend du fournisseur, et s'y tromper coûte
+        // cher dans les deux sens.
+        //
+        // Chez Cloudflare, l'allocation est UNE réserve de neurones commune à
+        // tous les modèles : insister après un refus ne ferait que répéter la
+        // même erreur, un aller-retour réseau à chaque fois.
+        //
+        // Chez Gemini, les quotas sont attachés à CHAQUE modèle. Écarter tout
+        // le fournisseur sur un seul refus condamnait le modèle de repli sans
+        // l'avoir essayé — c'est exactement ce qui est arrivé en production,
+        // où un 429 sur le modèle principal a fait échouer toute la recherche
+        // web alors qu'une seconde route restait déclarée.
+        if (isQuotaError(error)) {
+          if (QUOTA_PARTAGE.has(model.provider)) ecartes.add(model.provider);
           continue;
         }
         // Erreur inattendue : on tente le modèle suivant, la panne peut être

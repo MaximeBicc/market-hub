@@ -1,10 +1,11 @@
-import type { AIProvider, Catalogue, ProviderId } from "../domain/types.js";
+import type { AIProvider, Catalogue, ExecutionRequest, ProviderId } from "../domain/types.js";
 import type { ResultCache, RunJournal, UsageLedger } from "../ports/repositories.js";
 import { CloudflareProvider, type WorkersAIBinding } from "../providers/cloudflare.js";
 import { GeminiProvider } from "../providers/gemini.js";
 import { groqProvider, openRouterProvider } from "../providers/openai-compatible.js";
 import { modelCatalogue, type ModelEnv } from "./models.js";
-import { Orchestrator } from "./orchestrator.js";
+import { NoFreeModelError, Orchestrator } from "./orchestrator.js";
+import { route } from "./router.js";
 import { defaultSkills, type SkillRegistry } from "./registry.js";
 import { runSkill, type SkillRunRequest, type SkillRunResult } from "./runtime.js";
 import { FREE_LIMITS, neuronsToUsd, type FreeLimits } from "./budget.js";
@@ -137,6 +138,153 @@ export function createAiModule(deps: AiModuleDeps) {
         },
         detail: breakdown,
       };
+    },
+
+    /**
+     * AUTODIAGNOSTIC — pourquoi le panel refuse ce qu'il refuse.
+     *
+     * Né d'une soirée entière passée à deviner. Une recherche marché ne
+     * trouvait rien ; les compteurs affichaient zéro partout ; le message
+     * annonçait un quota épuisé. Impossible de trancher sans voir ce que le
+     * routeur voyait, et chaque hypothèse coûtait un déploiement et un
+     * aller-retour avec l'utilisateur.
+     *
+     * Cette fonction rend visible l'état exact sur lequel les décisions se
+     * prennent : le catalogue tel que le Worker le construit, les compteurs
+     * tels que la base les rend, et la décision de routage AVEC son motif de
+     * refus pour chaque modèle écarté.
+     *
+     * `probe` déclenche en plus un vrai appel au fournisseur de recherche web
+     * et rapporte sa réponse brute — la seule façon de distinguer un modèle
+     * retiré d'une clé refusée d'un quota réellement atteint.
+     *
+     * AUCUNE CLÉ N'EN SORT, dans aucun cas.
+     */
+    async diagnostic(options: { probe?: boolean; probeAll?: boolean } = {}) {
+      const usage = await deps.ledger.today();
+
+      const demandeRecherche: ExecutionRequest = {
+        capabilities: ["web_search", "structured", "reasoning"],
+        dataClass: "public",
+        hint: "research",
+        webSearch: true,
+        maxOutputTokens: 2_000,
+        messages: [{ role: "user", content: "diagnostic" }],
+      };
+
+      const decision = route(models, demandeRecherche, usage, limits);
+
+      const rapport = {
+        compteurs: {
+          neurones: usage.neurons,
+          appelsParFournisseur: usage.requests,
+          rechercheWebAujourdhui: usage.searchRequests,
+          rechercheWebCeMois: usage.searchRequestsThisMonth,
+        },
+        plafonds: {
+          neurones: limits.neurons,
+          appels: limits.requests,
+          rechercheWebParMois: limits.searchRequestsPerMonth,
+          reserveManuelle: limits.searchManualReserve,
+        },
+        catalogue: models.map((m) => ({
+          fournisseur: m.provider,
+          modele: m.model,
+          capacites: m.capabilities,
+          confidentialite: m.privacy,
+          fournisseurConfigure: providers.get(m.provider)?.configured() ?? false,
+        })),
+        rechercheWeb: {
+          uneRouteExiste: orchestrator.canWebSearch(),
+          modelesRetenus: decision.candidates.map((m) => `${m.provider}/${m.model}`),
+          // Le cœur du diagnostic : pourquoi chaque modèle a été écarté.
+          modelesEcartes: decision.rejected,
+        },
+        appelReel: null as null | { ok: boolean; modele?: string; detail: string },
+        epreuveParModele: null as null | Array<{ modele: string; ok: boolean; detail: string }>,
+      };
+
+      /**
+       * Épreuve modèle par modèle, en contournant le routeur.
+       *
+       * Le routeur s'arrête au premier succès : il ne dit donc jamais ce que
+       * les AUTRES modèles auraient répondu. Or c'est la seule question qui
+       * compte pour savoir de quoi ce compte est réellement capable — un
+       * modèle listé dans la documentation de Google peut très bien renvoyer
+       * un quota à zéro sur un projet donné, et rien ne le laisse deviner de
+       * l'extérieur.
+       *
+       * Chaque appel est minuscule et volontairement inutile : on ne cherche
+       * pas une réponse, on cherche à savoir qui répond.
+       */
+      if (options.probeAll) {
+        rapport.epreuveParModele = [];
+        for (const m of models) {
+          const provider = providers.get(m.provider);
+          if (!provider?.configured()) {
+            rapport.epreuveParModele.push({
+              modele: `${m.provider}/${m.model}`,
+              ok: false,
+              detail: "fournisseur non configuré",
+            });
+            continue;
+          }
+          try {
+            const r = await provider.generate(m, {
+              messages: [{ role: "user", content: "Réponds : ok" }],
+              // 800 pour tous : mesure faite le 21 aout 2026, TOUS les modeles du
+              // catalogue raisonnent avant de repondre, y compris ceux qui ne
+              // declarent pas la capacite. Une sonde trop serree fait echouer un
+              // modele parfaitement sain, et le diagnostic accuse a tort.
+              maxOutputTokens: 800,
+              temperature: 0,
+              ...(m.capabilities.includes("web_search") ? { webSearch: true } : {}),
+            });
+            rapport.epreuveParModele.push({
+              modele: `${m.provider}/${m.model}`,
+              ok: true,
+              detail: `${r.outputTokens} jetons — ${r.text.trim().slice(0, 60) || "(vide)"}`,
+            });
+          } catch (e) {
+            rapport.epreuveParModele.push({
+              modele: `${m.provider}/${m.model}`,
+              ok: false,
+              detail: String(e).slice(0, 300),
+            });
+          }
+        }
+      }
+
+      if (options.probe) {
+        try {
+          const r = await orchestrator.run({
+            ...demandeRecherche,
+            json: true,
+            maxOutputTokens: 300,
+            messages: [
+              {
+                role: "user",
+                content: 'Réponds exactement {"ok":true} et rien d\'autre.',
+              },
+            ],
+          });
+          rapport.appelReel = {
+            ok: true,
+            modele: `${r.provider}/${r.model}`,
+            detail: r.text.slice(0, 200),
+          };
+        } catch (e) {
+          rapport.appelReel = {
+            ok: false,
+            detail:
+              e instanceof NoFreeModelError
+                ? e.trace.join("\n")
+                : String(e).slice(0, 800),
+          };
+        }
+      }
+
+      return rapport;
     },
 
     /** Catalogue public : ni clé, ni prix, ni note interne de routage. */

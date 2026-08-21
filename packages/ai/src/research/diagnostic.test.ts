@@ -23,12 +23,17 @@ const TAUX = { perEuro: { EUR: 1 }, publishedOn: "2026-08-21" };
 const MAINTENANT = Date.parse("2026-08-21T00:30:00Z");
 
 /** Moteur dont Gemini échoue avec le message que l'on veut éprouver. */
-function moteurDontGeminiEchoue(erreur: string) {
+function moteurDontGeminiEchoue(
+  erreur: string,
+  consommation: { searchRequestsThisMonth?: number } = {},
+) {
   const cache = new MemoryCache();
   const gemini = new ScriptedProvider("gemini", () => new Error(erreur));
+  const ledger = new MemoryLedger(consommation);
 
   return {
     cache,
+    ledger,
     engine: new ResearchEngine({
       sources: new SourceRegistry(),
       orchestrator: new Orchestrator(
@@ -37,7 +42,7 @@ function moteurDontGeminiEchoue(erreur: string) {
           ["cloudflare", new ScriptedProvider("cloudflare", () => reply("{}"))],
           ["gemini", gemini],
         ]),
-        new MemoryLedger(),
+        ledger,
       ),
       cache,
       now: () => MAINTENANT,
@@ -73,13 +78,31 @@ describe("message d'échec de la recherche web", () => {
     expect(warnings.join(" ")).toContain("refusée par Google");
   });
 
-  it("n'annonce le quota que lorsque c'est vraiment le quota", async () => {
+  it("distingue « rien accordé » de « tout consommé »", async () => {
+    // Zéro recherche à notre compteur : ce n'est pas un épuisement, c'est une
+    // allocation nulle. Envoyer attendre la fin du mois serait faux.
     const { engine } = moteurDontGeminiEchoue(
-      'gemini 429 {"error":{"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded"}}',
+      'gemini 429 {"error":{"status":"RESOURCE_EXHAUSTED","message":"You exceeded your current quota"}}',
     );
 
     const { warnings } = await chercher(engine);
-    expect(warnings.join(" ")).toContain("Quota de recherche web épuisé");
+    const message = warnings.join(" ");
+    expect(message).toContain("AUCUNE ce mois-ci");
+    expect(message).toContain("vaut zéro");
+    // Le message contient « elle n'est pas épuisée » : c'est la formule
+    // trompeuse qu'on interdit, pas le mot.
+    expect(message).not.toContain("Quota de recherche web épuisé");
+  });
+
+  it("annonce un vrai épuisement quand nous avons réellement consommé", async () => {
+    const { engine, ledger } = moteurDontGeminiEchoue(
+      'gemini 429 {"error":{"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded"}}',
+      { searchRequestsThisMonth: 4_200 },
+    );
+    void ledger;
+
+    const { warnings } = await chercher(engine);
+    expect(warnings.join(" ")).toContain("4200 recherches ce mois-ci");
   });
 
   it("montre le message brut plutôt que d'inventer une explication", async () => {

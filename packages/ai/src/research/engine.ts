@@ -298,7 +298,14 @@ Réponds uniquement par du JSON, selon cette forme :
       return { evidence, warnings, used: true };
     } catch (e) {
       if (e instanceof NoFreeModelError) {
-        return { evidence: [], used: false, warnings: [expliquerEchecWeb(e.trace)] };
+        // Notre propre compteur départage deux situations que Google
+        // nomme identiquement « quota exceeded ».
+        const dejaFait = await this.deps.orchestrator.webSearchThisMonth();
+        return {
+          evidence: [],
+          used: false,
+          warnings: [expliquerEchecWeb(e.trace, dejaFait)],
+        };
       }
       return {
         evidence: [],
@@ -323,7 +330,7 @@ Réponds uniquement par du JSON, selon cette forme :
  * la cause, on montre le message brut du fournisseur : illisible mais vrai,
  * ce qui vaut infiniment mieux que lisible et faux.
  */
-function expliquerEchecWeb(trace: string[]): string {
+function expliquerEchecWeb(trace: string[], rechercheseFaitesCeMois = 0): string {
   // Seules les tentatives qui ont RÉELLEMENT échoué nous renseignent. Les
   // autres lignes disent que les modèles Cloudflare ne savent pas chercher sur
   // le web — c'est vrai, connu, et sans rapport : elles ne feraient que
@@ -332,7 +339,20 @@ function expliquerEchecWeb(trace: string[]): string {
   const brut = (echecs.length > 0 ? echecs : trace).join(" | ");
 
   if (/quota_|RESOURCE_EXHAUSTED|\b429\b|rate.?limit/i.test(brut)) {
-    return "Quota de recherche web épuisé pour aujourd'hui. Il repart à zéro à minuit UTC.";
+    // « Quota exceeded » se dit aussi bien quand on a tout consommé que quand
+    // l'allocation vaut zéro. Google ne fait pas la différence ; notre
+    // compteur, lui, sait combien nous avons réellement demandé.
+    if (rechercheseFaitesCeMois === 0) {
+      return (
+        "Google refuse la recherche web alors que nous n'en avons fait AUCUNE ce mois-ci : " +
+        "l'allocation de recherche vaut zéro sur votre projet Google, elle n'est pas épuisée. " +
+        "La clé, elle, fonctionne — seul l'ancrage Google Search est fermé. Le débloquer demande " +
+        "généralement d'activer la facturation sur le projet, ce qui donne accès aux 5 000 " +
+        "recherches mensuelles offertes. Détail : " +
+        brut.slice(0, 200)
+      );
+    }
+    return `Quota de recherche web épuisé : ${rechercheseFaitesCeMois} recherches ce mois-ci. Il repart à zéro le 1er du mois.`;
   }
 
   if (/no longer available|not found for API version|is not supported|404/i.test(brut)) {

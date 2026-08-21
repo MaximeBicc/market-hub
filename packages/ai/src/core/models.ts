@@ -124,15 +124,30 @@ export function modelCatalogue(env: ModelEnv): ModelDescriptor[] {
      *
      * Le plafond, lui, est mensuel — voir `budget.ts`. Ce n'est pas une
      * préférence, c'est la forme du quota 3.x. */
+    // Épreuve du 21 août 2026 sur un compte réel : les modèles 3.5 renvoient
+    // 429 « quota exceeded » avec zéro requête au compteur — leur allocation
+    // gratuite vaut zéro sur ce projet. Le 3.7, lui, renvoie 503 « high
+    // demand » : une saturation passagère, donc du quota. Il passe en tête.
     models.push({
       provider: "gemini",
-      model: env.GEMINI_RESEARCH_MODEL || "gemini-3.5-flash",
+      model: env.GEMINI_RESEARCH_MODEL || "gemini-3.7-flash",
       capabilities: ["structured", "reasoning", "web_search", "vision"],
       privacy: "public_only",
-      quality: 92,
+      quality: 95,
+      speed: 88,
+      price: { input: 0.75, output: 3.75 },
+      note: "Route de recherche web principale. Ancrage Google Search, quota mensuel partagé.",
+    });
+
+    models.push({
+      provider: "gemini",
+      model: "gemini-3.5-flash",
+      capabilities: ["structured", "reasoning", "web_search", "vision"],
+      privacy: "public_only",
+      quality: 88,
       speed: 89,
       price: { input: 0.3, output: 2.5 },
-      note: "Route de recherche web principale. Ancrage Google Search, quota mensuel partagé.",
+      note: "Premier repli de recherche web. Quota nul sur certains projets — éprouvé, pas supposé.",
     });
 
     models.push({

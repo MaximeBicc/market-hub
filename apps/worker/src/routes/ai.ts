@@ -37,10 +37,40 @@ import { randomId } from "../lib/crypto.js";
 
 export const ai = new Hono<{ Bindings: Env }>();
 
+/**
+ * Garde d'accès du panel.
+ *
+ * Une session valide ouvre tout. Un jeton de diagnostic n'ouvre QUE la route
+ * de diagnostic, et rien d'autre.
+ *
+ * POURQUOI CE SECOND CHEMIN EXISTE. Une panne de routage s'est révélée
+ * indiagnosticable depuis l'extérieur : les compteurs affichaient zéro, le
+ * message annonçait un quota épuisé, et il fallait un déploiement complet pour
+ * tester chaque hypothèse. Ce jeton permet d'interroger l'état interne sans
+ * session de navigateur — donc sans jamais avoir à partager un mot de passe.
+ *
+ * CE QU'IL NE DONNE PAS : aucune donnée commerciale, aucune annonce, aucune
+ * commande, et aucune clé d'API. Uniquement le catalogue de modèles, les
+ * compteurs de consommation et les motifs de refus du routeur.
+ *
+ * COMMENT LE RÉVOQUER : supprimer le secret. La route redevient inaccessible
+ * immédiatement, sans redéploiement.
+ *
+ *   pnpm exec wrangler secret delete DIAGNOSTIC_TOKEN
+ */
 ai.use("*", async (c, next) => {
   const me = await authenticate(c.env, c.req.raw);
-  if (!me) return c.json({ error: "unauthorized" }, 401);
-  await next();
+  if (me) return next();
+
+  const jeton = c.req.header("x-diagnostic-token");
+  const attendu = c.env.DIAGNOSTIC_TOKEN;
+  const estDiagnostic = c.req.path === "/api/ai/diagnostic";
+
+  // Le secret absent ferme la porte : pas de jeton, pas d'accès. Et la
+  // comparaison n'a lieu que sur cette route précise.
+  if (estDiagnostic && attendu && jeton && jeton === attendu) return next();
+
+  return c.json({ error: "unauthorized" }, 401);
 });
 
 const seconds = () => Math.floor(Date.now() / 1000);
@@ -96,6 +126,30 @@ ai.get("/models", (c) => c.json({ modeles: buildAi(c.env).catalogue() }));
 
 /** Skills disponibles, telles que l'interface doit les proposer. */
 ai.get("/skills", (c) => c.json({ skills: buildAi(c.env).registry.list() }));
+
+/**
+ * Autodiagnostic du panel.
+ *
+ * Répond à la seule question qui compte quand une analyse ne rend rien :
+ * pourquoi. Le catalogue tel que le Worker le construit, les compteurs tels
+ * que la base les rend, et le motif de refus de CHAQUE modèle écarté.
+ *
+ * `?probe=1` déclenche en plus un vrai appel au fournisseur de recherche web
+ * et rapporte sa réponse brute. C'est la seule façon de distinguer un modèle
+ * retiré par Google d'une clé refusée d'un quota réellement atteint — trois
+ * situations qui se ressemblent de l'extérieur et se réparent différemment.
+ *
+ * Cet appel consomme un peu de quota : il en faut un vrai pour savoir.
+ */
+ai.get("/diagnostic", async (c) => {
+  const probe = c.req.query("probe");
+  return c.json(
+    await buildAi(c.env).diagnostic({
+      probe: probe === "1" || probe === "all",
+      probeAll: probe === "all",
+    }),
+  );
+});
 
 /**
  * Produits analysables.

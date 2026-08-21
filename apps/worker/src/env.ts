@@ -82,6 +82,19 @@ export interface Env {
   GROQ_MODEL?: string;
   /** Sans valeur explicite, OpenRouter n'entre pas au catalogue. */
   OPENROUTER_MODEL?: string;
+
+  /**
+   * Jeton d'accès à la seule route de diagnostic du panel.
+   *
+   * Permet d'interroger l'état interne — catalogue de modèles, compteurs,
+   * motifs de refus du routeur — sans session de navigateur, donc sans avoir
+   * à partager un mot de passe. Il ne donne accès à AUCUNE donnée
+   * commerciale et à aucune clé d'API.
+   *
+   * Absent, la route se ferme : pas de valeur, pas d'accès. Le supprimer
+   * révoque l'accès immédiatement, sans redéploiement.
+   */
+  DIAGNOSTIC_TOKEN?: string;
 }
 
 /** Résout les identifiants applicatifs d'une plateforme depuis les secrets. */
