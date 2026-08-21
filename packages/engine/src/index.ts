@@ -10,4 +10,5 @@ export * from "./adapters/mock.js";
 export * from "./adapters/vinted-safe.js";
 export * from "./adapters/shopify.js";
 export * from "./adapters/ebay.js";
+export * from "./adapters/etsy.js";
 export * from "./testing/memory-repositories.js";

@@ -2,6 +2,7 @@ import {
   createMarketplaceModule,
   MockAdapter,
   EbayAdapter,
+  EtsyAdapter,
   ShopifyAdapter,
   VintedSafeAdapter,
   type MarketplaceAdapter,
@@ -100,6 +101,7 @@ export function buildEngine(
       new VintedSafeAdapter(),
       new ShopifyAdapter(),
       new EbayAdapter(),
+      new EtsyAdapter(),
       ...extraAdapters,
     ],
 

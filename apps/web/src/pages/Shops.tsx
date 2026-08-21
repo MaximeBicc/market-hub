@@ -26,7 +26,6 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 /** Plateformes dont l'adaptateur n'est pas encore écrit. */
 const A_VENIR = [
   ["Allegro", "API REST complète, application à enregistrer."],
-  ["Etsy", "Adaptateur à porter. Aucun bac à sable : tests en réel obligatoires."],
   ["TikTok Shop", "Validation Partner Center nécessaire, 2 à 3 jours."],
   ["Vinted", "Aucune API sans accès Vinted Pro. Détection des ventes par e-mail possible."],
 ] as const;
@@ -115,6 +114,8 @@ export function Shops() {
         </div>
       </div>
 
+      <RetourOAuth />
+
       {data.accounts.length === 0 ? (
         <Empty icon="plug" title="Aucune boutique reliée">
           Reliez votre boutique Shopify ci-dessous. Il faut d'abord avoir créé
@@ -183,6 +184,7 @@ export function Shops() {
 
       <ConnectShopify onDone={() => qc.invalidateQueries({ queryKey: ["accounts"] })} />
       <ConnectEbay />
+      <ConnectEtsy />
 
       <h2 className="sec">Pas encore disponibles</h2>
       <div className="card planned" style={{ display: "grid", gap: 12 }}>
@@ -613,6 +615,182 @@ function ConnectEbay() {
       <p className="muted" style={{ margin: "12px 0 0", lineHeight: 1.55 }}>
         Le jeton d'accès dure deux heures et se renouvelle tout seul pendant
         dix-huit mois. Passé ce délai, il faudra réautoriser le compte.
+      </p>
+    </form>
+  );
+}
+
+/**
+ * Ce que dit la page au retour d'un parcours OAuth.
+ *
+ * Sans ce bandeau, un échec de connexion ramène sur une page d'apparence
+ * normale avec un paramètre d'URL que personne ne lit : l'utilisateur croit
+ * avoir réussi et découvre le contraire des heures plus tard. Le paramètre
+ * est effacé de l'URL après lecture, pour qu'un rafraîchissement ne
+ * ressuscite pas un message périmé.
+ */
+function RetourOAuth() {
+  const [msg] = useState(() => {
+    if (typeof window === "undefined") return null;
+    const p = new URLSearchParams(window.location.search);
+    const relie = p.get("relie");
+    const erreur = p.get("erreur");
+    if (!relie && !erreur) return null;
+
+    window.history.replaceState({}, "", window.location.pathname);
+
+    if (relie) {
+      return {
+        ok: true,
+        titre: "Boutique reliée",
+        corps: `La connexion ${relie} est enregistrée. Lancez « Importer » pour reprendre le catalogue existant.`,
+      };
+    }
+    const corps: Record<string, string> = {
+      expire:
+        "Le lien de connexion a expiré (10 minutes). Relancez le parcours depuis le début.",
+      parametres: "La plateforme est revenue sans code d'autorisation.",
+      etsy: "Etsy a refusé l'échange. Les deux causes de loin les plus fréquentes : l'application n'est pas encore validée, ou l'URL de retour déclarée ne correspond pas exactement à celle affichée ci-dessous.",
+      ebay: "eBay a refusé l'échange. Vérifiez le RuName et l'environnement (production ou bac à sable).",
+    };
+    return {
+      ok: false,
+      titre: "Connexion refusée",
+      corps: corps[erreur ?? ""] ?? "La plateforme a refusé la connexion.",
+    };
+  });
+
+  if (!msg) return null;
+  return (
+    <div
+      className={`banner ${msg.ok ? "banner--info" : "banner--warn"}`}
+      style={{ marginTop: 0 }}
+    >
+      <span className="banner__t">{msg.titre}</span>
+      <span className="banner__b">{msg.corps}</span>
+    </div>
+  );
+}
+
+/**
+ * Formulaire de connexion Etsy.
+ *
+ * Une seule voie : Etsy impose PKCE et n'accepte pas qu'on colle un jeton
+ * obtenu ailleurs, contrairement à eBay. Le secret partagé n'est pas demandé
+ * — avec PKCE il ne sert à rien, et réclamer un secret inutilisé pousse à le
+ * sortir de son coffre pour rien.
+ */
+function ConnectEtsy() {
+  const [open, setOpen] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const retour =
+    typeof window === "undefined"
+      ? ""
+      : `${window.location.origin}/api/engine/accounts/etsy/callback`;
+
+  if (!open) {
+    return (
+      <button
+        className="btn btn--wide"
+        style={{ marginTop: 9 }}
+        onClick={() => setOpen(true)}
+      >
+        <Icon name="plug" />
+        Relier une boutique Etsy
+      </button>
+    );
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.post<{ url: string }>("/engine/accounts/etsy/start", {
+        clientId,
+        displayName,
+      });
+      window.location.href = r.url;
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : "Connexion impossible");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="card" style={{ marginTop: 9 }} onSubmit={submit}>
+      <h2 className="sec" style={{ marginTop: 0 }}>
+        Relier Etsy
+      </h2>
+
+      <div className="banner banner--warn" style={{ marginTop: 0 }}>
+        <span className="banner__t">Deux conditions avant que cela marche</span>
+        <span className="banner__b">
+          Etsy valide chaque application à la main : la keystring ne fonctionne
+          qu'une fois l'app approuvée. Et l'URL de retour ci-dessous doit être
+          déclarée <b>à l'identique</b> dans les réglages de l'app — une barre
+          oblique en trop suffit à faire échouer la connexion.
+        </span>
+      </div>
+
+      <div className="field">
+        <label>URL de retour à déclarer chez Etsy</label>
+        <input className="input" readOnly value={retour} onFocus={(e) => e.target.select()} />
+        <span className="muted">
+          À coller dans « Callback URLs » sur la page de votre application.
+        </span>
+      </div>
+
+      {err && <div className="login__err">{err}</div>}
+
+      <div className="field">
+        <label htmlFor="tk">Keystring</label>
+        <input
+          id="tk"
+          className="input"
+          value={clientId}
+          onChange={(e) => setClientId(e.target.value)}
+          placeholder="ex. 1aa2bb33c44d55eeeeee6fff"
+          required
+        />
+        <span className="muted">
+          Portail développeur Etsy → Your Apps → votre application.
+        </span>
+      </div>
+
+      <div className="field">
+        <label htmlFor="tn">Nom affiché (facultatif)</label>
+        <input
+          id="tn"
+          className="input"
+          value={displayName}
+          onChange={(e) => setDisplayName(e.target.value)}
+          placeholder="repris du nom de la boutique si vide"
+        />
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="btn btn--primary" type="submit" disabled={busy}>
+          {busy ? "Redirection…" : "Continuer sur Etsy"}
+        </button>
+        <button
+          className="btn btn--ghost"
+          type="button"
+          onClick={() => setOpen(false)}
+        >
+          Annuler
+        </button>
+      </div>
+
+      <p className="muted" style={{ margin: "10px 0 0", lineHeight: 1.55 }}>
+        Etsy demandera l'accès à vos annonces et à vos commandes. Le jeton
+        obtenu vit 90 jours et se renouvelle tout seul à chaque
+        synchronisation ; il n'expire que si la boutique reste injoignable
+        trois mois d'affilée.
       </p>
     </form>
   );

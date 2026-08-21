@@ -6,7 +6,14 @@ import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
 import { contentHash, randomId } from "../lib/crypto.js";
 import { buildEngine } from "../engine/module.js";
-import { ebayConsentUrl, ebayExchangeCode } from "@hub/engine";
+import {
+  ebayConsentUrl,
+  ebayExchangeCode,
+  etsyConsentUrl,
+  etsyExchangeCode,
+  etsyFindShop,
+  etsyPkce,
+} from "@hub/engine";
 import { d1Repositories } from "../engine/repositories.js";
 import { ensureSyncJobs } from "../engine/sync.js";
 
@@ -864,4 +871,181 @@ accounts.post("/:id/resume", async (c) => {
     .set({ status: "active" })
     .where(eq(shop.id, c.req.param("id")));
   return c.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ */
+/* Etsy                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * L'URL de retour, telle qu'Etsy l'exige.
+ *
+ * Etsy compare cette valeur CARACTÈRE POUR CARACTÈRE avec celle déclarée
+ * dans les réglages de l'application. Une barre oblique finale en trop, ou
+ * http au lieu de https, et l'échange de code est refusé avec un message qui
+ * ne dit pas lequel des deux ne correspond pas.
+ */
+function etsyRedirectUri(env: Env): string {
+  return `${env.APP_URL.replace(/\/+$/, "")}/api/engine/accounts/etsy/callback`;
+}
+
+accounts.post("/etsy/start", async (c) => {
+  const body = await c.req
+    .json<{ clientId?: string; displayName?: string }>()
+    .catch(() => ({}) as Record<string, string>);
+
+  const clientId = (body.clientId ?? "").trim();
+
+  if (!clientId) {
+    return c.json(
+      {
+        error:
+          "La keystring est requise. Elle se trouve dans « Your Apps » sur le portail développeur Etsy, une fois l'application validée.",
+      },
+      400,
+    );
+  }
+
+  // PKCE : le vérificateur est produit maintenant et doit survivre jusqu'au
+  // retour d'Etsy. Il est rangé avec l'état, dans le même enregistrement à
+  // usage unique — sans lui, l'échange de code est irrémédiablement perdu et
+  // il faut recommencer tout le parcours.
+  const { verifier, challenge } = await etsyPkce();
+  const state = randomId(24);
+
+  await c.env.CACHE.put(
+    `etsy:${state}`,
+    JSON.stringify({
+      clientId,
+      verifier,
+      displayName: body.displayName ?? "Etsy",
+    }),
+    { expirationTtl: 600 },
+  );
+
+  return c.json({
+    url: etsyConsentUrl({
+      clientId,
+      redirectUri: etsyRedirectUri(c.env),
+      state,
+      codeChallenge: challenge,
+    }),
+    redirectUri: etsyRedirectUri(c.env),
+  });
+});
+
+accounts.get("/etsy/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  if (!code || !state) return c.redirect("/shops?erreur=parametres", 302);
+
+  const pending = await c.env.CACHE.get(`etsy:${state}`);
+  if (!pending) return c.redirect("/shops?erreur=expire", 302);
+  await c.env.CACHE.delete(`etsy:${state}`); // usage unique
+
+  const p = JSON.parse(pending) as {
+    clientId: string;
+    verifier: string;
+    displayName: string;
+  };
+
+  const db = drizzle(c.env.DB);
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+
+  try {
+    const tokens = await etsyExchangeCode({
+      clientId: p.clientId,
+      redirectUri: etsyRedirectUri(c.env),
+      code,
+      codeVerifier: p.verifier,
+    });
+
+    // Le compte relié peut ne pas avoir de boutique — Etsy distingue un
+    // acheteur d'un vendeur. Mieux vaut l'apprendre ici, avant d'enregistrer
+    // une boutique qui ne synchroniserait jamais rien.
+    const shopInfo = await etsyFindShop({
+      clientId: p.clientId,
+      accessToken: tokens.accessToken,
+      userId: tokens.userId,
+    });
+
+    const existing = await db
+      .select({ id: shop.id })
+      .from(shop)
+      .where(and(eq(shop.platform, "etsy"), eq(shop.externalId, shopInfo.shopId)))
+      .limit(1);
+    const accountId = existing[0]?.id ?? randomId();
+    const displayName = p.displayName?.trim() || shopInfo.shopName;
+
+    await db
+      .insert(shop)
+      .values({
+        id: accountId,
+        platform: "etsy",
+        externalId: shopInfo.shopId,
+        displayName,
+        slug: `etsy_${shopInfo.shopId}`,
+        status: "active",
+        config: "{}",
+        connectedAt: Math.floor(Date.now() / 1000),
+      })
+      .onConflictDoUpdate({
+        target: shop.id,
+        set: { displayName, status: "active" },
+      });
+
+    await repos.credentials.put(accountId, {
+      clientId: p.clientId,
+      refreshToken: tokens.refreshToken,
+      accessToken: tokens.accessToken,
+      accessTokenExpiresAt: String(tokens.expiresAt),
+      // Le jeton de rafraîchissement Etsy vit 90 jours à compter de MAINTENANT.
+      // La date est conservée pour pouvoir alerter avant l'échéance : passé le
+      // délai, seul un nouveau passage par le navigateur peut débloquer.
+      refreshTokenObtainedAt: String(Math.floor(Date.now() / 1000)),
+      shopId: shopInfo.shopId,
+      currency: shopInfo.currency,
+    });
+
+    await ensureSyncJobs(c.env, accountId);
+    return c.redirect("/shops?relie=etsy", 302);
+  } catch (err) {
+    console.error("Etsy callback", err);
+    return c.redirect("/shops?erreur=etsy", 302);
+  }
+});
+
+/**
+ * Complète une boutique Etsy avec ce qu'exige la création d'annonces.
+ *
+ * Ces trois valeurs décrivent la BOUTIQUE, pas un article : Etsy les impose
+ * sur tout objet physique et ne les devine pas. Tant qu'elles manquent,
+ * l'adaptateur annonce `listingCreate: false` et le reste fonctionne — la
+ * lecture, le stock, les prix, les ventes.
+ */
+accounts.post("/:id/etsy/profils", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{
+      shippingProfileId?: string;
+      readinessStateId?: string;
+      taxonomyId?: string;
+    }>()
+    .catch(() => ({}) as Record<string, string>);
+
+  const patch: Record<string, string> = {};
+  for (const k of ["shippingProfileId", "readinessStateId", "taxonomyId"] as const) {
+    const v = (body[k] ?? "").trim();
+    if (v) patch[k] = v;
+  }
+  if (Object.keys(patch).length === 0) {
+    return c.json({ error: "Aucune valeur fournie" }, 400);
+  }
+
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const current = (await repos.credentials.get(id)) ?? {};
+  // Fusion et non remplacement : la keystring et les jetons doivent survivre.
+  await repos.credentials.put(id, { ...current, ...patch });
+
+  return c.json({ ok: true, renseignes: Object.keys(patch) });
 });
