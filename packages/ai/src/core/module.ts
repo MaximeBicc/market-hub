@@ -130,6 +130,15 @@ export function createAiModule(deps: AiModuleDeps) {
           // l'allocation gratuite représente.
           equivalentUsd: Math.round(neuronsToUsd(usage.neurons) * 10000) / 10000,
         },
+        // Les moteurs de recherche branches. L'ecran doit savoir si une
+        // recherche web est possible AVANT que l'utilisateur clique : lui
+        // annoncer apres coup qu'elle ne l'etait pas est une perte de temps.
+        sourcesDeRecherche: await Promise.all(
+          sources.all().map(async (src) => ({
+            id: src.id,
+            disponible: await Promise.resolve(src.available()).catch(() => false),
+          })),
+        ),
         rechercheWeb: {
           // Le plafond se compte au mois : c'est la forme du quota Google, pas
           // un choix. Le chiffre du jour reste affiche pour situer l'usage.

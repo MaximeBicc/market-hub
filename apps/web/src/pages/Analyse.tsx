@@ -28,8 +28,10 @@ import {
   type RunEnvelope,
   type SkillKey,
   type SupplierSearch,
+  domaine,
   estLienExterne,
   observeeLe,
+  sitesConsultes,
   SKILLS_EXTERIEURES,
 } from "../lib/ai.js";
 import { Empty } from "../components/Empty.js";
@@ -210,7 +212,7 @@ export function Analyse() {
             ))}
           </div>
 
-          {health && !health.fournisseurs.find((f) => f.id === "gemini")?.configure && (
+          {health && !health.sourcesDeRecherche.some((s) => s.disponible) && (
             <div className="banner banner--info" style={{ marginTop: 10 }}>
               <Icon name="plug" />
               <div>
@@ -220,10 +222,10 @@ export function Analyse() {
                   données
                 </div>
                 <div className="banner__b">
-                  Chercher sur le web demande une clé Gemini, le seul fournisseur
-                  du panel à savoir le faire gratuitement. Sans elle, ces deux
-                  analyses fonctionnent mais se limitent à vos propres annonces.
-                  La clé se crée sur aistudio.google.com, sans carte bancaire.
+                  Aucun moteur de recherche n'est branché, ou son quota mensuel
+                  est atteint. Ces deux analyses fonctionnent quand même, mais se
+                  limitent à vos propres annonces. La clé Tavily se crée sur
+                  app.tavily.com, sans carte bancaire.
                 </div>
               </div>
             </div>
@@ -938,8 +940,15 @@ function LigneObservation({ o }: { o: Observation }) {
           )}
         </div>
         <div className="row__s">
+          {/* Le site d'abord : c'est lui qui dit si le prix est comparable.
+              « 3,74 € sur etsy.com » et « 3,74 € sur amazon.fr » ne racontent
+              pas la même chose, et un titre seul ne le révèle pas. */}
+          <b style={{ fontWeight: 600, color: "var(--ink-2)" }}>
+            {interne ? "votre boutique" : domaine(o.url)}
+          </b>
+          {" · "}
           {interne
-            ? "notre annonce"
+            ? "votre annonce"
             : o.source === "page"
               ? "page produit"
               : "résultat de recherche"}
@@ -949,15 +958,44 @@ function LigneObservation({ o }: { o: Observation }) {
       </div>
       <div className="row__end">
         <span className="amount">{o.prixEur === null ? "—" : money(o.prixEur)}</span>
-        {o.devise && o.devise !== "EUR" && o.prixOrigine !== null ? (
+        {o.prixEur !== null && o.devise && o.devise !== "EUR" && o.prixOrigine !== null ? (
           <span className="muted">
             {(o.prixOrigine / 100).toFixed(2)} {o.devise}
           </span>
         ) : (
-          o.prixEur === null && <span className="muted">prix non converti</span>
+          o.prixEur === null && (
+            <span className="muted">
+              {/* Distinction utile : la page n'affichait pas de prix, ou elle
+                  en affichait un dans une devise qu'on ne sait pas convertir.
+                  Les confondre laisserait croire à une lacune du panel. */}
+              {o.prixOrigine === null ? "pas de prix affiché" : "devise non convertie"}
+            </span>
+          )
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Les sites d'où viennent les observations.
+ *
+ * Demandé, et à raison : une médiane ne veut rien dire tant qu'on ignore d'où
+ * elle sort. Voir « leboncoin.fr » dans la liste explique immédiatement un
+ * prix bas — c'est de l'occasion — là où le même chiffre sans provenance
+ * ressemblerait à un concurrent agressif.
+ */
+function SitesConsultes({ observations }: { observations: Observation[] }) {
+  const sites = sitesConsultes(observations);
+  if (sites.length === 0) return null;
+
+  return (
+    <p
+      className="muted"
+      style={{ margin: "0 0 9px", lineHeight: 1.6, fontSize: 11.5, fontFamily: "var(--mono)" }}
+    >
+      Sites consultés : {sites.join(" · ")}
+    </p>
   );
 }
 
@@ -1004,6 +1042,7 @@ function MarketView({ data }: { data: MarketResearch }) {
           <h3 className="sec" style={{ fontSize: 12 }}>
             Observations <span>{data.observations.length}</span>
           </h3>
+          <SitesConsultes observations={data.observations} />
           <div className="rows">
             {data.observations.map((o) => (
               <LigneObservation key={o.url} o={o} />
@@ -1076,6 +1115,8 @@ function SupplierView({ data }: { data: SupplierSearch }) {
                     </a>
                   </div>
                   <div className="row__s" style={{ whiteSpace: "normal" }}>
+                    <b style={{ fontWeight: 600, color: "var(--ink-2)" }}>{domaine(c.url)}</b>
+                    {" · "}
                     {c.pourquoi} · vu le {observeeLe(c.observeLe)}
                   </div>
                 </div>

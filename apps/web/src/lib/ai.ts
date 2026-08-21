@@ -25,6 +25,8 @@ export interface PanelHealth {
     restants: number;
     equivalentUsd: number;
   };
+  /** Moteurs de recherche branchés, et s'ils répondent encore ce mois-ci. */
+  sourcesDeRecherche: Array<{ id: string; disponible: boolean }>;
   rechercheWeb: {
     /** Le plafond Google se compte au MOIS : 5 000 partages entre les modeles 3.x. */
     consommeesCeMois: number;
@@ -218,6 +220,35 @@ export interface SupplierSearch {
   lecture: { resume: string; reserves: string[]; confidence: number };
   provenance: Provenance;
   avertissements: string[];
+}
+
+/**
+ * Le site d'où vient une observation, en clair.
+ *
+ * Affiché partout où un prix l'est : c'est le domaine, bien plus que le titre
+ * de la page, qui dit si le prix est comparable au nôtre. « 3,74 € sur
+ * etsy.com » et « 3,74 € sur amazon.fr » ne racontent pas la même histoire, et
+ * un prix de brocante sur leboncoin n'a rien à voir avec du neuf en boutique.
+ *
+ * Le « www. » saute : il n'apporte rien et vole de la place sur un téléphone.
+ */
+export function domaine(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url.slice(0, 30);
+  }
+}
+
+/** Les sites distincts consultés, du plus fréquent au moins. */
+export function sitesConsultes(observations: Observation[]): string[] {
+  const compte = new Map<string, number>();
+  for (const o of observations) {
+    if (o.source === "internal") continue;
+    const d = domaine(o.url);
+    compte.set(d, (compte.get(d) ?? 0) + 1);
+  }
+  return [...compte.entries()].sort((a, b) => b[1] - a[1]).map(([d]) => d);
 }
 
 /** Une preuve interne n'est pas un lien : c'est une référence à notre base. */
