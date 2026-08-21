@@ -179,6 +179,18 @@ export interface Skill<I = unknown, O = unknown> {
   impact: Impact;
   /** 0 désactive le cache. Sinon, durée de validité du résultat en secondes. */
   cacheTtl: number;
+  /**
+   * Durée de validité ajustée au résultat obtenu.
+   *
+   * Une même skill peut produire une réponse solide et une réponse creuse, et
+   * les garder aussi longtemps l'une que l'autre est une faute. Une recherche
+   * marché qui n'a rien trouvé parce qu'une clé manquait doit expirer vite :
+   * sinon, après avoir corrigé la configuration, on revoit le même vide
+   * pendant des heures et l'on croit la correction sans effet.
+   *
+   * Absente, `cacheTtl` s'applique tel quel.
+   */
+  cacheTtlFor?(result: O): number;
   execute(input: I, ctx: SkillContext): Promise<O>;
 }
 

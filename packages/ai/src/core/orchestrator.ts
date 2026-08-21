@@ -27,16 +27,31 @@ export class NoFreeModelError extends Error {
   }
 }
 
-/** Une erreur de quota ou de débit chez le fournisseur : on passe au suivant. */
+/**
+ * Une erreur de quota ou de débit : on passe au fournisseur suivant.
+ *
+ * Le 403 a été RETIRÉ de cette liste, et c'est le fruit d'une méprise réelle.
+ * Il y figurait au motif qu'un 403 accompagne parfois un dépassement ; en
+ * pratique, chez Gemini, il signale presque toujours une API non activée ou
+ * une clé restreinte. Classé en quota, il produisait le message « quota
+ * gratuit épuisé » alors qu'aucune requête n'avait jamais été passée — et
+ * envoyait attendre minuit pour un problème de configuration.
+ */
 function isQuotaError(error: unknown): boolean {
-  return /429|403|5035|3036|3040|quota|rate.?limit|RESOURCE_EXHAUSTED|exceeded/i.test(
+  return /429|5035|3036|3040|quota|rate.?limit|RESOURCE_EXHAUSTED|exceeded/i.test(
     String(error),
   );
 }
 
-/** Une erreur de configuration : réessayer avec le même fournisseur ne sert à rien. */
+/**
+ * Une erreur de configuration : réessayer ne sert à rien tant qu'un humain
+ * n'a pas agi. Clé absente, invalide, restreinte, ou service non activé chez
+ * le fournisseur.
+ */
 function isConfigurationError(error: unknown): boolean {
-  return /401|invalid.?api.?key|unauthenti|PROVIDER_NOT_CONFIGURED/i.test(String(error));
+  return /401|403|invalid.?api.?key|API_KEY_INVALID|unauthenti|PERMISSION_DENIED|SERVICE_DISABLED|has not been used|is disabled|PROVIDER_NOT_CONFIGURED/i.test(
+    String(error),
+  );
 }
 
 export class Orchestrator {

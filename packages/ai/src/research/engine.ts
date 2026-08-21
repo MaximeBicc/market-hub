@@ -54,6 +54,9 @@ const PRIX_SUFFISANTS = 5;
 /** Durée de validité d'une recherche. Un prix de marché bouge dans la journée. */
 const CACHE_SECONDES = 6 * 60 * 60;
 
+/** Durée de validité d'une recherche dont la couche web a échoué. Voir `research`. */
+const CACHE_ECHEC_SECONDES = 5 * 60;
+
 export class ResearchEngine {
   constructor(
     private readonly deps: {
@@ -125,9 +128,18 @@ export class ResearchEngine {
     let webSearchUsed = false;
 
     /* --- Couche 4 : le web, seulement si nécessaire --- */
+    //
+    // `webEnEchec` distingue deux situations que le résultat confondrait
+    // sinon : la recherche web n'a pas eu lieu parce qu'elle était INUTILE
+    // (les couches gratuites suffisaient), ou parce qu'elle a ÉCHOUÉ. La
+    // première mérite un cache de six heures, la seconde surtout pas — voir
+    // plus bas.
+    let webEnEchec = false;
+
     if (usablePrices(classees).length < PRIX_SUFFISANTS) {
       const issue = await this.searchWeb(request);
       webSearchUsed = issue.used;
+      webEnEchec = !issue.used;
 
       if (issue.evidence.length > 0) {
         brutes.push(...issue.evidence);
@@ -149,7 +161,15 @@ export class ResearchEngine {
       fxPublishedOn: rates.publishedOn || null,
     };
 
-    await this.deps.cache.put(cle, result, CACHE_SECONDES);
+    // Un échec de la couche web n'est PAS mis en cache six heures.
+    //
+    // Ses causes sont précisément celles qu'on répare en deux minutes : clé
+    // absente, API Google non activée, quota qui repart à minuit. Les figer
+    // pour la demi-journée signifie qu'après avoir corrigé, on revoit le même
+    // message d'erreur sans comprendre — et qu'on croit la correction sans
+    // effet. Cinq minutes suffisent à éviter le martèlement tout en laissant
+    // la réparation devenir visible presque aussitôt.
+    await this.deps.cache.put(cle, result, webEnEchec ? CACHE_ECHEC_SECONDES : CACHE_SECONDES);
     return result;
   }
 
@@ -278,23 +298,61 @@ Réponds uniquement par du JSON, selon cette forme :
       return { evidence, warnings, used: true };
     } catch (e) {
       if (e instanceof NoFreeModelError) {
-        // La clé existe — le routage a donc échoué pour une autre raison, et à
-        // ce stade il n'y en a qu'une : le quota du jour est consommé.
-        return {
-          evidence: [],
-          used: false,
-          warnings: [
-            "Quota de recherche web épuisé pour aujourd'hui. Il repart à zéro à minuit UTC.",
-          ],
-        };
+        return { evidence: [], used: false, warnings: [expliquerEchecWeb(e.trace)] };
       }
       return {
         evidence: [],
         used: false,
-        warnings: [`Recherche web en échec : ${String(e).slice(0, 160)}`],
+        warnings: [`Recherche web en échec : ${String(e).slice(0, 200)}`],
       };
     }
   }
+}
+
+/**
+ * Traduit un échec de routage en une phrase que l'on peut suivre.
+ *
+ * POURQUOI CETTE FONCTION EXISTE : sa première version se contentait
+ * d'annoncer « quota de recherche web épuisé », en partant du principe que si
+ * une clé est configurée, seul le quota peut faire échouer le routage. C'était
+ * faux, et le message a envoyé quelqu'un attendre minuit alors que son API
+ * Google n'était simplement pas activée — un problème d'une minute, déguisé en
+ * attente d'une journée.
+ *
+ * On lit donc la trace réelle, et on ne devine plus. Quand on ne reconnaît pas
+ * la cause, on montre le message brut du fournisseur : illisible mais vrai,
+ * ce qui vaut infiniment mieux que lisible et faux.
+ */
+function expliquerEchecWeb(trace: string[]): string {
+  // Seules les tentatives qui ont RÉELLEMENT échoué nous renseignent. Les
+  // autres lignes disent que les modèles Cloudflare ne savent pas chercher sur
+  // le web — c'est vrai, connu, et sans rapport : elles ne feraient que
+  // repousser la vraie erreur hors de la longueur affichée.
+  const echecs = trace.filter((t) => t.includes("échec"));
+  const brut = (echecs.length > 0 ? echecs : trace).join(" | ");
+
+  if (/quota_|RESOURCE_EXHAUSTED|\b429\b|rate.?limit/i.test(brut)) {
+    return "Quota de recherche web épuisé pour aujourd'hui. Il repart à zéro à minuit UTC.";
+  }
+
+  if (/SERVICE_DISABLED|has not been used|is disabled/i.test(brut)) {
+    return (
+      "L'API Gemini n'est pas activée sur le projet Google auquel appartient la clé. " +
+      "C'est le cas par défaut d'un projet fraîchement créé : activez « Generative Language API » " +
+      "dans la console Google Cloud, puis réessayez. Détail : " +
+      brut.slice(0, 220)
+    );
+  }
+
+  if (/PERMISSION_DENIED|API_KEY_INVALID|\b40[13]\b|invalid.?api.?key/i.test(brut)) {
+    return (
+      "La clé Gemini est refusée par Google : invalide, révoquée, ou restreinte à d'autres " +
+      "usages. Vérifiez-la dans Google AI Studio et reposez-la si nécessaire. Détail : " +
+      brut.slice(0, 220)
+    );
+  }
+
+  return `La recherche web n'a pas abouti. Détail : ${brut.slice(0, 260)}`;
 }
 
 /**

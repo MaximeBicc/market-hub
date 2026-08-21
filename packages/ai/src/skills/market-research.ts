@@ -78,6 +78,17 @@ export const marketResearch: Skill<MarketResearchInput, MarketResearchOutput> = 
   // lecture, qu'on veut pouvoir rafraîchir sans redépenser du quota web.
   cacheTtl: 2 * 60 * 60,
 
+  /**
+   * Une recherche qui n'a rien situé expire en cinq minutes.
+   *
+   * Les causes d'un tel vide sont presque toujours réparables sur-le-champ :
+   * clé Gemini absente, API Google non activée, requête trop vague. Garder ce
+   * vide deux heures, c'est faire croire que la correction n'a servi à rien.
+   */
+  cacheTtlFor(result) {
+    return result.marche === null ? 5 * 60 : 2 * 60 * 60;
+  },
+
   async execute(input, ctx) {
     const product = await ctx.catalogue.product(input.productId);
     if (!product) throw new Error(`PRODUIT_INTROUVABLE:${input.productId}`);

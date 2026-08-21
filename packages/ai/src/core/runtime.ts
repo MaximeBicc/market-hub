@@ -146,7 +146,11 @@ export async function runSkill(
       evidence: sources,
     });
 
-    if (skill.cacheTtl > 0) await deps.cache.put(cacheKey, result, skill.cacheTtl);
+    // La skill peut raccourcir la durée selon ce qu'elle a réellement trouvé :
+    // un résultat vide faute de configuration ne doit pas survivre à sa
+    // correction.
+    const ttl = skill.cacheTtlFor?.(result as never) ?? skill.cacheTtl;
+    if (ttl > 0) await deps.cache.put(cacheKey, result, ttl);
 
     return {
       runId,

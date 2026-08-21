@@ -59,6 +59,8 @@ export class MemoryLedger implements UsageLedger {
 
 export class MemoryCache implements ResultCache {
   readonly store = new Map<string, unknown>();
+  /** Durees de vie demandees, dans l'ordre. Sert a verifier qu'un echec expire vite. */
+  readonly ttls: number[] = [];
   hits = 0;
 
   async get(key: string): Promise<unknown | undefined> {
@@ -67,8 +69,9 @@ export class MemoryCache implements ResultCache {
     return value;
   }
 
-  async put(key: string, value: unknown): Promise<void> {
+  async put(key: string, value: unknown, ttlSeconds: number): Promise<void> {
     this.store.set(key, value);
+    this.ttls.push(ttlSeconds);
   }
 
   async purge(): Promise<number> {

@@ -79,6 +79,16 @@ export const supplierFind: Skill<SupplierFindInput, SupplierFindOutput> = {
   impact: "high",
   cacheTtl: 4 * 60 * 60,
 
+  /**
+   * Aucune piste trouvée : cinq minutes, pas quatre heures.
+   *
+   * Même raison que pour la recherche marché — une liste vide vient bien plus
+   * souvent d'une configuration manquante que d'un marché réellement vide.
+   */
+  cacheTtlFor(result) {
+    return result.candidats.length === 0 ? 5 * 60 : 4 * 60 * 60;
+  },
+
   async execute(input, ctx) {
     const product = await ctx.catalogue.product(input.productId);
     if (!product) throw new Error(`PRODUIT_INTROUVABLE:${input.productId}`);
