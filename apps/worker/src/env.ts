@@ -69,6 +69,19 @@ export interface Env {
   /** openrouter.ai — dernier recours public, 50 appels/jour. */
   OPENROUTER_API_KEY?: string;
 
+  /**
+   * tavily.com — la recherche web du panel, 1 000 crédits par mois, sans carte.
+   *
+   * Choisi après avoir éprouvé les autres sur leurs conditions RÉELLES :
+   * l'ancrage Google Search de Gemini exige d'activer la facturation, Brave
+   * impose une carte même sur son offre gratuite, Serper n'offre ses 2 500
+   * requêtes qu'une seule fois. Tavily renouvelle chaque mois.
+   *
+   * Sans cette clé, « Comparer au marché » et « Trouver des fournisseurs »
+   * fonctionnent mais ne voient que vos propres annonces, et le disent.
+   */
+  TAVILY_API_KEY?: string;
+
   /* --- Modèles, surchargeables sans redéploiement de code --- */
   //
   // Les catalogues gratuits bougent : un modèle retiré se remplace en

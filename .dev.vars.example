@@ -73,3 +73,16 @@ OPENROUTER_MODEL=
 # GEMINI_GENERAL_MODEL=gemini-3.7-flash
 # GEMINI_RESEARCH_MODEL=gemini-3.5-flash
 # GROQ_MODEL=openai/gpt-oss-120b
+
+# Tavily : https://app.tavily.com  -> Get API key
+# LA recherche web du panel. 1 000 credits par mois, renouveles, SANS carte.
+#
+# Choisi apres avoir eprouve les autres sur leurs conditions reelles :
+#   Gemini (ancrage Google Search) : 5 000/mois mais exige d'activer la
+#     facturation. Verifie en production : sans elle, quota de zero.
+#   Brave : impose une carte meme sur l'offre gratuite.
+#   Serper : 2 500 requetes, mais une seule fois, sans renouvellement.
+#
+# Tavily facture le depassement au lieu de couper : le panel s'arrete donc
+# de lui-meme a 900 sur 1 000, sans dependre de l'absence de carte.
+TAVILY_API_KEY=

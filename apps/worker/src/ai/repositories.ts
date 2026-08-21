@@ -92,6 +92,12 @@ export class D1UsageLedger implements UsageLedger {
     const usage = emptyUsage();
     for (const row of rows) {
       const provider = row.provider as keyof DailyUsage["requests"];
+      // Les sources de recherche extérieures au panel d'IA — Tavily et ce qui
+      // suivra — s'inscrivent dans la même table pour n'avoir qu'un endroit où
+      // regarder, mais leur quota n'est PAS celui de Gemini. Les additionner
+      // ferait fermer la recherche Google au motif que Tavily a travaillé.
+      if (!(provider in usage.requests)) continue;
+
       usage.requests[provider] = row.requests ?? 0;
       usage.searchRequests += row.searchToday ?? 0;
       usage.searchRequestsThisMonth += row.searchMonth ?? 0;
@@ -389,6 +395,55 @@ export class D1Catalogue implements Catalogue {
       listings,
     };
   }
+}
+
+/**
+ * Compteurs d'une source de recherche extérieure au panel d'IA.
+ *
+ * Tavily n'est pas un modèle : il ne consomme ni neurone ni jeton, seulement
+ * des crédits mensuels qui lui sont propres. Il partage néanmoins la table de
+ * consommation, pour qu'il n'y ait qu'un seul endroit à regarder quand on se
+ * demande ce qui a été dépensé aujourd'hui.
+ *
+ * Le plafond est vérifié AVANT l'appel, jamais après : Tavily facture le
+ * dépassement au lieu de couper.
+ */
+export function sourceCounters(database: D1Database, source: string) {
+  const db = drizzle(database);
+
+  return {
+    usedThisMonth: async (): Promise<number> => {
+      const [row] = await db
+        .select({ total: sql<number>`coalesce(sum(${aiUsage.searchRequests}), 0)` })
+        .from(aiUsage)
+        .where(
+          and(eq(aiUsage.provider, source), like(aiUsage.day, `${today().slice(0, 7)}%`)),
+        );
+      return row?.total ?? 0;
+    },
+
+    record: async (): Promise<void> => {
+      await db
+        .insert(aiUsage)
+        .values({
+          day: today(),
+          provider: source,
+          model: "search",
+          requests: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+          neurons: 0,
+          searchRequests: 1,
+        })
+        .onConflictDoUpdate({
+          target: [aiUsage.day, aiUsage.provider, aiUsage.model],
+          set: {
+            requests: sql`${aiUsage.requests} + 1`,
+            searchRequests: sql`${aiUsage.searchRequests} + 1`,
+          },
+        });
+    },
+  };
 }
 
 /** Assemble les quatre dépôts d'un coup, pour le câblage du module. */
