@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/d1";
 import { and, eq, sql } from "drizzle-orm";
 import type { SyncTask } from "@hub/core";
+import { reconcileStock } from "@hub/engine";
 import { eventLog, listing, product, salesEvent, syncJob } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { contentHash, randomId } from "../lib/crypto.js";
@@ -45,6 +46,11 @@ export async function runEngineSync(
   const ctx = {
     account,
     credentials,
+    // Le fetch régulé, et non le global : sans lui, la synchronisation
+    // périodique appelait les plateformes sans passer par le seau à jetons.
+    // C'est le chemin le plus fréquent de tout l'outil, donc précisément
+    // celui qu'il ne fallait pas laisser hors régulation.
+    http: mod.httpFor(account),
     saveCredentials: async (patch: Record<string, string>) => {
       await repos.credentials.put(task.shopId, { ...credentials, ...patch });
     },
@@ -56,7 +62,7 @@ export async function runEngineSync(
   if (task.resource === "orders") {
     nextCursor = await syncOrders(env, mod, adapter, ctx, task, counter);
   } else {
-    nextCursor = await syncCatalogue(env, adapter, ctx, task);
+    nextCursor = await syncCatalogue(env, mod, adapter, ctx, task);
   }
 
   // Page suivante : nouveau message, budget de sous-requêtes neuf.
@@ -100,6 +106,7 @@ export async function runEngineSync(
  */
 async function syncCatalogue(
   env: Env,
+  mod: ReturnType<typeof buildEngine>,
   adapter: ReturnType<ReturnType<typeof buildEngine>["registry"]["get"]>,
   ctx: Parameters<NonNullable<typeof adapter.fetchListings>>[0],
   task: SyncTask,
@@ -108,12 +115,14 @@ async function syncCatalogue(
 
   const db = drizzle(env.DB);
   const repos = d1Repositories(env.DB, env.MASTER_KEY);
-  const mod = buildEngine(env);
   const now = Math.floor(Date.now() / 1000);
 
   let cursor = task.cursor ?? undefined;
   let pages = 0;
-  const divergences: string[] = [];
+  /** Écarts résorbés en recopiant la plateforme vers le stock central. */
+  const adoptions: string[] = [];
+  /** Écarts à résorber dans l'autre sens : le central a bougé, pas la plateforme. */
+  const aPousser: Array<{ productId: string; stock: number; quoi: string }> = [];
 
   while (pages < MAX_PAGES_PER_RUN) {
     const page = await adapter.fetchListings(ctx, cursor);
@@ -124,6 +133,8 @@ async function syncCatalogue(
         externalId: listing.externalId,
         contentHash: listing.contentHash,
         productId: listing.productId,
+        quantity: listing.quantity,
+        marketplaceData: listing.marketplaceData,
       })
       .from(listing)
       .where(eq(listing.shopId, task.shopId));
@@ -139,10 +150,6 @@ async function syncCatalogue(
         t: item.title,
       });
       const prev = known.get(item.remoteId);
-
-      // Rien n'a bougé : aucune écriture. C'est ce qui garde la consommation
-      // sous les 100 000 lignes écrites par jour de D1.
-      if (prev?.contentHash === hash) continue;
 
       let productId = prev?.productId ?? null;
       if (!productId && item.sku) {
@@ -174,15 +181,73 @@ async function syncCatalogue(
         }
       }
 
-      // Divergence de stock : on la signale sans la corriger dans ce sens.
+      /*
+       * RAPPROCHEMENT DU STOCK — le cœur de cette fonction.
+       *
+       * La question n'est pas « qui a raison » mais « QUI A BOUGÉ ». Le stock
+       * central porte un compteur de version qu'on incrémente à chaque
+       * modification ; l'annonce mémorise la version qu'elle avait vue la
+       * dernière fois. Comparer les deux tranche sans ambiguïté :
+       *
+       *   version actuelle > version mémorisée
+       *       → le central a bougé (une vente ailleurs, presque toujours) et
+       *         la plateforme est en retard. On lui pousse la valeur.
+       *
+       *   version identique mais valeurs différentes
+       *       → personne n'a touché au central, donc c'est la plateforme qui
+       *         a changé — quelqu'un a modifié le stock directement chez elle.
+       *         Cette valeur-là est la plus récente : on l'adopte.
+       *
+       * L'ancienne version se contentait de journaliser l'écart en attendant
+       * qu'une vente le résorbe. Deux conséquences : un stock modifié à la
+       * main chez la plateforme n'arrivait jamais jusqu'ici, et le contrôle
+       * était placé APRÈS la sortie anticipée sur l'empreinte — donc dès que
+       * l'annonce cessait de bouger, l'écart devenait invisible pour toujours.
+       */
+      let versionCentrale = 0;
+      let rapprochement = false;
+
       if (productId) {
         const central = await repos.inventory.get(productId);
-        if (central && central.onHand !== item.stock) {
-          divergences.push(
-            `${item.sku ?? item.remoteId} : central ${central.onHand}, ${ctx.account.marketplace} ${item.stock}`,
-          );
+        if (central) {
+          versionCentrale = central.version;
+          const prevData = JSON.parse(prev?.marketplaceData ?? "{}") as Record<
+            string,
+            unknown
+          >;
+          const vue = Number(prevData["centralVersion"] ?? 0);
+
+          const decision = reconcileStock({
+            centralOnHand: central.onHand,
+            centralVersion: central.version,
+            seenVersion: vue,
+            remoteStock: item.stock,
+          });
+
+          if (decision.action === "push") {
+            aPousser.push({
+              productId,
+              stock: decision.stock,
+              quoi: `${item.sku ?? item.remoteId} → ${decision.stock}`,
+            });
+          } else if (decision.action === "adopt") {
+            const apres = await mod.inventoryService.adopt(
+              productId,
+              decision.stock,
+            );
+            versionCentrale = apres.version;
+            rapprochement = true;
+            adoptions.push(
+              `${item.sku ?? item.remoteId} : ${central.onHand} → ${decision.stock} (${decision.reason})`,
+            );
+          }
         }
       }
+
+      // Sortie anticipée, maintenant qu'elle ne peut plus masquer un écart :
+      // ni l'annonce ni le stock central n'ont bougé, il n'y a rien à écrire.
+      // C'est ce qui garde la consommation sous les 100 000 écritures/jour de D1.
+      if (prev?.contentHash === hash && !rapprochement) continue;
 
       writes.push(
         db
@@ -200,7 +265,12 @@ async function syncCatalogue(
             status: item.status,
             url: item.url ?? null,
             imageUrl: item.imageUrl ?? null,
-            marketplaceData: JSON.stringify(item.marketplaceData ?? {}),
+            marketplaceData: JSON.stringify({
+              ...(item.marketplaceData ?? {}),
+              // Sans cette trace, impossible de savoir lequel des deux côtés
+              // a bougé au passage suivant.
+              centralVersion: versionCentrale,
+            }),
             contentHash: hash,
             syncedAt: now,
           })
@@ -215,7 +285,10 @@ async function syncCatalogue(
               quantity: item.stock,
               status: item.status,
               imageUrl: item.imageUrl ?? null,
-              marketplaceData: JSON.stringify(item.marketplaceData ?? {}),
+              marketplaceData: JSON.stringify({
+                ...(item.marketplaceData ?? {}),
+                centralVersion: versionCentrale,
+              }),
               contentHash: hash,
               syncedAt: now,
             },
@@ -229,15 +302,56 @@ async function syncCatalogue(
     if (!cursor) break;
   }
 
-  if (divergences.length > 0) {
+  if (adoptions.length > 0) {
     await db.insert(eventLog).values({
       id: randomId(),
       at: now,
-      level: "warn",
+      level: "info",
       scope: `stock:${ctx.account.marketplace}`,
       shopId: task.shopId,
-      message: `Stock divergent sur ${divergences.length} article(s)`,
-      data: JSON.stringify(divergences.slice(0, 20)),
+      message: `Stock central aligné sur ${adoptions.length} article(s) modifié(s) chez la plateforme`,
+      data: JSON.stringify(adoptions.slice(0, 20)),
+    });
+  }
+
+  /*
+   * Pousser le stock central vers la plateforme en retard.
+   *
+   * Plafonné, et le plafond est JOURNALISÉ : une troncature silencieuse se
+   * lirait comme « tout est aligné » alors qu'il reste des écarts. Le reste
+   * part au passage suivant, quinze minutes plus tard.
+   */
+  const PLAFOND_POUSSEES = 10;
+  if (aPousser.length > 0) {
+    const lot = aPousser.slice(0, PLAFOND_POUSSEES);
+    const echecs: string[] = [];
+
+    for (const x of lot) {
+      const r = await mod.orchestrator.setStock({
+        productId: x.productId,
+        accountIds: [task.shopId],
+        stock: x.stock,
+        idempotencyKey: `rapprochement:${task.shopId}:${x.productId}:${x.stock}`,
+      });
+      if (!r.anySuccess) {
+        echecs.push(`${x.quoi} — ${r.results[0]?.message ?? "échec"}`);
+      }
+    }
+
+    await db.insert(eventLog).values({
+      id: randomId(),
+      at: now,
+      level: echecs.length > 0 ? "warn" : "info",
+      scope: `stock:${ctx.account.marketplace}`,
+      shopId: task.shopId,
+      message:
+        `${lot.length - echecs.length}/${lot.length} stock(s) poussés vers ${ctx.account.marketplace}` +
+        (aPousser.length > lot.length
+          ? ` — ${aPousser.length - lot.length} reporté(s) au passage suivant`
+          : ""),
+      data: JSON.stringify(
+        echecs.length > 0 ? echecs.slice(0, 20) : lot.map((x) => x.quoi).slice(0, 20),
+      ),
     });
   }
 

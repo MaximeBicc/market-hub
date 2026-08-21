@@ -566,3 +566,134 @@ describe("client credentials (Dev Dashboard)", () => {
     expect((sent[0]?.headers as any)["X-Shopify-Access-Token"]).toBe("shpat_ancien");
   });
 });
+
+/**
+ * L'emplacement de stock, cause d'une panne réelle en production.
+ *
+ * `inventorySetQuantities` exige un `locationId` non nul. Quand la résolution
+ * échouait, la propagation de stock partait avec `null` et Shopify refusait la
+ * mutation — une vente sur un autre canal ne se répercutait donc jamais.
+ */
+describe("emplacement de stock", () => {
+  /** Article d'inventaire déjà connu : la file de réponses ne porte alors
+   *  que la résolution de l'emplacement puis la mutation. */
+  const annonce = {
+    ...listing,
+    marketplaceData: {
+      ...listing.marketplaceData,
+      inventoryItemId: "gid://shopify/InventoryItem/5",
+    },
+  };
+  function ctxSansEmplacement(
+    http: MarketplaceContext["http"],
+    saved: Record<string, string>[] = [],
+  ): MarketplaceContext {
+    return {
+      account: {
+        id: "acc1",
+        marketplace: "shopify",
+        slug: "shopify_test",
+        displayName: "Boutique test",
+        enabled: true,
+        externalAccountId: "test.myshopify.com",
+      },
+      credentials: {
+        shopDomain: "test.myshopify.com",
+        accessToken: "shpat_fake",
+      },
+      http,
+      saveCredentials: async (patch) => {
+        saved.push(patch);
+      },
+    };
+  }
+
+  it("utilise l'emplacement déjà mémorisé sans rien redemander", async () => {
+    const { http, sent } = fakeHttp([
+      { data: { inventorySetQuantities: { userErrors: [] } } },
+    ]);
+    await adapter.updateStock(ctxWith(http), annonce, 4);
+
+    // Une seule requête : la lecture des emplacements n'a pas eu lieu.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.body.variables.input.quantities[0].locationId).toBe(
+      "gid://shopify/Location/1",
+    );
+  });
+
+  it("résout puis mémorise l'emplacement quand il manque", async () => {
+    const saved: Record<string, string>[] = [];
+    const { http, sent } = fakeHttp([
+      {
+        data: {
+          locations: {
+            nodes: [{ id: "gid://shopify/Location/7", isActive: true }],
+          },
+        },
+      },
+      { data: { inventorySetQuantities: { userErrors: [] } } },
+    ]);
+    await adapter.updateStock(ctxSansEmplacement(http, saved), annonce, 4);
+
+    expect(sent[1]?.body.variables.input.quantities[0].locationId).toBe(
+      "gid://shopify/Location/7",
+    );
+    // Mémorisé : sans cela, chaque propagation relit les emplacements.
+    expect(saved[0]?.["locationId"]).toBe("gid://shopify/Location/7");
+  });
+
+  it("préfère un emplacement actif", async () => {
+    const { http, sent } = fakeHttp([
+      {
+        data: {
+          locations: {
+            nodes: [
+              { id: "gid://shopify/Location/1", isActive: false },
+              { id: "gid://shopify/Location/2", isActive: true },
+            ],
+          },
+        },
+      },
+      { data: { inventorySetQuantities: { userErrors: [] } } },
+    ]);
+    await adapter.updateStock(ctxSansEmplacement(http), annonce, 4);
+    expect(sent[1]?.body.variables.input.quantities[0].locationId).toBe(
+      "gid://shopify/Location/2",
+    );
+  });
+
+  it("se rabat sur un emplacement inactif plutôt que de ne rien écrire", async () => {
+    const { http, sent } = fakeHttp([
+      {
+        data: {
+          locations: {
+            nodes: [{ id: "gid://shopify/Location/3", isActive: false }],
+          },
+        },
+      },
+      { data: { inventorySetQuantities: { userErrors: [] } } },
+    ]);
+    await adapter.updateStock(ctxSansEmplacement(http), annonce, 4);
+    // Une boutique dont l'unique emplacement est marqué inactif porte quand
+    // même du stock. Refuser d'écrire laisserait l'écart s'installer.
+    expect(sent[1]?.body.variables.input.quantities[0].locationId).toBe(
+      "gid://shopify/Location/3",
+    );
+  });
+
+  it("n'envoie JAMAIS un identifiant nul", async () => {
+    const { http } = fakeHttp([{ data: { locations: { nodes: [] } } }]);
+    // C'est le point : plutôt qu'une mutation partie avec null et refusée par
+    // Shopify avec un message incompréhensible, une erreur qui nomme la cause.
+    await expect(
+      adapter.updateStock(ctxSansEmplacement(http), annonce, 4),
+    ).rejects.toThrow(/read_locations/);
+  });
+
+  it("survit à une réponse où « locations » est nul", async () => {
+    const { http } = fakeHttp([{ data: { locations: null } }]);
+    await expect(
+      adapter.updateStock(ctxSansEmplacement(http), annonce, 4),
+    ).rejects.toThrow(/emplacement de stock lisible/);
+  });
+});

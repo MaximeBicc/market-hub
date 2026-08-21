@@ -35,9 +35,12 @@ import type { RateLimiter } from "../do/rate-limiter.js";
  *   ebay         — Sell APIs. Lecture, prix, stock, expédition avec suivi,
  *                  relevé des ventes. Les notifications ECDSA ne sont pas
  *                  vérifiées : le relevé prend le relais.
+ *   etsy         — Open API v3. Lecture, prix, stock, expédition avec suivi,
+ *                  relevé des ventes. La création d'annonce reste fermée tant
+ *                  que la boutique n'a pas donné ses profils obligatoires.
  *
  * À VENIR, un par un, chacun validé en interne puis en direct :
- *   allegro, etsy, tiktok_shop
+ *   allegro, tiktok_shop
  *
  * Ajouter une plateforme se fait ici et dans son fichier d'adaptateur.
  * Aucun autre fichier n'a besoin de changer — c'est tout l'intérêt du contrat.
@@ -63,10 +66,32 @@ export function buildEngine(
    */
   counter: { used: number } = { used: 0 },
   extraAdapters: MarketplaceAdapter[] = [],
-): MarketplaceModule {
+): MarketplaceModule & {
+  httpFor: (account: {
+    id: string;
+    marketplace: string;
+  }) => ((input: string, init?: RequestInit) => Promise<Response>) | undefined;
+} {
   const repos = d1Repositories(env.DB, env.MASTER_KEY);
 
-  return createMarketplaceModule({
+  // Chaque adaptateur reçoit un fetch déjà régulé par le Durable Object de
+  // son compte. C'est ce qui protège des bannissements : aucune plateforme
+  // ne voit jamais un débit supérieur à ce qu'elle autorise, même si
+  // plusieurs synchronisations tournent en parallèle.
+  const httpFor = (account: { id: string; marketplace: string }) => {
+    const limits = LIMITS[account.marketplace];
+    if (!limits) return undefined;
+    const id = env.RATE_LIMITER.idFromName(account.id);
+    const limiter = env.RATE_LIMITER.get(id) as DurableObjectStub<RateLimiter>;
+    return createHttp({
+      limiter,
+      limits,
+      counter,
+      platform: account.marketplace,
+    });
+  };
+
+  const mod = createMarketplaceModule({
     ...repos,
 
     /**
@@ -105,21 +130,12 @@ export function buildEngine(
       ...extraAdapters,
     ],
 
-    // Chaque adaptateur reçoit un fetch déjà régulé par le Durable Object de
-    // son compte. C'est ce qui protège des bannissements : aucune plateforme
-    // ne voit jamais un débit supérieur à ce qu'elle autorise, même si
-    // plusieurs synchronisations tournent en parallèle.
-    httpFor: (account) => {
-      const limits = LIMITS[account.marketplace];
-      if (!limits) return undefined;
-      const id = env.RATE_LIMITER.idFromName(account.id);
-      const limiter = env.RATE_LIMITER.get(id) as DurableObjectStub<RateLimiter>;
-      return createHttp({
-        limiter,
-        limits,
-        counter,
-        platform: account.marketplace,
-      });
-    },
+    httpFor,
   });
+
+  // Exposé en plus du module : la synchronisation périodique construit son
+  // propre contexte d'adaptateur, en dehors de l'orchestrateur. Sans accès à
+  // cette fabrique, elle retombait sur le `fetch` global — donc hors du
+  // Durable Object de limitation, exactement ce que ce câblage doit empêcher.
+  return { ...mod, httpFor };
 }

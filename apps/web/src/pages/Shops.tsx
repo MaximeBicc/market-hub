@@ -40,6 +40,39 @@ export function Shops() {
 
   if (isLoading || !data) return <div className="boot">Chargement…</div>;
 
+  /**
+   * Suppression définitive d'une boutique.
+   *
+   * La confirmation nomme la boutique plutôt que de demander « êtes-vous
+   * sûr ? » : sur une liste de plusieurs comptes, la seule question qui
+   * compte est de savoir lequel on s'apprête à effacer. Le catalogue maître
+   * n'est pas touché, et le message le dit — sinon on hésite à cliquer.
+   */
+  async function supprimer(a: Account) {
+    if (
+      !window.confirm(
+        `Supprimer « ${a.displayName} » ?\n\n` +
+          "Ses annonces, commandes et jetons seront effacés. " +
+          "Les produits et le stock central sont conservés.",
+      )
+    ) {
+      return;
+    }
+    try {
+      const r = await api.del<{ supprime: string; produitsSansAnnonce: number }>(
+        `/engine/accounts/${a.id}`,
+      );
+      toast(
+        r.produitsSansAnnonce > 0
+          ? `${r.supprime} supprimée · ${r.produitsSansAnnonce} produit(s) sans annonce`
+          : `${r.supprime} supprimée`,
+      );
+      await qc.invalidateQueries({ queryKey: ["accounts"] });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Suppression impossible");
+    }
+  }
+
   async function act(path: string, ok: string) {
     try {
       await api.post(path);
@@ -174,6 +207,12 @@ export function Shops() {
                         Pause
                       </button>
                     )}
+                    <button
+                      className="btn btn--small btn--ghost"
+                      onClick={() => void supprimer(a)}
+                    >
+                      Supprimer
+                    </button>
                   </div>
                 </div>
               </div>

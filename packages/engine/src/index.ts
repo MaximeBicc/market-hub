@@ -5,6 +5,7 @@ export * from "./core/registry.js";
 export * from "./core/module.js";
 export * from "./services/orchestrator.js";
 export * from "./services/inventory-service.js";
+export * from "./services/stock-reconciliation.js";
 export * from "./services/sales-sync-service.js";
 export * from "./adapters/mock.js";
 export * from "./adapters/vinted-safe.js";

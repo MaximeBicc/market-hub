@@ -269,12 +269,32 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     if (configured) return configured;
 
     const d = await this.gql<{
-      locations: { nodes: Array<{ id: string; isActive: boolean }> };
-    }>(ctx, `query { locations(first: 5) { nodes { id isActive } } }`);
+      locations: {
+        nodes: Array<{ id: string | null; isActive: boolean }>;
+      } | null;
+    }>(ctx, `query { locations(first: 10) { nodes { id isActive } } }`);
 
-    const first = d.locations.nodes.find((l) => l.isActive);
-    if (!first) throw new Error("Shopify : aucun emplacement de stock actif");
-    return first.id;
+    const nodes = d.locations?.nodes ?? [];
+    // Un emplacement actif d'abord, à défaut n'importe lequel qui ait un
+    // identifiant. Une boutique dont l'unique emplacement est marqué inactif
+    // porte quand même du stock : refuser d'écrire dans ce cas ne protège de
+    // rien et laisse le stock diverger en silence.
+    const choisi =
+      nodes.find((l) => l.isActive && l.id) ?? nodes.find((l) => l.id);
+
+    if (!choisi?.id) {
+      throw new Error(
+        "Shopify : aucun emplacement de stock lisible. L'application a-t-elle la portée « read_locations » ?",
+      );
+    }
+
+    // Mémorisé avec les identifiants. Deux raisons : la valeur est stable, et
+    // la relire avant chaque écriture coûte une requête par propagation. Sans
+    // ce cache, une lecture qui échoue une fois bloque l'écriture de stock —
+    // c'est précisément le mode de panne observé en production, où la
+    // propagation échouait sur un `locationId` nul.
+    await ctx.saveCredentials?.({ locationId: choisi.id });
+    return choisi.id;
   }
 
   /* ---------------------------------------------------------------- */

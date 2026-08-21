@@ -43,6 +43,32 @@ export class InventoryService {
     throw new Error(`Contention persistante sur le stock de ${productId}`);
   }
 
+  /**
+   * Aligne le stock central sur une valeur constatée chez une plateforme.
+   *
+   * À n'appeler QUE lorsqu'on a la preuve que le central n'a pas bougé depuis
+   * la dernière lecture — sa `version` en fait foi. Sans cette précaution, une
+   * vente encore en cours de propagation serait annulée en recopiant la valeur
+   * d'une plateforme qui ne l'a pas encore reçue.
+   *
+   * Le verrou optimiste est conservé : entre la vérification et l'écriture,
+   * une vente peut arriver, et c'est elle qui doit gagner.
+   */
+  async adopt(productId: ProductId, onHand: number): Promise<InventoryItem> {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const cur = await this.repo.get(productId);
+      if (!cur) throw new Error(`Aucun stock pour le produit ${productId}`);
+      if (cur.onHand === onHand) return cur;
+      const next: InventoryItem = {
+        ...cur,
+        onHand,
+        version: cur.version + 1,
+      };
+      if (await this.repo.compareAndSet(next, cur.version)) return next;
+    }
+    throw new Error(`Contention persistante sur le stock de ${productId}`);
+  }
+
   /** Réserve une quantité vendue mais pas encore expédiée. */
   async reserve(productId: ProductId, quantity: number): Promise<InventoryItem> {
     for (let attempt = 0; attempt < 8; attempt++) {

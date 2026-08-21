@@ -1,7 +1,20 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq } from "drizzle-orm";
-import { inventory, listing, product, salesEvent, shop } from "../db/schema.js";
+import { and, eq, inArray } from "drizzle-orm";
+import {
+  commandLog,
+  eventLog,
+  inventory,
+  listing,
+  oauthToken,
+  order,
+  orderLine,
+  product,
+  salesEvent,
+  shop,
+  syncJob,
+  webhookReceipt,
+} from "../db/schema.js";
 import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
 import { contentHash, randomId } from "../lib/crypto.js";
@@ -1048,4 +1061,84 @@ accounts.post("/:id/etsy/profils", async (c) => {
   await repos.credentials.put(id, { ...current, ...patch });
 
   return c.json({ ok: true, renseignes: Object.keys(patch) });
+});
+
+/**
+ * Supprime une boutique et tout ce qui n'a de sens que par elle.
+ *
+ * POURQUOI CETTE ROUTE EXISTE : une connexion ratée laisse une boutique en
+ * erreur, avec un jeton chiffré inutilisable, qui reste indéfiniment dans la
+ * liste. « Mettre en pause » ne l'enlève pas — c'est fait pour une boutique
+ * saine qu'on veut suspendre. Il fallait pouvoir effacer.
+ *
+ * CE QUI EST EFFACÉ : le jeton, les annonces, les commandes et leurs lignes,
+ * les tâches de synchronisation, les ventes constatées, le journal des
+ * commandes, les accusés de webhook et les événements de cette boutique.
+ *
+ * CE QUI SURVIT : les produits maîtres et le stock central. Ils sont partagés
+ * entre plateformes — les supprimer avec une boutique effacerait le stock
+ * d'articles encore en vente ailleurs. La réponse indique combien de produits
+ * se retrouvent sans aucune annonce, pour que le ménage reste un choix.
+ *
+ * L'ordre des suppressions suit les clés étrangères : les lignes de commande
+ * avant les commandes, tout le reste avant la boutique elle-même. Le tout en
+ * un seul lot, donc en une seule transaction : une suppression à moitié faite
+ * laisserait des lignes orphelines impossibles à retrouver depuis l'interface.
+ */
+accounts.delete("/:id", async (c) => {
+  const id = c.req.param("id");
+
+  const existe = await drizzle(c.env.DB)
+    .select({ id: shop.id, nom: shop.displayName, plateforme: shop.platform })
+    .from(shop)
+    .where(eq(shop.id, id))
+    .limit(1);
+  const cible = existe[0];
+  if (!cible) return c.json({ error: "Boutique inconnue" }, 404);
+
+  const db = drizzle(c.env.DB);
+
+  const commandes = await db
+    .select({ id: order.id })
+    .from(order)
+    .where(eq(order.shopId, id));
+  const idsCommandes = commandes.map((o) => o.id);
+
+  const lot = [
+    ...(idsCommandes.length > 0
+      ? [db.delete(orderLine).where(inArray(orderLine.orderId, idsCommandes))]
+      : []),
+    db.delete(order).where(eq(order.shopId, id)),
+    db.delete(listing).where(eq(listing.shopId, id)),
+    db.delete(syncJob).where(eq(syncJob.shopId, id)),
+    db.delete(oauthToken).where(eq(oauthToken.shopId, id)),
+    db.delete(salesEvent).where(eq(salesEvent.accountId, id)),
+    db.delete(commandLog).where(eq(commandLog.accountId, id)),
+    db.delete(webhookReceipt).where(eq(webhookReceipt.shopId, id)),
+    db.delete(eventLog).where(eq(eventLog.shopId, id)),
+    db.delete(shop).where(eq(shop.id, id)),
+  ];
+  await db.batch(lot as never);
+
+  // Produits devenus orphelins : signalés, jamais supprimés d'office.
+  const orphelins = await c.env.DB.prepare(
+    "SELECT count(*) AS n FROM product WHERE id NOT IN (SELECT product_id FROM listing WHERE product_id IS NOT NULL)",
+  ).first<{ n: number }>();
+
+  await db.insert(eventLog).values({
+    id: randomId(),
+    at: Math.floor(Date.now() / 1000),
+    level: "warn",
+    scope: "compte",
+    shopId: null,
+    message: `Boutique supprimée : ${cible.nom} (${cible.plateforme})`,
+    data: JSON.stringify({ commandes: idsCommandes.length }),
+  });
+
+  return c.json({
+    ok: true,
+    supprime: cible.nom,
+    commandes: idsCommandes.length,
+    produitsSansAnnonce: orphelins?.n ?? 0,
+  });
 });
