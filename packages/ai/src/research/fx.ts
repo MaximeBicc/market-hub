@@ -73,13 +73,52 @@ export interface Converted {
  * un prix faux dans une médiane sans que rien ne le signale. Un prix qu'on ne
  * sait pas convertir est un prix qu'on écarte.
  */
+/**
+ * Ramène une devise à son code ISO.
+ *
+ * NÉE D'UN VRAI SILENCE. Une lecture de pages avait relevé quatre prix
+ * corrects — 16,90 / 5,00 / 3,00 / 5,90 — en les accompagnant du symbole
+ * « € », comme ils étaient écrits sur les pages. La table de la BCE ne connaît
+ * que les codes ; les quatre ont donc été écartés sans un mot, et la recherche
+ * a conclu « pas assez de prix comparables ».
+ *
+ * L'échec le plus coûteux n'est pas celui qui crie : c'est celui qui
+ * ressemble à une absence de résultat.
+ */
+const SYMBOLES: Record<string, string> = {
+  "€": "EUR",
+  EURO: "EUR",
+  EUROS: "EUR",
+  $: "USD",
+  US$: "USD",
+  USD$: "USD",
+  DOLLAR: "USD",
+  "£": "GBP",
+  LIVRE: "GBP",
+  "¥": "JPY",
+  YEN: "JPY",
+  "CHF.": "CHF",
+  FR: "CHF",
+  "ZŁ": "PLN",
+  KČ: "CZK",
+  KR: "SEK",
+};
+
+export function normaliserDevise(currency: string | null | undefined): string {
+  const brut = (currency ?? "EUR").trim().toUpperCase();
+  if (!brut) return "EUR";
+  // Un code ISO fait exactement trois lettres : tout le reste est un symbole,
+  // un mot, ou une graphie qu'il faut traduire avant de chercher un taux.
+  if (/^[A-Z]{3}$/.test(brut)) return brut;
+  return SYMBOLES[brut] ?? brut;
+}
+
 export function toEur(
   amount: number,
   currency: string | null | undefined,
   rates: FxRates,
 ): Converted | null {
-  const code = (currency ?? "EUR").toUpperCase();
-  const rate = rates.perEuro[code];
+  const rate = rates.perEuro[normaliserDevise(currency)];
   if (!rate) return null;
   return { amount: Math.round(amount / rate), rate };
 }
