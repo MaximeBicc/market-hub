@@ -519,3 +519,188 @@ describe("relevé des ventes", () => {
     expect(r.events[0]?.kind).toBe("cancelled");
   });
 });
+
+describe("webhooks", () => {
+  const SECRET_BRUT = "c3VwZXItc2VjcmV0LXBvdXItbGVzLXRlc3Rz"; // base64
+  const SECRET = `whsec_${SECRET_BRUT}`;
+
+  /** Signe comme Svix : identifiant.horodatage.corps, clé base64-décodée. */
+  async function signer(id: string, ts: string, corps: string, secret = SECRET_BRUT) {
+    const cle = await crypto.subtle.importKey(
+      "raw",
+      Uint8Array.from(atob(secret), (c) => c.charCodeAt(0)),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign(
+      "HMAC",
+      cle,
+      new TextEncoder().encode(`${id}.${ts}.${corps}`),
+    );
+    return btoa(String.fromCharCode(...new Uint8Array(sig)));
+  }
+
+  function requete(entetes: Record<string, string>, corps: string) {
+    return new Request("https://x/", {
+      method: "POST",
+      headers: entetes,
+      body: corps,
+    });
+  }
+
+  const ctxWebhook = (secret?: string): MarketplaceContext => ({
+    account: {
+      id: "acc-etsy",
+      marketplace: "etsy",
+      slug: "e",
+      displayName: "e",
+      enabled: true,
+    },
+    credentials: secret === undefined ? {} : { webhookSecret: secret },
+  });
+
+  it("accepte une signature valide", async () => {
+    const corps = JSON.stringify({ type: "order.paid", receipt_id: 5001 });
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = await signer("msg_1", ts, corps);
+
+    await expect(
+      adapter.verifyAndParseWebhook(
+        ctxWebhook(SECRET),
+        requete(
+          {
+            "webhook-id": "msg_1",
+            "webhook-timestamp": ts,
+            "webhook-signature": `v1,${sig}`,
+          },
+          corps,
+        ),
+        corps,
+      ),
+    ).resolves.toEqual([]);
+  });
+
+  it("refuse une signature calculée sur le seul corps", async () => {
+    // L'erreur classique : Etsy signe « id.horodatage.corps », pas le corps.
+    const corps = JSON.stringify({ type: "order.paid" });
+    const ts = String(Math.floor(Date.now() / 1000));
+    const cle = await crypto.subtle.importKey(
+      "raw",
+      Uint8Array.from(atob(SECRET_BRUT), (c) => c.charCodeAt(0)),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const brut = btoa(
+      String.fromCharCode(
+        ...new Uint8Array(
+          await crypto.subtle.sign("HMAC", cle, new TextEncoder().encode(corps)),
+        ),
+      ),
+    );
+
+    await expect(
+      adapter.verifyAndParseWebhook(
+        ctxWebhook(SECRET),
+        requete(
+          {
+            "webhook-id": "msg_1",
+            "webhook-timestamp": ts,
+            "webhook-signature": `v1,${brut}`,
+          },
+          corps,
+        ),
+        corps,
+      ),
+    ).rejects.toThrow(/signature/);
+  });
+
+  it("accepte plusieurs signatures, pour une rotation de secret", async () => {
+    const corps = "{}";
+    const ts = String(Math.floor(Date.now() / 1000));
+    const bonne = await signer("msg_2", ts, corps);
+
+    await expect(
+      adapter.verifyAndParseWebhook(
+        ctxWebhook(SECRET),
+        requete(
+          {
+            "webhook-id": "msg_2",
+            "webhook-timestamp": ts,
+            "webhook-signature": `v1,AAAAduMMY= v1,${bonne}`,
+          },
+          corps,
+        ),
+        corps,
+      ),
+    ).resolves.toEqual([]);
+  });
+
+  it("rejette un rejeu ancien", async () => {
+    const corps = "{}";
+    const vieux = String(Math.floor(Date.now() / 1000) - 3600);
+    const sig = await signer("msg_3", vieux, corps);
+
+    // Une notification interceptée ne doit pas pouvoir être renvoyée plus tard.
+    await expect(
+      adapter.verifyAndParseWebhook(
+        ctxWebhook(SECRET),
+        requete(
+          {
+            "webhook-id": "msg_3",
+            "webhook-timestamp": vieux,
+            "webhook-signature": `v1,${sig}`,
+          },
+          corps,
+        ),
+        corps,
+      ),
+    ).rejects.toThrow(/trop ancien/);
+  });
+
+  it("accepte le secret sans son préfixe", async () => {
+    const corps = "{}";
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = await signer("msg_4", ts, corps);
+
+    await expect(
+      adapter.verifyAndParseWebhook(
+        ctxWebhook(SECRET_BRUT),
+        requete(
+          {
+            "webhook-id": "msg_4",
+            "webhook-timestamp": ts,
+            "webhook-signature": `v1,${sig}`,
+          },
+          corps,
+        ),
+        corps,
+      ),
+    ).resolves.toEqual([]);
+  });
+
+  it("refuse quand le secret n'a pas été renseigné", async () => {
+    await expect(
+      adapter.verifyAndParseWebhook(
+        ctxWebhook(),
+        requete(
+          {
+            "webhook-id": "m",
+            "webhook-timestamp": "1",
+            "webhook-signature": "v1,x",
+          },
+          "{}",
+        ),
+        "{}",
+      ),
+    ).rejects.toThrow(/secret/);
+  });
+
+  it("déclenche une relecture des ventes", () => {
+    // On ne parse pas le corps : sa forme n'est pas documentée de façon
+    // fiable, et deviner la structure d'une vente décrémente un stock deux
+    // fois. Le webhook dit « ça a bougé », le relevé va lire quoi.
+    expect(adapter.webhookResync()).toEqual(["orders"]);
+  });
+});

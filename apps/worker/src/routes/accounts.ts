@@ -20,6 +20,8 @@ import { authenticate } from "../lib/session.js";
 import { contentHash, randomId } from "../lib/crypto.js";
 import { buildEngine } from "../engine/module.js";
 import {
+  shopifyEnsureWebhooks,
+  type ShopifyAdapter,
   ebayConsentUrl,
   ebayExchangeCode,
   etsyConsentUrl,
@@ -1043,11 +1045,19 @@ accounts.post("/:id/etsy/profils", async (c) => {
       shippingProfileId?: string;
       readinessStateId?: string;
       taxonomyId?: string;
+      webhookSecret?: string;
     }>()
     .catch(() => ({}) as Record<string, string>);
 
   const patch: Record<string, string> = {};
-  for (const k of ["shippingProfileId", "readinessStateId", "taxonomyId"] as const) {
+  for (const k of [
+    "shippingProfileId",
+    "readinessStateId",
+    "taxonomyId",
+    // Donné par le portail Webhooks d'Etsy à la création du point d'entrée,
+    // sous la forme « whsec_… ». Sans lui, aucune notification n'est acceptée.
+    "webhookSecret",
+  ] as const) {
     const v = (body[k] ?? "").trim();
     if (v) patch[k] = v;
   }
@@ -1141,4 +1151,87 @@ accounts.delete("/:id", async (c) => {
     commandes: idsCommandes.length,
     produitsSansAnnonce: orphelins?.n ?? 0,
   });
+});
+
+/**
+ * Active le temps réel sur une boutique.
+ *
+ * ACTION SORTANTE : cette route écrit dans les réglages de la boutique
+ * distante — elle y crée des abonnements aux webhooks. C'est pour cela
+ * qu'elle est déclenchée par un clic explicite et jamais automatiquement à la
+ * connexion : personne ne devrait découvrir après coup que son compte
+ * marchand a été modifié.
+ *
+ * Rien n'est supprimé chez la plateforme. Un abonnement déjà présent est
+ * laissé tel quel, et un abonnement pointant ailleurs — appartenant peut-être
+ * à une autre application installée sur la même boutique — n'est pas touché.
+ *
+ * Une fois les abonnements en place, le relevé périodique se relâche de deux
+ * minutes à quinze : il n'est plus la voie principale mais le filet, pour le
+ * jour où un webhook se perd ou qu'un abonnement est désactivé.
+ */
+accounts.post("/:id/temps-reel", async (c) => {
+  const id = c.req.param("id");
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Boutique inconnue" }, 404);
+
+  if (account.marketplace !== "shopify") {
+    return c.json(
+      {
+        error:
+          account.marketplace === "etsy"
+            ? "Etsy ne permet pas de créer un abonnement par l'API : il se crée dans le portail Webhooks d'Etsy, puis son secret se colle ici."
+            : `${account.marketplace} n'expose pas d'abonnement aux webhooks. Le relevé reste la voie, toutes les deux minutes.`,
+      },
+      400,
+    );
+  }
+
+  const credentials = await repos.credentials.get(id);
+  const mod = buildEngine(c.env);
+  const adaptateur = mod.registry.get("shopify") as ShopifyAdapter;
+
+  const rappel = `${c.env.APP_URL.replace(/\/+$/, "")}/api/webhooks/shopify`;
+
+  try {
+    const rapport = await shopifyEnsureWebhooks(
+      adaptateur,
+      {
+        account,
+        credentials,
+        http: mod.httpFor(account),
+        saveCredentials: async (patch) => {
+          await repos.credentials.put(id, { ...credentials, ...patch });
+        },
+      },
+      rappel,
+    );
+
+    const poses = rapport.crees.length + rapport.dejaLa.length;
+    if (poses > 0) {
+      const frais = await repos.credentials.get(id);
+      await repos.credentials.put(id, { ...frais, webhooksActifs: "1" });
+      // Recalcule les cadences : le relevé devient un filet.
+      await ensureSyncJobs(c.env, id);
+    }
+
+    return c.json({
+      ok: rapport.echecs.length === 0,
+      rappel,
+      crees: rapport.crees,
+      dejaLa: rapport.dejaLa,
+      echecs: rapport.echecs,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json(
+      {
+        error: /access denied|scope/i.test(message)
+          ? "Shopify refuse : l'application n'a pas la portée « write_webhooks ». Ajoutez-la dans le Dev Dashboard, réinstallez l'app, puis réessayez."
+          : message,
+      },
+      400,
+    );
+  }
 });

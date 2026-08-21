@@ -130,6 +130,26 @@ export interface MarketplaceAdapter {
   ): Promise<PollResult>;
 
   /**
+   * Ce qu'un webhook DÉJÀ VÉRIFIÉ oblige à relire, au-delà des ventes.
+   *
+   * Un changement de stock n'est pas une vente : il n'entre pas dans le
+   * modèle d'événement canonique, qui décrit des commandes. Plutôt que
+   * d'inventer un second modèle par plateforme, le webhook sert ici de
+   * DÉCLENCHEUR : il dit « quelque chose a bougé sur cette ressource », et
+   * c'est la synchronisation habituelle — avec son rapprochement de stock
+   * déjà éprouvé — qui va lire ce qui a changé.
+   *
+   * Un aller-retour de plus, mais une seule logique de stock dans tout
+   * l'outil. Et chaque plateforme qui gagnera un webhook plus tard se
+   * branchera ici sans rien réécrire.
+   *
+   * Renvoie des noms de ressources : « inventory », « orders », « listings ».
+   * N'est appelé QU'APRÈS vérification de la signature — sinon n'importe qui
+   * pourrait déclencher des synchronisations et vider les quotas.
+   */
+  webhookResync?(request: Request): string[];
+
+  /**
    * Vérifie la signature d'un webhook et le traduit en événements canoniques.
    * Reçoit la requête brute : re-sérialiser le corps casserait la signature.
    */

@@ -6,6 +6,7 @@ import { shop } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { buildEngine } from "../engine/module.js";
 import { d1Repositories } from "../engine/repositories.js";
+import type { QueueTask, SyncResource } from "@hub/core";
 
 /**
  * Réception des webhooks — les seules routes PUBLIQUES de l'application.
@@ -79,6 +80,29 @@ webhooks.post("/:platform", async (c) => {
   // Aucun compte n'a reconnu la signature. On ne dit pas pourquoi : indiquer
   // à un attaquant ce qui n'allait pas dans sa signature l'aiderait.
   if (!events || !accountId) return c.text("Unauthorized", 401);
+
+  /*
+   * Un webhook vérifié n'est pas forcément une vente.
+   *
+   * Shopify pousse un changement de stock, Etsy ne pousse qu'un identifiant
+   * de commande sans forme documentée : dans les deux cas il n'y a rien à
+   * traduire, mais tout à relire. On empile donc une synchronisation ciblée
+   * plutôt que d'attendre le prochain passage du cron — c'est ce qui fait
+   * passer la détection de plusieurs minutes à quelques secondes.
+   *
+   * Après vérification, jamais avant : sans cela, n'importe qui pourrait
+   * déclencher des synchronisations en boucle et vider les quotas.
+   */
+  for (const resource of adapter.webhookResync?.(c.req.raw) ?? []) {
+    await c.env.SYNC_QUEUE.send({
+      kind: "sync",
+      shopId: accountId,
+      resource: resource as SyncResource,
+      cursor: null,
+      depth: 0,
+    } satisfies QueueTask);
+  }
+
   if (events.length === 0) return c.text("OK", 200);
 
   /**

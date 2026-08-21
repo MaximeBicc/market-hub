@@ -836,4 +836,104 @@ export class EtsyAdapter implements MarketplaceAdapter {
           : undefined,
     };
   }
+
+  /* ---------------------------------------------------------------- */
+  /* Webhooks                                                          */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Toute notification Etsy vérifiée déclenche une relecture des ventes.
+   *
+   * Les quatre événements livrés — `order.paid`, `order.canceled`,
+   * `order.shipped`, `order.delivered` — concernent tous des commandes. On ne
+   * lit donc pas le corps pour décider : il n'y a qu'une réponse possible.
+   *
+   * Et surtout : on ne PARSE pas le corps. La forme exacte du payload n'est
+   * pas documentée de façon fiable, et deviner la structure d'un événement de
+   * vente est le genre d'approximation qui décrémente un stock deux fois. Le
+   * webhook dit « une commande a bougé » ; le relevé, déjà éprouvé, va lire
+   * laquelle. Quelques secondes au lieu de quinze minutes, sans rien inventer.
+   */
+  webhookResync(): string[] {
+    return ["orders"];
+  }
+
+  /**
+   * Vérifie la signature d'un webhook Etsy.
+   *
+   * Etsy utilise le format de signature de Svix, qui n'est PAS un simple HMAC
+   * du corps : le contenu signé est `identifiant.horodatage.corps`. Signer le
+   * seul corps échoue systématiquement, et le message d'erreur ne le dit pas.
+   *
+   * Le secret arrive préfixé `whsec_` et le reste est en base64 : c'est le
+   * résultat du décodage qui sert de clé, pas la chaîne littérale. C'est la
+   * seconde erreur classique.
+   *
+   * Renvoie une liste vide : la vérification est le seul objectif ici, la
+   * lecture des ventes revient au relevé. Voir `webhookResync`.
+   */
+  async verifyAndParseWebhook(
+    ctx: MarketplaceContext,
+    request: Request,
+    rawBody: string,
+  ): Promise<CanonicalOrderEvent[]> {
+    const id = request.headers.get("webhook-id");
+    const horodatage = request.headers.get("webhook-timestamp");
+    const signatures = request.headers.get("webhook-signature");
+    const secret = ctx.credentials?.["webhookSecret"] ?? "";
+
+    if (!id || !horodatage || !signatures || !secret) {
+      throw new Error("Etsy : en-têtes de webhook ou secret manquants");
+    }
+
+    // Rejeu : une notification interceptée ne doit pas pouvoir être renvoyée
+    // des heures plus tard. Cinq minutes de tolérance, dans les deux sens,
+    // pour absorber le décalage d'horloge.
+    const ecart = Math.abs(Math.floor(Date.now() / 1000) - Number(horodatage));
+    if (!Number.isFinite(ecart) || ecart > 300) {
+      throw new Error("Etsy : webhook trop ancien ou horodatage invalide");
+    }
+
+    const brut = secret.startsWith("whsec_") ? secret.slice(6) : secret;
+    const cle = await crypto.subtle.importKey(
+      "raw",
+      Uint8Array.from(atob(brut), (c) => c.charCodeAt(0)),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign(
+      "HMAC",
+      cle,
+      new TextEncoder().encode(`${id}.${horodatage}.${rawBody}`),
+    );
+    const attendue = btoa(String.fromCharCode(...new Uint8Array(sig)));
+
+    // L'en-tête porte plusieurs signatures séparées par des espaces, chacune
+    // préfixée de sa version : Etsy peut faire tourner son secret sans
+    // interruption, et pendant la rotation les deux sont valables.
+    const proposees = signatures
+      .split(" ")
+      .filter((v) => v.startsWith("v1,"))
+      .map((v) => v.slice(3));
+
+    if (!proposees.some((p) => egalesEnTempsConstant(p, attendue))) {
+      throw new Error("Etsy : signature de webhook invalide");
+    }
+
+    return [];
+  }
+}
+
+/**
+ * Comparaison à temps constant.
+ *
+ * Une comparaison naïve s'arrête au premier octet différent : le temps de
+ * réponse révèle alors la signature attendue, octet par octet.
+ */
+function egalesEnTempsConstant(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }

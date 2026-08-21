@@ -773,6 +773,42 @@ export class ShopifyAdapter implements MarketplaceAdapter {
   }
 
   /**
+   * Accès brut à l'API GraphQL, pour ce qui ne fait pas partie du contrat
+   * commun — l'abonnement aux webhooks, notamment.
+   *
+   * Exposé plutôt que dupliqué : l'obtention du jeton, son renouvellement et
+   * la lecture des DEUX formes d'erreur de Shopify vivent à un seul endroit,
+   * et une opération hors contrat n'a aucune raison de les réécrire.
+   */
+  async rawGql<T>(
+    ctx: MarketplaceContext,
+    query: string,
+    variables: Record<string, unknown> = {},
+  ): Promise<T> {
+    return this.gql<T>(ctx, query, variables);
+  }
+
+  /**
+   * Les sujets qui obligent à relire le catalogue.
+   *
+   * `inventory_levels/update` est LE sujet qui répond au besoin : Shopify le
+   * pousse dès qu'une quantité change, y compris quand elle est modifiée à la
+   * main dans l'administration. C'est ce qui fait passer la détection de
+   * quinze minutes à quelques secondes.
+   */
+  webhookResync(request: Request): string[] {
+    const topic = request.headers.get("X-Shopify-Topic") ?? "";
+    if (
+      topic.startsWith("inventory_levels/") ||
+      topic.startsWith("inventory_items/") ||
+      topic.startsWith("products/")
+    ) {
+      return ["inventory"];
+    }
+    return [];
+  }
+
+  /**
    * Vérifie la signature HMAC puis traduit le webhook.
    *
    * Le corps BRUT est indispensable : un `JSON.parse` suivi d'un
@@ -785,7 +821,12 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     rawBody: string,
   ): Promise<CanonicalOrderEvent[]> {
     const received = request.headers.get("X-Shopify-Hmac-Sha256");
-    const secret = ctx.credentials?.["webhookSecret"] ?? "";
+    // Un webhook créé PAR L'APPLICATION est signé avec le secret client de
+    // l'application, pas avec un secret propre à l'abonnement. Le repli évite
+    // de redemander une valeur qu'on possède déjà — et c'est exactement ce
+    // qu'il fallait pour activer le temps réel sans nouveau champ à saisir.
+    const secret =
+      ctx.credentials?.["webhookSecret"] || ctx.credentials?.["clientSecret"] || "";
     if (!received || !secret) {
       throw new Error("Shopify : signature ou secret de webhook manquant");
     }
@@ -847,4 +888,129 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       },
     ];
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Abonnement aux webhooks                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Les sujets auxquels s'abonner, et pourquoi chacun.
+ *
+ * `INVENTORY_LEVELS_UPDATE` est celui qui compte : Shopify le pousse dès
+ * qu'une quantité bouge, y compris quand elle est saisie à la main dans
+ * l'administration. C'est lui qui fait tomber la détection de quinze minutes
+ * à quelques secondes.
+ *
+ * Les sujets de commande servent la propagation vers les autres canaux, et
+ * `REFUNDS_CREATE` restitue le stock d'un article remboursé — sans lui, une
+ * unité rendue reste invendable jusqu'au prochain rapprochement.
+ */
+export const SHOPIFY_WEBHOOK_TOPICS = [
+  "INVENTORY_LEVELS_UPDATE",
+  "PRODUCTS_UPDATE",
+  "ORDERS_CREATE",
+  "ORDERS_UPDATED",
+  "ORDERS_CANCELLED",
+  "REFUNDS_CREATE",
+] as const;
+
+export interface WebhookSyncReport {
+  crees: string[];
+  dejaLa: string[];
+  echecs: Array<{ topic: string; message: string }>;
+}
+
+/**
+ * Déclare nos webhooks chez Shopify, sans jamais en créer deux fois le même.
+ *
+ * Shopify n'a pas d'opération « créer ou remplacer » : recréer un abonnement
+ * déjà présent le duplique, et chaque événement arrive alors en double. On
+ * lit donc d'abord ce qui existe, et on ne crée que ce qui manque.
+ *
+ * Un abonnement pointant vers une AUTRE adresse pour le même sujet est laissé
+ * intact : il appartient peut-être à une autre application installée sur la
+ * boutique, et le supprimer casserait son fonctionnement.
+ *
+ * Demande la portée `write_webhooks` sur l'application. Sans elle, Shopify
+ * refuse — et le message est explicite, contrairement à la plupart de ses
+ * refus.
+ */
+export async function shopifyEnsureWebhooks(
+  adapter: ShopifyAdapter,
+  ctx: MarketplaceContext,
+  callbackUrl: string,
+): Promise<WebhookSyncReport> {
+  if (!/^https:\/\//i.test(callbackUrl)) {
+    throw new Error("Shopify : l'adresse de rappel doit être en HTTPS");
+  }
+
+  const existants = await adapter.rawGql<{
+    webhookSubscriptions: {
+      nodes: Array<{
+        id: string;
+        topic: string;
+        endpoint: { callbackUrl?: string } | null;
+      }>;
+    };
+  }>(
+    ctx,
+    `query { webhookSubscriptions(first: 100) {
+       nodes {
+         id topic
+         endpoint { ... on WebhookHttpEndpoint { callbackUrl } }
+       }
+     } }`,
+  );
+
+  const deja = new Set(
+    existants.webhookSubscriptions.nodes
+      .filter((n) => n.endpoint?.callbackUrl === callbackUrl)
+      .map((n) => n.topic),
+  );
+
+  const rapport: WebhookSyncReport = { crees: [], dejaLa: [], echecs: [] };
+
+  for (const topic of SHOPIFY_WEBHOOK_TOPICS) {
+    if (deja.has(topic)) {
+      rapport.dejaLa.push(topic);
+      continue;
+    }
+    try {
+      const r = await adapter.rawGql<{
+        webhookSubscriptionCreate: {
+          webhookSubscription: { id: string } | null;
+          userErrors: Array<{ field?: string[] | null; message: string }>;
+        };
+      }>(
+        ctx,
+        `mutation Sub($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {
+           webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) {
+             webhookSubscription { id }
+             userErrors { field message }
+           }
+         }`,
+        { topic, sub: { callbackUrl, format: "JSON" } },
+      );
+
+      const erreurs = r.webhookSubscriptionCreate.userErrors;
+      if (erreurs.length > 0) {
+        rapport.echecs.push({
+          topic,
+          message: erreurs.map((e) => e.message).join(" ; "),
+        });
+      } else {
+        rapport.crees.push(topic);
+      }
+    } catch (err) {
+      // L'échec d'un sujet ne doit pas empêcher les autres : mieux vaut le
+      // temps réel sur cinq sujets sur six que rien du tout.
+      rapport.echecs.push({
+        topic,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return rapport;
 }

@@ -41,6 +41,33 @@ export function Shops() {
   if (isLoading || !data) return <div className="boot">Chargement…</div>;
 
   /**
+   * Demande à la plateforme de pousser ses événements.
+   *
+   * Le bouton est explicite parce que l'action l'est : elle crée des
+   * abonnements DANS la boutique distante. Le faire en silence à la connexion
+   * reviendrait à modifier un compte marchand sans le dire.
+   */
+  async function tempsReel(a: Account) {
+    try {
+      const r = await api.post<{
+        crees: string[];
+        dejaLa: string[];
+        echecs: Array<{ topic: string; message: string }>;
+      }>(`/engine/accounts/${a.id}/temps-reel`);
+
+      const poses = r.crees.length + r.dejaLa.length;
+      toast(
+        r.echecs.length > 0
+          ? `${poses} abonnement(s) actif(s), ${r.echecs.length} refusé(s) — ${r.echecs[0]?.message ?? ""}`
+          : `Temps réel actif — ${poses} abonnement(s), dont le stock`,
+      );
+      await qc.invalidateQueries({ queryKey: ["accounts"] });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Activation impossible");
+    }
+  }
+
+  /**
    * Suppression définitive d'une boutique.
    *
    * La confirmation nomme la boutique plutôt que de demander « êtes-vous
@@ -207,6 +234,12 @@ export function Shops() {
                         Pause
                       </button>
                     )}
+                    <button
+                      className="btn btn--small"
+                      onClick={() => void tempsReel(a)}
+                    >
+                      Temps réel
+                    </button>
                     <button
                       className="btn btn--small btn--ghost"
                       onClick={() => void supprimer(a)}

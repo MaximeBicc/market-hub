@@ -448,12 +448,43 @@ export async function ensureSyncJobs(
   if (!account) return;
 
   const caps = await mod.registry.get(account.marketplace).capabilities({ account });
-  const pousse = caps.inboundSales === "webhook" || caps.inboundSales === "both";
+
+  /*
+   * « Pousse » ne veut pas dire « saurait pousser » mais « pousse
+   * effectivement ». Shopify SAIT envoyer des webhooks ; encore faut-il lui
+   * avoir demandé. Relâcher le relevé sur la seule capacité déclarée
+   * ralentirait une boutique dont les abonnements n'ont jamais été créés —
+   * exactement l'inverse du but.
+   */
+  const abonne =
+    (await repos.credentials.get(accountId))?.["webhooksActifs"] === "1";
+  const pousse =
+    abonne && (caps.inboundSales === "webhook" || caps.inboundSales === "both");
   const now = Math.floor(Date.now() / 1000);
 
   const plan: Array<{ resource: string; intervalSec: number; enabled: boolean }> = [
-    { resource: "orders", intervalSec: pousse ? 1800 : 600, enabled: caps.ordersRead },
-    { resource: "inventory", intervalSec: 900, enabled: caps.stockRead },
+    /*
+     * CADENCE DU RELEVÉ.
+     *
+     * Le cron passe désormais chaque minute : c'est le plancher que
+     * Cloudflare permet, et donc la latence minimale d'un relevé.
+     *
+     * 120 secondes plutôt que 60 quand rien n'est poussé : Etsy plafonne à
+     * 10 000 requêtes par jour et lit son catalogue état par état — quatre
+     * appels par passage. À la minute, le seul relevé mangerait les trois
+     * quarts du quota et ne laisserait plus de marge aux actions manuelles.
+     * À deux minutes, on reste sous la moitié.
+     *
+     * Quand la plateforme POUSSE, le relevé n'est plus qu'un filet : un
+     * webhook perdu ou un abonnement désactivé ne doit pas faire disparaître
+     * une vente, mais il n'a plus à courir.
+     */
+    { resource: "orders", intervalSec: pousse ? 900 : 120, enabled: caps.ordersRead },
+    {
+      resource: "inventory",
+      intervalSec: pousse ? 900 : 120,
+      enabled: caps.stockRead,
+    },
     { resource: "listings", intervalSec: 86400, enabled: caps.stockRead },
   ];
 

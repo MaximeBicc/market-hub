@@ -36,15 +36,34 @@ import { sendPushToUser } from "./lib/push.js";
  * la séquence qui termine un commentaire de bloc.
  */
 
-/** Plafond par tick : garde-fou contre l'épuisement du quota de 10 000 ops/jour. */
+/**
+ * Plafond par tick : garde-fou contre l'épuisement du quota de 10 000
+ * opérations de file par jour.
+ *
+ * Au rythme d'une minute, 20 tâches par tick autorisent en théorie 28 800
+ * messages quotidiens — au-delà du quota. Le plafond réel vient donc des
+ * intervalles : avec deux ressources relevées toutes les 120 secondes, une
+ * boutique produit 1 440 messages par jour, soit sept boutiques avant d'y
+ * penser. Ce plafond-ci ne sert qu'à empêcher un pic si beaucoup de tâches
+ * deviennent dues en même temps.
+ */
 const MAX_TASKS_PER_TICK = 20;
 
 export async function handleScheduled(
   event: ScheduledController,
   env: Env,
 ): Promise<void> {
+  /*
+   * L'aiguillage se fait sur la CHAÎNE EXACTE du cron déclaré dans
+   * wrangler.jsonc. Modifier l'un sans l'autre ne casse rien de visible : le
+   * `switch` ne trouve simplement aucune branche, et la synchronisation
+   * s'arrête sans le moindre message. Les deux fichiers doivent bouger
+   * ensemble — c'est le seul couplage de ce genre dans le dépôt.
+   */
   switch (event.cron) {
-    case "*/5 * * * *":
+    // Chaque minute : c'est le plancher que Cloudflare permet, donc la
+    // latence minimale d'un relevé pour les plateformes qui ne poussent rien.
+    case "* * * * *":
       await enqueueDueJobs(env);
       break;
     case "17 * * * *":

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { ShopifyAdapter } from "./shopify.js";
+import {
+  SHOPIFY_WEBHOOK_TOPICS,
+  ShopifyAdapter,
+  shopifyEnsureWebhooks,
+} from "./shopify.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 import type { Listing } from "../domain/types.js";
 
@@ -695,5 +699,204 @@ describe("emplacement de stock", () => {
     await expect(
       adapter.updateStock(ctxSansEmplacement(http), annonce, 4),
     ).rejects.toThrow(/emplacement de stock lisible/);
+  });
+});
+
+describe("temps réel", () => {
+  it("relit l'inventaire sur un changement de stock", () => {
+    const r = (topic: string) =>
+      adapter.webhookResync(
+        new Request("https://x/", { headers: { "X-Shopify-Topic": topic } }),
+      );
+    // Le sujet qui fait toute la différence : Shopify le pousse même quand la
+    // quantité est saisie à la main dans l'administration.
+    expect(r("inventory_levels/update")).toEqual(["inventory"]);
+    expect(r("products/update")).toEqual(["inventory"]);
+    expect(r("inventory_items/update")).toEqual(["inventory"]);
+  });
+
+  it("ne relit rien sur une commande, déjà traduite en événement", () => {
+    const r = adapter.webhookResync(
+      new Request("https://x/", {
+        headers: { "X-Shopify-Topic": "orders/create" },
+      }),
+    );
+    // Une vente porte déjà toute son information : relire serait un
+    // aller-retour pour rien, et retarderait la propagation.
+    expect(r).toEqual([]);
+  });
+
+  it("ne relit rien sans en-tête de sujet", () => {
+    expect(adapter.webhookResync(new Request("https://x/"))).toEqual([]);
+  });
+
+  it("accepte un webhook signé avec le secret client", async () => {
+    // Un webhook créé PAR l'application est signé avec le secret de
+    // l'application. Sans ce repli, activer le temps réel exigerait de saisir
+    // une valeur qu'on possède déjà.
+    const corps = JSON.stringify({ id: 1, line_items: [] });
+    const cle = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode("secret-client"),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign(
+      "HMAC",
+      cle,
+      new TextEncoder().encode(corps),
+    );
+    const hmac = btoa(String.fromCharCode(...new Uint8Array(sig)));
+
+    const ctx: MarketplaceContext = {
+      account: {
+        id: "acc1",
+        marketplace: "shopify",
+        slug: "s",
+        displayName: "s",
+        enabled: true,
+      },
+      credentials: { clientSecret: "secret-client" },
+    };
+    const req = new Request("https://x/", {
+      method: "POST",
+      headers: {
+        "X-Shopify-Hmac-Sha256": hmac,
+        "X-Shopify-Topic": "orders/create",
+        "X-Shopify-Webhook-Id": "w1",
+      },
+      body: corps,
+    });
+
+    const events = await adapter.verifyAndParseWebhook(ctx, req, corps);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe("paid");
+  });
+});
+
+describe("abonnement aux webhooks", () => {
+  const ctxAbo = (http: MarketplaceContext["http"]): MarketplaceContext => ({
+    account: {
+      id: "acc1",
+      marketplace: "shopify",
+      slug: "s",
+      displayName: "s",
+      enabled: true,
+      externalAccountId: "test.myshopify.com",
+    },
+    credentials: {
+      shopDomain: "test.myshopify.com",
+      accessToken: "shpat_fake",
+      clientSecret: "secret-client",
+    },
+    http,
+  });
+
+  const RAPPEL = "https://exemple.fr/api/webhooks/shopify";
+
+  function reponsesPourTousLesSujets(dejaLa: string[] = []) {
+    return [
+      {
+        data: {
+          webhookSubscriptions: {
+            nodes: dejaLa.map((t, i) => ({
+              id: `gid://x/${i}`,
+              topic: t,
+              endpoint: { callbackUrl: RAPPEL },
+            })),
+          },
+        },
+      },
+      ...Array.from({ length: 6 }, () => ({
+        data: {
+          webhookSubscriptionCreate: {
+            webhookSubscription: { id: "gid://x/new" },
+            userErrors: [],
+          },
+        },
+      })),
+    ];
+  }
+
+  it("crée les six sujets sur une boutique vierge", async () => {
+    const { http, sent } = fakeHttp(reponsesPourTousLesSujets());
+    const r = await shopifyEnsureWebhooks(adapter, ctxAbo(http), RAPPEL);
+
+    expect(r.crees).toEqual([...SHOPIFY_WEBHOOK_TOPICS]);
+    expect(r.echecs).toHaveLength(0);
+    // Le stock en fait partie : c'est tout l'objet de l'opération.
+    expect(r.crees).toContain("INVENTORY_LEVELS_UPDATE");
+    expect(sent[1]?.body.variables.sub.callbackUrl).toBe(RAPPEL);
+  });
+
+  it("ne recrée jamais un abonnement déjà posé", async () => {
+    const { http } = fakeHttp(
+      reponsesPourTousLesSujets(["INVENTORY_LEVELS_UPDATE", "ORDERS_CREATE"]),
+    );
+    const r = await shopifyEnsureWebhooks(adapter, ctxAbo(http), RAPPEL);
+
+    // Shopify n'a pas de « créer ou remplacer » : recréer duplique, et chaque
+    // événement arriverait alors en double.
+    expect(r.dejaLa).toEqual(["INVENTORY_LEVELS_UPDATE", "ORDERS_CREATE"]);
+    expect(r.crees).toHaveLength(4);
+  });
+
+  it("ignore un abonnement du même sujet pointant ailleurs", async () => {
+    const { http } = fakeHttp([
+      {
+        data: {
+          webhookSubscriptions: {
+            nodes: [
+              {
+                id: "gid://x/0",
+                topic: "ORDERS_CREATE",
+                endpoint: { callbackUrl: "https://autre-app.example/hook" },
+              },
+            ],
+          },
+        },
+      },
+      ...Array.from({ length: 6 }, () => ({
+        data: {
+          webhookSubscriptionCreate: {
+            webhookSubscription: { id: "gid://x/n" },
+            userErrors: [],
+          },
+        },
+      })),
+    ]);
+    const r = await shopifyEnsureWebhooks(adapter, ctxAbo(http), RAPPEL);
+    // Il appartient peut-être à une autre application : on ne le touche pas,
+    // on pose le nôtre à côté.
+    expect(r.crees).toContain("ORDERS_CREATE");
+    expect(r.dejaLa).toHaveLength(0);
+  });
+
+  it("continue quand un sujet est refusé", async () => {
+    const reponses = reponsesPourTousLesSujets();
+    reponses[1] = {
+      data: {
+        webhookSubscriptionCreate: {
+          webhookSubscription: null,
+          userErrors: [{ message: "Address is invalid" }],
+        },
+      },
+    } as never;
+    const { http } = fakeHttp(reponses);
+    const r = await shopifyEnsureWebhooks(adapter, ctxAbo(http), RAPPEL);
+
+    // Le temps réel sur cinq sujets vaut mieux que rien sur six.
+    expect(r.echecs).toHaveLength(1);
+    expect(r.crees).toHaveLength(5);
+  });
+
+  it("refuse une adresse de rappel non chiffrée", async () => {
+    const { http, sent } = fakeHttp([]);
+    await expect(
+      shopifyEnsureWebhooks(adapter, ctxAbo(http), "http://exemple.fr/hook"),
+    ).rejects.toThrow(/HTTPS/);
+    // Rien n'a été tenté : la vérification est en amont de tout appel.
+    expect(sent).toHaveLength(0);
   });
 });

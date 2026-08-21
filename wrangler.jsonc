@@ -110,7 +110,7 @@
   // Le cron n'exécute JAMAIS le travail lui-même : il ne fait qu'empiler dans la Queue.
   "triggers": {
     "crons": [
-      "*/5 * * * *",   // tick : commandes + stock des boutiques dues
+      "* * * * *",     // tick : commandes + stock des boutiques dues
       "17 * * * *",    // horaire : rafraîchissement des tokens OAuth proches d'expirer
       "40 3 * * *"     // quotidien 03:40 UTC : catalogue complet, purge, réconciliation
     ]
