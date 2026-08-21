@@ -88,7 +88,10 @@ export interface MarketResearchOutput {
  */
 export const marketResearch: Skill<MarketResearchInput, MarketResearchOutput> = {
   name: "market.price.research",
-  version: "1.0.0",
+  // 1.1.0 : la sortie porte désormais le volume de ventes, les photos et
+  // les prix relevés dans les métadonnées. La version fait partie de la clé
+  // de cache : la changer met les anciens résultats hors circuit.
+  version: "1.1.0",
   description: "Cherche à quel prix ce produit se vend ailleurs, avec la source et la date de chaque prix.",
   // Requête et prix publics : rien d'interne ne part dans la recherche.
   dataClass: "public",

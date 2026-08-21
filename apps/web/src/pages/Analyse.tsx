@@ -37,6 +37,7 @@ import {
 } from "../lib/ai.js";
 import { Empty } from "../components/Empty.js";
 import { Icon } from "../components/Icon.js";
+import { Rempart } from "../components/Rempart.js";
 import { toast } from "../components/Toast.js";
 
 /**
@@ -332,9 +333,25 @@ function Travail({
 
   return (
     <Carte titre={titre} produit={job.productTitle} onEcarter={onEcarter}>
-      <Provenance envelope={data.result} onRefaire={onRefaire} />
-      <Resultat skill={job.skill} envelope={data.result} />
-      {!data.result.cached && <Retour runId={data.result.runId} />}
+      {/* Le rempart isole CE résultat : s'il ne s'affiche pas, les autres et
+          le reste de l'écran continuent de fonctionner. Sans lui, une seule
+          analyse mal formée laissait une page entièrement noire. */}
+      <Rempart
+        recours={
+          <button
+            className="btn btn--ghost btn--small"
+            style={{ marginTop: 10 }}
+            onClick={onRefaire}
+          >
+            <Icon name="refresh" />
+            Relancer l'analyse
+          </button>
+        }
+      >
+        <Provenance envelope={data.result} onRefaire={onRefaire} />
+        <Resultat skill={job.skill} envelope={data.result} />
+        {!data.result.cached && <Retour runId={data.result.runId} />}
+      </Rempart>
     </Carte>
   );
 }
@@ -738,7 +755,7 @@ function PriceView({ data }: { data: PriceAdvice }) {
           >
             {recommandation.direction}
           </span>
-          {recommandation.ecartAuPrixActuel !== null && (
+          {recommandation.ecartAuPrixActuel != null && (
             <span className="muted">{percent(recommandation.ecartAuPrixActuel)} vs actuel</span>
           )}
         </div>
@@ -965,8 +982,8 @@ function LigneObservation({ o }: { o: Observation }) {
         </div>
       </div>
       <div className="row__end">
-        <span className="amount">{o.prixEur === null ? "—" : money(o.prixEur)}</span>
-        {o.prixEur !== null && o.devise && o.devise !== "EUR" && o.prixOrigine !== null ? (
+        <span className="amount">{o.prixEur == null ? "—" : money(o.prixEur)}</span>
+        {o.prixEur != null && o.devise && o.devise !== "EUR" && o.prixOrigine != null ? (
           <span className="muted">
             {(o.prixOrigine / 100).toFixed(2)} {o.devise}
           </span>
@@ -976,11 +993,11 @@ function LigneObservation({ o }: { o: Observation }) {
               {/* Distinction utile : la page n'affichait pas de prix, ou elle
                   en affichait un dans une devise qu'on ne sait pas convertir.
                   Les confondre laisserait croire à une lacune du panel. */}
-              {o.prixOrigine === null ? "pas de prix affiché" : "devise non convertie"}
+              {o.prixOrigine == null ? "pas de prix affiché" : "devise non convertie"}
             </span>
           )
         )}
-        {o.ventes !== null && (
+        {o.ventes != null && (
           <span className="pill pill--ok" style={{ marginTop: 4 }}>
             {o.ventes.toLocaleString("fr-FR")} vendus
           </span>
@@ -1032,7 +1049,8 @@ const POSITION: Record<MarketResearch["lecture"]["position"], string> = {
  * changer de ton selon l'humeur du modèle.
  */
 function Synthese({ data }: { data: MarketResearch }) {
-  const { marche, notre, volume, lecture } = data;
+  const { marche, notre, lecture } = data;
+  const volume = data.volume ?? VOLUME_ABSENT;
   const { texte, classe } = confidenceLabel(lecture.confidence);
 
   const ecart =
@@ -1078,7 +1096,7 @@ function Synthese({ data }: { data: MarketResearch }) {
             : `${volume.totalVentes.toLocaleString("fr-FR")} ventes cumulées sur ${volume.offresRenseignees} offre${volume.offresRenseignees > 1 ? "s" : ""}` +
               (volume.meilleureVente
                 ? ` — la plus vendue en est à ${volume.meilleureVente.ventes.toLocaleString("fr-FR")}${
-                    volume.meilleureVente.prixEur !== null
+                    volume.meilleureVente.prixEur != null
                       ? ` pour ${money(volume.meilleureVente.prixEur)}`
                       : ""
                   }`
@@ -1107,8 +1125,23 @@ function LigneSynthese({ titre, children }: { titre: string; children: React.Rea
   );
 }
 
+/**
+ * Volume par défaut, pour un résultat produit avant que la colonne existe.
+ *
+ * Une analyse enregistrée reste consultable des heures après son calcul, et le
+ * code qui l'affiche, lui, a pu changer entre-temps. Lire un champ sans
+ * précaution suffit à faire disparaître l'écran — c'est exactement ce qui
+ * s'est produit. Un résultat ancien doit se dégrader, jamais casser.
+ */
+const VOLUME_ABSENT: VolumeMarche = {
+  offresRenseignees: 0,
+  totalVentes: 0,
+  meilleureVente: null,
+};
+
 function MarketView({ data }: { data: MarketResearch }) {
-  const { marche, notre, volume } = data;
+  const { marche, notre } = data;
+  const volume = data.volume ?? VOLUME_ABSENT;
 
   return (
     <>
@@ -1143,7 +1176,7 @@ function MarketView({ data }: { data: MarketResearch }) {
               ? "écart incalculable"
               : `${percent(notre.ecartAuMarche)} par rapport au marché`
           }
-          {...(notre.ecartAuMarche !== null && Math.abs(notre.ecartAuMarche) > 0.15
+          {...(notre.ecartAuMarche != null && Math.abs(notre.ecartAuMarche) > 0.15
             ? { tone: "warn" as const }
             : {})}
         />
