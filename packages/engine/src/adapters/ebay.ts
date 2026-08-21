@@ -40,8 +40,28 @@ import type {
  *   fulfillmentPolicyId, paymentPolicyId, returnPolicyId  idem
  */
 
-const API = "https://api.ebay.com";
-const AUTH = "https://auth.ebay.com";
+/**
+ * eBay a deux environnements complets, avec des hôtes, des comptes et des
+ * identifiants DISTINCTS. Un jeton de bac à sable présenté à la production
+ * est refusé, et réciproquement — avec un message qui n'explique pas la
+ * cause. D'où un choix explicite plutôt qu'une constante.
+ *
+ * Le bac à sable est précieux : il permet de valider des écritures — créer
+ * une annonce, changer un stock — sans toucher à de vraies ventes.
+ */
+export type EbayEnv = "production" | "sandbox";
+
+const HOSTS: Record<EbayEnv, { api: string; auth: string }> = {
+  production: { api: "https://api.ebay.com", auth: "https://auth.ebay.com" },
+  sandbox: {
+    api: "https://api.sandbox.ebay.com",
+    auth: "https://auth.sandbox.ebay.com",
+  },
+};
+
+function hosts(env?: string): { api: string; auth: string } {
+  return HOSTS[env === "sandbox" ? "sandbox" : "production"];
+}
 
 /** Marge de sécurité : on renouvelle avant l'expiration réelle. */
 const TOKEN_SKEW_SEC = 300;
@@ -61,6 +81,7 @@ export function ebayConsentUrl(args: {
   clientId: string;
   ruName: string;
   state: string;
+  environment?: string | undefined;
 }): string {
   const p = new URLSearchParams({
     client_id: args.clientId,
@@ -69,7 +90,7 @@ export function ebayConsentUrl(args: {
     scope: EBAY_SCOPES,
     state: args.state,
   });
-  return `${AUTH}/oauth2/authorize?${p}`;
+  return `${hosts(args.environment).auth}/oauth2/authorize?${p}`;
 }
 
 /** Échange du code de consentement contre un couple de jetons. */
@@ -78,13 +99,16 @@ export async function ebayExchangeCode(args: {
   clientSecret: string;
   ruName: string;
   code: string;
+  environment?: string | undefined;
 }): Promise<{
   accessToken: string;
   refreshToken: string;
   accessExpiresAt: number;
   refreshExpiresAt: number;
 }> {
-  const res = await fetch(`${API}/identity/v1/oauth2/token`, {
+  const res = await fetch(
+    `${hosts(args.environment).api}/identity/v1/oauth2/token`,
+    {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -95,7 +119,8 @@ export async function ebayExchangeCode(args: {
       code: args.code,
       redirect_uri: args.ruName,
     }),
-  });
+    },
+  );
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -193,7 +218,9 @@ export class EbayAdapter implements MarketplaceAdapter {
       );
     }
 
-    const res = await fetch(`${API}/identity/v1/oauth2/token`, {
+    const res = await fetch(
+      `${hosts(c["environment"]).api}/identity/v1/oauth2/token`,
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -204,7 +231,8 @@ export class EbayAdapter implements MarketplaceAdapter {
         refresh_token: refreshToken,
         scope: EBAY_SCOPES,
       }),
-    });
+      },
+    );
 
     if (!res.ok) {
       // 400 ici signifie presque toujours un jeton de rafraîchissement périmé
@@ -233,7 +261,8 @@ export class EbayAdapter implements MarketplaceAdapter {
     const http = ctx.http ?? fetch;
     const marketplaceId = ctx.credentials?.["marketplaceId"] ?? "EBAY_FR";
 
-    const res = await http(`${API}${path}`, {
+    const api = hosts(ctx.credentials?.["environment"]).api;
+    const res = await http(`${api}${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -372,7 +401,9 @@ export class EbayAdapter implements MarketplaceAdapter {
         price,
         stock,
         status,
-        url: listingId ? `https://www.ebay.fr/itm/${listingId}` : undefined,
+        url: listingId
+          ? `https://www.${ctx.credentials?.["environment"] === "sandbox" ? "sandbox." : ""}ebay.fr/itm/${listingId}`
+          : undefined,
         imageUrl: it.product?.imageUrls?.[0],
         marketplaceData: { offerId, listingId },
       });

@@ -381,6 +381,7 @@ function ConnectEbay() {
   const [ruName, setRuName] = useState("");
   const [marketplaceId, setMarketplaceId] = useState("EBAY_FR");
   const [refreshToken, setRefreshToken] = useState("");
+  const [environment, setEnvironment] = useState("production");
   /**
    * Deux voies, parce qu'eBay en offre deux.
    *
@@ -418,6 +419,7 @@ function ConnectEbay() {
           clientSecret,
           refreshToken,
           marketplaceId,
+          environment,
         });
         setClientSecret("");
         setRefreshToken("");
@@ -431,6 +433,7 @@ function ConnectEbay() {
         clientSecret,
         ruName,
         marketplaceId,
+        environment,
       });
       // Les secrets quittent la mémoire du navigateur avant la redirection.
       setClientSecret("");
@@ -552,6 +555,23 @@ function ConnectEbay() {
           />
         </div>
       )}
+
+      <div className="field">
+        <label htmlFor="ee">Environnement</label>
+        <select
+          id="ee"
+          className="input"
+          value={environment}
+          onChange={(e) => setEnvironment(e.target.value)}
+        >
+          <option value="production">Production — vraies annonces</option>
+          <option value="sandbox">Bac à sable — pour essayer sans risque</option>
+        </select>
+        <span className="muted">
+          Les deux environnements ont des identifiants distincts. Un jeton de
+          bac à sable présenté à la production est refusé, et l'inverse aussi.
+        </span>
+      </div>
 
       <div className="field">
         <label htmlFor="em">Place de marché</label>

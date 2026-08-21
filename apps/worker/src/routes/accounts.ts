@@ -274,6 +274,7 @@ accounts.post("/ebay/start", async (c) => {
       clientSecret?: string;
       ruName?: string;
       marketplaceId?: string;
+      environment?: string;
       displayName?: string;
     }>()
     .catch(() => ({}) as Record<string, string>);
@@ -312,12 +313,20 @@ accounts.post("/ebay/start", async (c) => {
       clientSecret,
       ruName,
       marketplaceId: body.marketplaceId ?? "EBAY_FR",
+      environment: body.environment === "sandbox" ? "sandbox" : "production",
       displayName: body.displayName ?? "eBay",
     }),
     { expirationTtl: 600 },
   );
 
-  return c.json({ url: ebayConsentUrl({ clientId, ruName, state }) });
+  return c.json({
+    url: ebayConsentUrl({
+      clientId,
+      ruName,
+      state,
+      environment: body.environment,
+    }),
+  });
 });
 
 /**
@@ -341,6 +350,7 @@ accounts.post("/ebay/token", async (c) => {
       clientSecret?: string;
       refreshToken?: string;
       marketplaceId?: string;
+      environment?: string;
       displayName?: string;
     }>()
     .catch(() => ({}) as Record<string, string>);
@@ -349,6 +359,11 @@ accounts.post("/ebay/token", async (c) => {
   const clientSecret = (body.clientSecret ?? "").trim();
   const refreshToken = (body.refreshToken ?? "").trim();
   const marketplaceId = body.marketplaceId ?? "EBAY_FR";
+  const environment = body.environment === "sandbox" ? "sandbox" : "production";
+  // Le bac à sable et la production sont deux comptes distincts : les
+  // distinguer dans l'identifiant permet de relier les deux en parallèle,
+  // ce qui est justement l'intérêt d'avoir un bac à sable.
+  const externalId = `${marketplaceId}${environment === "sandbox" ? ":sandbox" : ""}`;
 
   if (!clientId || !clientSecret || !refreshToken) {
     return c.json(
@@ -375,16 +390,19 @@ accounts.post("/ebay/token", async (c) => {
   const existing = await db
     .select({ id: shop.id })
     .from(shop)
-    .where(and(eq(shop.platform, "ebay"), eq(shop.externalId, marketplaceId)))
+    .where(and(eq(shop.platform, "ebay"), eq(shop.externalId, externalId)))
     .limit(1);
   const accountId = existing[0]?.id ?? randomId();
-  const displayName = body.displayName?.trim() || `eBay ${marketplaceId.replace("EBAY_", "")}`;
+  const displayName =
+    body.displayName?.trim() ||
+    `eBay ${marketplaceId.replace("EBAY_", "")}${environment === "sandbox" ? " (bac à sable)" : ""}`;
 
   const credentials: Record<string, string> = {
     clientId,
     clientSecret,
     refreshToken,
     marketplaceId,
+    environment,
   };
 
   await db
@@ -392,9 +410,9 @@ accounts.post("/ebay/token", async (c) => {
     .values({
       id: accountId,
       platform: "ebay",
-      externalId: marketplaceId,
+      externalId,
       displayName,
-      slug: `ebay_${marketplaceId.toLowerCase()}`,
+      slug: `ebay_${externalId.toLowerCase().replace(":", "_")}`,
       status: "connecting",
       config: "{}",
       connectedAt: Math.floor(Date.now() / 1000),
@@ -459,6 +477,7 @@ accounts.get("/ebay/callback", async (c) => {
     clientSecret: string;
     ruName: string;
     marketplaceId: string;
+    environment: string;
     displayName: string;
   };
 
@@ -470,6 +489,7 @@ accounts.get("/ebay/callback", async (c) => {
       clientId: p.clientId,
       clientSecret: p.clientSecret,
       ruName: p.ruName,
+      environment: p.environment,
       // eBay renvoie le code déjà encodé dans l'URL : Hono le décode, on le
       // transmet tel quel. Le ré-encoder produirait un code invalide.
       code,
@@ -478,18 +498,27 @@ accounts.get("/ebay/callback", async (c) => {
     const existing = await db
       .select({ id: shop.id })
       .from(shop)
-      .where(and(eq(shop.platform, "ebay"), eq(shop.externalId, p.marketplaceId)))
+      .where(
+        and(
+          eq(shop.platform, "ebay"),
+          eq(
+            shop.externalId,
+            `${p.marketplaceId}${p.environment === "sandbox" ? ":sandbox" : ""}`,
+          ),
+        ),
+      )
       .limit(1);
     const accountId = existing[0]?.id ?? randomId();
+    const externalId = `${p.marketplaceId}${p.environment === "sandbox" ? ":sandbox" : ""}`;
 
     await db
       .insert(shop)
       .values({
         id: accountId,
         platform: "ebay",
-        externalId: p.marketplaceId,
+        externalId,
         displayName: p.displayName,
-        slug: `ebay_${p.marketplaceId.toLowerCase()}`,
+        slug: `ebay_${externalId.toLowerCase().replace(":", "_")}`,
         status: "active",
         config: "{}",
         connectedAt: Math.floor(Date.now() / 1000),
@@ -504,6 +533,7 @@ accounts.get("/ebay/callback", async (c) => {
       clientSecret: p.clientSecret,
       ruName: p.ruName,
       marketplaceId: p.marketplaceId,
+      environment: p.environment,
       refreshToken: tokens.refreshToken,
       accessToken: tokens.accessToken,
       accessTokenExpiresAt: String(tokens.accessExpiresAt),

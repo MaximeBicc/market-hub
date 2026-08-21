@@ -386,3 +386,35 @@ describe("ventes et erreurs", () => {
     );
   });
 });
+
+describe("environnements", () => {
+  /**
+   * eBay a deux environnements complets. Un jeton de bac à sable présenté à
+   * la production est refusé, avec un message qui n'explique pas la cause :
+   * l'hôte doit donc suivre l'environnement partout.
+   */
+  it("dirige le consentement vers le bon hôte", () => {
+    const prod = ebayConsentUrl({ clientId: "c", ruName: "r", state: "s" });
+    const bac = ebayConsentUrl({
+      clientId: "c",
+      ruName: "r",
+      state: "s",
+      environment: "sandbox",
+    });
+    expect(new URL(prod).host).toBe("auth.ebay.com");
+    expect(new URL(bac).host).toBe("auth.sandbox.ebay.com");
+  });
+
+  it("appelle l'API du bac à sable quand le compte y est rattaché", async () => {
+    const { http, sent } = fakeHttp([{ body: { inventoryItems: [] } }]);
+    await adapter.testConnection(ctxWith(http, { environment: "sandbox" }));
+    expect(sent[0]?.url).toContain("api.sandbox.ebay.com");
+  });
+
+  it("reste sur la production par défaut", async () => {
+    const { http, sent } = fakeHttp([{ body: { inventoryItems: [] } }]);
+    await adapter.testConnection(ctxWith(http));
+    expect(sent[0]?.url).toContain("api.ebay.com");
+    expect(sent[0]?.url).not.toContain("sandbox");
+  });
+});
