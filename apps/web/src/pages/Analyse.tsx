@@ -28,6 +28,7 @@ import {
   type RunEnvelope,
   type SkillKey,
   type SupplierSearch,
+  type VolumeMarche,
   domaine,
   estLienExterne,
   observeeLe,
@@ -928,7 +929,14 @@ function LigneObservation({ o }: { o: Observation }) {
 
   return (
     <div className="row">
-      <span className="mono-badge">{interne ? "NS" : Math.round(o.fiabilite * 10)}</span>
+      {/* La photo dit en un coup d'œil ce qu'aucun titre ne dit : si c'est
+          bien le même objet. Deux annonces au même nom peuvent vendre deux
+          produits différents — c'est précisément ce que le prix seul masque. */}
+      {o.image ? (
+        <img className="thumb" src={o.image} alt="" loading="lazy" />
+      ) : (
+        <span className="mono-badge">{interne ? "NS" : Math.round(o.fiabilite * 10)}</span>
+      )}
       <div className="row__main">
         <div className="row__t">
           {estLienExterne(o.url) ? (
@@ -972,6 +980,11 @@ function LigneObservation({ o }: { o: Observation }) {
             </span>
           )
         )}
+        {o.ventes !== null && (
+          <span className="pill pill--ok" style={{ marginTop: 4 }}>
+            {o.ventes.toLocaleString("fr-FR")} vendus
+          </span>
+        )}
       </div>
     </div>
   );
@@ -1006,8 +1019,96 @@ const POSITION: Record<MarketResearch["lecture"]["position"], string> = {
   "indéterminée": "pill pill--mute",
 };
 
+/**
+ * La synthèse, toujours la même forme.
+ *
+ * Demandée, et c'est un vrai besoin : un texte libre change de structure à
+ * chaque exécution, et l'on doit le relire en entier pour y retrouver
+ * l'essentiel. Ici la mise en page est FIXE — position, marché, volume,
+ * lecture, réserves — et seul le contenu varie. On sait où regarder avant même
+ * d'avoir lu.
+ *
+ * Les trois premiers blocs sont calculés, pas rédigés : ils ne peuvent pas
+ * changer de ton selon l'humeur du modèle.
+ */
+function Synthese({ data }: { data: MarketResearch }) {
+  const { marche, notre, volume, lecture } = data;
+  const { texte, classe } = confidenceLabel(lecture.confidence);
+
+  const ecart =
+    notre.ecartAuMarche === null
+      ? null
+      : Math.abs(notre.ecartAuMarche) < 0.05
+        ? "au niveau du marché"
+        : `${percent(notre.ecartAuMarche)} ${notre.ecartAuMarche > 0 ? "au-dessus" : "en dessous"}`;
+
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+          marginBottom: 12,
+        }}
+      >
+        <span className="row__t">Synthèse</span>
+        <span className={POSITION[lecture.position]}>{lecture.position}</span>
+        <span className={classe} style={{ marginLeft: "auto" }}>
+          {texte}
+        </span>
+      </div>
+
+      <dl style={{ margin: 0, display: "grid", gap: 10 }}>
+        <LigneSynthese titre="Votre prix">
+          {notre.prixMedianEur === null ? "inconnu" : money(notre.prixMedianEur)}
+          {ecart && ` — ${ecart}`}
+        </LigneSynthese>
+
+        <LigneSynthese titre="Le marché">
+          {marche
+            ? `${marche.count} offres, de ${money(marche.min)} à ${money(marche.max)}, médiane ${money(marche.median)}`
+            : "pas assez d'offres comparables pour situer un prix"}
+        </LigneSynthese>
+
+        <LigneSynthese titre="Le volume">
+          {volume.offresRenseignees === 0
+            ? "aucune offre ne publie son nombre de ventes"
+            : `${volume.totalVentes.toLocaleString("fr-FR")} ventes cumulées sur ${volume.offresRenseignees} offre${volume.offresRenseignees > 1 ? "s" : ""}` +
+              (volume.meilleureVente
+                ? ` — la plus vendue en est à ${volume.meilleureVente.ventes.toLocaleString("fr-FR")}${
+                    volume.meilleureVente.prixEur !== null
+                      ? ` pour ${money(volume.meilleureVente.prixEur)}`
+                      : ""
+                  }`
+                : "")}
+        </LigneSynthese>
+
+        <LigneSynthese titre="Lecture">{lecture.resume}</LigneSynthese>
+      </dl>
+
+      <ProvenanceRecherche p={data.provenance} />
+    </div>
+  );
+}
+
+function LigneSynthese({ titre, children }: { titre: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <dt
+        className="stat__l"
+        style={{ marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.04em" }}
+      >
+        {titre}
+      </dt>
+      <dd style={{ margin: 0, lineHeight: 1.55 }}>{children}</dd>
+    </div>
+  );
+}
+
 function MarketView({ data }: { data: MarketResearch }) {
-  const { marche, notre } = data;
+  const { marche, notre, volume } = data;
 
   return (
     <>
@@ -1019,6 +1120,19 @@ function MarketView({ data }: { data: MarketResearch }) {
             marche
               ? `de ${money(marche.min)} à ${money(marche.max)} sur ${marche.count} observations`
               : "pas assez de prix comparables"
+          }
+        />
+        <Stat
+          label="Ventes observées"
+          value={
+            volume.offresRenseignees === 0
+              ? "—"
+              : volume.totalVentes.toLocaleString("fr-FR")
+          }
+          detail={
+            volume.offresRenseignees === 0
+              ? "aucune offre ne publie ses ventes"
+              : `sur ${volume.offresRenseignees} offre${volume.offresRenseignees > 1 ? "s" : ""} qui l'affichent`
           }
         />
         <Stat
@@ -1051,11 +1165,7 @@ function MarketView({ data }: { data: MarketResearch }) {
         </>
       )}
 
-      <Interpreted confidence={data.lecture.confidence}>
-        <span className={POSITION[data.lecture.position]}>{data.lecture.position}</span>
-        <p style={{ marginTop: 12, marginBottom: 0, lineHeight: 1.6 }}>{data.lecture.resume}</p>
-        <ProvenanceRecherche p={data.provenance} />
-      </Interpreted>
+      <Synthese data={data} />
     </>
   );
 }

@@ -79,6 +79,9 @@ function panel(repond: (payload: Record<string, unknown>) => unknown) {
       now: () => Date.parse("2026-08-20T12:00:00Z"),
       // Taux figés : une suite de tests ne joint jamais la BCE.
       rates: async () => ({ perEuro: { EUR: 1, USD: 1.1681 }, publishedOn: "2026-08-20" }),
+      // Aucune lecture de page reelle dans les tests : on rend une fiche vide.
+      meta: async () => ({ imageUrl: null, price: null, currency: null, availability: null }),
+
     }),
     now: () => Date.parse("2026-08-20T12:00:00Z"),
     newId: () => "run-test",

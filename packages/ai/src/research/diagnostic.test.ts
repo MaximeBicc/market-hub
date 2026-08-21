@@ -47,6 +47,8 @@ function moteurDontGeminiEchoue(
       cache,
       now: () => MAINTENANT,
       rates: async () => TAUX,
+      // Aucune lecture de page reelle dans les tests : on rend une fiche vide.
+      meta: async () => ({ imageUrl: null, price: null, currency: null, availability: null }),
     }),
   };
 }
@@ -153,6 +155,8 @@ describe("durée de vie d'un échec", () => {
       cache,
       now: () => MAINTENANT,
       rates: async () => TAUX,
+      // Aucune lecture de page reelle dans les tests : on rend une fiche vide.
+      meta: async () => ({ imageUrl: null, price: null, currency: null, availability: null }),
     });
 
     await chercher(engine);

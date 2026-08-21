@@ -156,6 +156,8 @@ function moteur(
       cache,
       now: () => MAINTENANT,
       rates: async () => TAUX,
+      // Aucune lecture de page reelle dans les tests : on rend une fiche vide.
+      meta: async () => ({ imageUrl: null, price: null, currency: null, availability: null }),
     }),
   };
 }
@@ -245,6 +247,8 @@ describe("moteur de recherche", () => {
       cache: new MemoryCache(),
       now: () => MAINTENANT,
       rates: async () => TAUX,
+      // Aucune lecture de page reelle dans les tests : on rend une fiche vide.
+      meta: async () => ({ imageUrl: null, price: null, currency: null, availability: null }),
     });
 
     const result = await engine.research({ query: "lampe", direction: "revente" });

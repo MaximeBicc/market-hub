@@ -74,7 +74,8 @@ export {
 } from "./research/ports.js";
 export { canonicalUrl, rankEvidence, usablePrices, type RankedEvidence } from "./research/ranking.js";
 export { tavilySource, TAVILY_PAR_MOIS, type TavilyDeps } from "./research/sources/tavily.js";
-export { fetchEcbRates, toEur, type FxRates } from "./research/fx.js";
+export { fetchEcbRates, normaliserDevise, toEur, type FxRates } from "./research/fx.js";
+export { centimesDepuis, lireMeta, type PageMeta } from "./research/page-meta.js";
 
 export {
   BilledFailure,

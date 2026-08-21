@@ -25,6 +25,25 @@ export interface Observation {
   observeLe: string;
   fiabilite: number;
   note: string | null;
+  /** Photo du produit, tirée des métadonnées de la page. */
+  image: string | null;
+  /** Ventes affichées par la page. Null quand elle n'en publie pas. */
+  ventes: number | null;
+}
+
+/**
+ * Ce que le marché vend, et pas seulement à quel prix.
+ *
+ * Le volume corrige la lecture des prix : un concurrent à 3 € qui a vendu deux
+ * fois ne pèse rien, un autre à 12 € qui en a vendu mille dit où est le
+ * marché. Sans cette colonne, une médiane traite les deux à égalité.
+ */
+export interface VolumeMarche {
+  /** Offres dont la page publiait un nombre de ventes. */
+  offresRenseignees: number;
+  totalVentes: number;
+  /** L'offre la plus vendue parmi celles qui le disent. */
+  meilleureVente: { url: string; ventes: number; prixEur: number | null } | null;
 }
 
 export interface MarketResearchOutput {
@@ -33,6 +52,7 @@ export interface MarketResearchOutput {
   observations: Observation[];
   /** Statistiques sur les seuls prix convertibles. Null si moins de deux. */
   marche: ReturnType<typeof spread>;
+  volume: VolumeMarche;
   notre: { prixMedianEur: number | null; ecartAuMarche: number | null };
   lecture: {
     position: "au-dessus" | "dans le marché" | "en dessous" | "indéterminée";
@@ -125,7 +145,26 @@ export const marketResearch: Skill<MarketResearchInput, MarketResearchOutput> = 
       observeLe: e.observedAt,
       fiabilite: Math.round(e.reliability * 100) / 100,
       note: e.snippet ?? null,
+      image: e.imageUrls?.[0] ?? null,
+      ventes: e.salesCount ?? null,
     }));
+
+    // Le volume ne porte que sur les offres extérieures : nos propres ventes
+    // sont déjà connues ailleurs, et les mêler fausserait la comparaison.
+    const avecVentes = externes.filter(
+      (e): e is typeof e & { salesCount: number } => typeof e.salesCount === "number",
+    );
+    const meilleure = avecVentes.reduce<(typeof avecVentes)[number] | null>(
+      (best, e) => (best === null || e.salesCount > best.salesCount ? e : best),
+      null,
+    );
+    const volume: VolumeMarche = {
+      offresRenseignees: avecVentes.length,
+      totalVentes: avecVentes.reduce((t, e) => t + e.salesCount, 0),
+      meilleureVente: meilleure
+        ? { url: meilleure.url, ventes: meilleure.salesCount, prixEur: meilleure.priceEur }
+        : null,
+    };
 
     const provenance = {
       couches: recherche.layers,
@@ -142,6 +181,7 @@ export const marketResearch: Skill<MarketResearchInput, MarketResearchOutput> = 
         requete,
         observations,
         marche,
+        volume,
         notre: {
           prixMedianEur: notreMedian?.median ?? null,
           ecartAuMarche: null,
@@ -172,6 +212,7 @@ export const marketResearch: Skill<MarketResearchInput, MarketResearchOutput> = 
 
 Tu situes un produit par rapport aux prix observés sur le marché. Les prix sont déjà convertis en euros et la médiane est déjà calculée : tu ne recalcules rien.
 Tu tiens compte de la fiabilité de chaque observation : un prix vu sur une page produit vaut mieux qu'un extrait de résultat de recherche.
+Quand des volumes de vente sont fournis, ils comptent plus que les prix seuls : une offre chère qui se vend beaucoup situe le marché mieux qu'une offre bon marché que personne n'achète.
 Si les observations te semblent porter sur des produits différents du nôtre, dis-le plutôt que de conclure.
 ${JSON_HINT('{"position":"au-dessus"|"dans le marché"|"en dessous"|"indéterminée","resume":string,"reserves":string[],"confidence":number}')}
 « resume » fait trois phrases au plus. « reserves » liste ce qui fragilise la comparaison : peu d'observations, produits peut-être différents, sources faibles.`,
@@ -185,6 +226,7 @@ ${JSON_HINT('{"position":"au-dessus"|"dans le marché"|"en dessous"|"indétermin
               canaux: product.listings.length,
             },
             marcheCentimesEur: marche,
+            volumeDeVentes: volume,
             ecartRelatif: ecart,
             observations: externes.map((e) => ({
               titre: e.title,
@@ -209,6 +251,7 @@ ${JSON_HINT('{"position":"au-dessus"|"dans le marché"|"en dessous"|"indétermin
       requete,
       observations,
       marche,
+      volume,
       notre: {
         prixMedianEur: notreMedian?.median ?? null,
         ecartAuMarche: ecart,

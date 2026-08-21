@@ -175,6 +175,16 @@ export interface Observation {
   observeLe: string;
   fiabilite: number;
   note: string | null;
+  /** Photo du produit, tirée des métadonnées de la page. */
+  image: string | null;
+  /** Ventes affichées par la page. Null quand elle n'en publie pas. */
+  ventes: number | null;
+}
+
+export interface VolumeMarche {
+  offresRenseignees: number;
+  totalVentes: number;
+  meilleureVente: { url: string; ventes: number; prixEur: number | null } | null;
 }
 
 export interface Provenance {
@@ -189,6 +199,7 @@ export interface MarketResearch {
   requete: string;
   observations: Observation[];
   marche: PriceSpread | null;
+  volume: VolumeMarche;
   notre: { prixMedianEur: number | null; ecartAuMarche: number | null };
   lecture: {
     position: "au-dessus" | "dans le marché" | "en dessous" | "indéterminée";

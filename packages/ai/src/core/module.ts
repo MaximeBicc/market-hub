@@ -12,6 +12,7 @@ import { FREE_LIMITS, neuronsToUsd, type FreeLimits } from "./budget.js";
 import { ResearchEngine } from "../research/engine.js";
 import { SourceRegistry } from "../research/ports.js";
 import type { FxRates } from "../research/fx.js";
+import type { PageMeta } from "../research/page-meta.js";
 
 export interface AiModuleDeps {
   /** Liaison Workers AI. Le seul fournisseur qui ne demande aucune clé. */
@@ -46,6 +47,8 @@ export interface AiModuleDeps {
    * clé et sans réseau.
    */
   fxRates?: (() => Promise<FxRates>) | undefined;
+  /** Lecture des metadonnees de page. Surchargeable pour les tests. */
+  pageMeta?: ((url: string) => Promise<PageMeta>) | undefined;
 }
 
 /**
@@ -81,6 +84,7 @@ export function createAiModule(deps: AiModuleDeps) {
     cache: deps.cache,
     now,
     ...(deps.fxRates === undefined ? {} : { rates: deps.fxRates }),
+    ...(deps.pageMeta === undefined ? {} : { meta: deps.pageMeta }),
   });
 
   return {

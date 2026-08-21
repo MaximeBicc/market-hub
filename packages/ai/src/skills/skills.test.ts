@@ -58,6 +58,7 @@ function panel(répond: (payload: unknown) => unknown, options: { produit?: Retu
     newId: () => "run-test",
     // Taux figes : aucune suite de tests ne doit joindre la BCE.
     fxRates: async () => ({ perEuro: { EUR: 1, USD: 1.1681 }, publishedOn: "2026-08-20" }),
+    pageMeta: async () => ({ imageUrl: null, price: null, currency: null, availability: null }),
   });
 
   return { module, appels };

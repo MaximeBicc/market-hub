@@ -97,6 +97,18 @@ export interface Evidence {
   price?: number | null | undefined;
   currency?: string | null | undefined;
   imageUrls?: string[] | undefined;
+  /**
+   * Ventes affichées par la page, quand elle en affiche.
+   *
+   * Etsy publie « 1 240 ventes », eBay « 37 vendus », Amazon parfois « acheté
+   * 50 fois le mois dernier ». C'est la seule mesure de volume accessible sans
+   * abonnement à un outil d'espionnage — et elle change tout : un concurrent à
+   * 3 € qui a vendu deux fois n'est pas un concurrent, un autre à 12 € qui en a
+   * vendu mille dit où est le marché.
+   *
+   * Null quand la page n'en dit rien, ce qui est le cas le plus fréquent.
+   */
+  salesCount?: number | null | undefined;
   reliability?: number | undefined;
 }
 
