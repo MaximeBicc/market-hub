@@ -50,6 +50,16 @@ export interface Env {
   EBAY_CLIENT_ID: string;
   EBAY_CLIENT_SECRET: string;
   EBAY_RU_NAME: string;
+  /**
+   * Jeton de vérification des notifications eBay (suppression de compte).
+   *
+   * Valeur PARTAGÉE avec le formulaire « Alerts & Notifications » du portail
+   * eBay : les deux côtés doivent porter exactement la même chaîne, c'est
+   * elle qui entre dans le SHA-256 du défi. Ce n'est pas un identifiant —
+   * il n'ouvre aucun compte, il ne sert qu'à cette poignée de main.
+   * Absent, la route de défi se ferme et eBay refuse l'abonnement.
+   */
+  EBAY_VERIFICATION_TOKEN?: string;
   ALIBABA_APP_KEY: string;
   ALIBABA_APP_SECRET: string;
 

@@ -131,8 +131,15 @@ webhooks.get("/ebay", async (c) => {
   const challenge = c.req.query("challenge_code");
   if (!challenge) return c.text("Not found", 404);
 
-  const endpoint = `${c.env.APP_URL}/api/webhooks/ebay`;
-  const token = c.env.EBAY_CLIENT_SECRET; // à remplacer par le verification token dédié
+  /*
+   * Le hachage porte sur l'ADRESSE EXACTE que eBay appelle : la chaîne saisie
+   * dans son formulaire doit être identique caractère pour caractère à
+   * celle-ci, barre oblique finale comprise. Un écart et la réponse au défi
+   * est fausse sans qu'aucun des deux côtés ne dise pourquoi.
+   */
+  const endpoint = `${c.env.APP_URL.replace(/\/+$/, "")}/api/webhooks/ebay`;
+  const token = c.env.EBAY_VERIFICATION_TOKEN ?? "";
+  if (!token) return c.text("Not found", 404); // pas de jeton, pas de poignée de main
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(challenge + token + endpoint),
