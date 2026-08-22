@@ -1159,6 +1159,10 @@ api.post("/products", async (c) => {
     material?: string;
     images?: string[];
     tags?: string[];
+    /** Déclarations exigées par les places de marché. Voir la migration 0008. */
+    condition?: string;
+    whoMade?: string;
+    whenMade?: string;
   }>();
 
   const sku = (body.sku ?? "").trim().toUpperCase();
@@ -1170,6 +1174,28 @@ api.post("/products", async (c) => {
 
   const now = Math.floor(Date.now() / 1000);
   const stock = Math.max(0, Number(body.stock ?? 0));
+
+  /*
+   * Vocabulaire fermé, validé ici plutôt qu'au moment de publier.
+   *
+   * Une valeur libre traverserait la base sans bruit et se ferait refuser par
+   * la plateforme des semaines plus tard, sur une annonce qu'on croyait
+   * partie. Une valeur inconnue est donc ramenée à « absente » — ce qui
+   * bloque la publication en la nommant, au lieu de la faire échouer au loin.
+   */
+  const ETATS = new Set([
+    "new", "new_other", "used_excellent", "used_good", "used_acceptable", "for_parts",
+  ]);
+  const QUI = new Set(["i_did", "collective", "someone_else"]);
+  const QUAND = new Set([
+    "made_to_order", "2020_2026", "2010_2019", "2000_2009", "before_2000", "vintage",
+  ]);
+  const dans = (v: string | undefined, ens: Set<string>) =>
+    v && ens.has(v) ? v : null;
+
+  const condition = dans(body.condition, ETATS);
+  const whoMade = dans(body.whoMade, QUI);
+  const whenMade = dans(body.whenMade, QUAND);
 
   // Chercher si le produit existe déjà (par ID ou par SKU)
   let existing = null;
@@ -1198,6 +1224,9 @@ api.post("/products", async (c) => {
         weightGrams: body.weightGrams ? Math.max(0, body.weightGrams) : null,
         defaultConsumableId: body.defaultConsumableId || null,
         color: body.color?.trim() || null,
+        condition,
+        whoMade,
+        whenMade,
         material: body.material?.trim() || null,
         images: body.images ? JSON.stringify(body.images) : null,
         tags: body.tags ? JSON.stringify(body.tags) : null,
@@ -1220,6 +1249,9 @@ api.post("/products", async (c) => {
       defaultConsumableId: body.defaultConsumableId || null,
       color: body.color?.trim() || null,
       material: body.material?.trim() || null,
+      condition,
+      whoMade,
+      whenMade,
       images: body.images ? JSON.stringify(body.images) : null,
       tags: body.tags ? JSON.stringify(body.tags) : null,
       createdAt: now,
@@ -1495,4 +1527,90 @@ api.post("/push/test", async (c) => {
     tag: "test",
   });
   return c.json(r);
+});
+
+/**
+ * Complète un produit avec ce qu'exigent les places de marché.
+ *
+ * Route SÉPARÉE de `POST /products`, volontairement. Celle-là fait un
+ * remplacement complet : l'appeler pour ne changer que l'état de l'article
+ * écraserait au passage le prix, le stock et l'emplacement avec ce que le
+ * formulaire d'en face avait en mémoire. Ici on ne touche QUE ce qui est
+ * fourni, et rien d'autre.
+ *
+ * Le vocabulaire est fermé et validé ici plutôt qu'au moment de publier : une
+ * valeur libre traverserait la base sans bruit et se ferait refuser par la
+ * plateforme bien plus tard, sur une annonce qu'on croyait partie.
+ */
+api.patch("/products/:id/diffusion", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{
+      condition?: string | null;
+      whoMade?: string | null;
+      whenMade?: string | null;
+      images?: string[];
+      ebayCategoryId?: string | null;
+      etsyTaxonomyId?: string | null;
+    }>()
+    .catch(() => ({}) as Record<string, never>);
+
+  const rows = await db.select().from(product).where(eq(product.id, id)).limit(1);
+  const existant = rows[0];
+  if (!existant) return c.json({ error: "Produit inconnu" }, 404);
+
+  const ETATS = new Set([
+    "new", "new_other", "used_excellent", "used_good", "used_acceptable", "for_parts",
+  ]);
+  const QUI = new Set(["i_did", "collective", "someone_else"]);
+  const QUAND = new Set([
+    "made_to_order", "2020_2026", "2010_2019", "2000_2009", "before_2000", "vintage",
+  ]);
+
+  /** Non fourni = on ne touche pas. Fourni mais vide ou invalide = on efface. */
+  const choisir = (v: string | null | undefined, ens: Set<string>) =>
+    v === undefined ? undefined : v && ens.has(v) ? v : null;
+
+  // Les photos doivent être en HTTPS : eBay rejette tout le reste, et une
+  // annonce publiée sans image est invendable sans qu'aucune erreur ne le dise.
+  const images = body.images
+    ? body.images
+        .map((u) => u.trim())
+        .filter((u) => /^https:\/\//i.test(u))
+        .slice(0, 20)
+    : undefined;
+
+  const donnees = JSON.parse(existant.marketplaceData ?? "{}") as Record<string, unknown>;
+  if (body.ebayCategoryId !== undefined) {
+    donnees["ebayCategoryId"] = body.ebayCategoryId?.trim() || undefined;
+  }
+  if (body.etsyTaxonomyId !== undefined) {
+    donnees["etsyTaxonomyId"] = body.etsyTaxonomyId?.trim() || undefined;
+  }
+
+  const condition = choisir(body.condition, ETATS);
+  const whoMade = choisir(body.whoMade, QUI);
+  const whenMade = choisir(body.whenMade, QUAND);
+
+  await db
+    .update(product)
+    .set({
+      ...(condition !== undefined ? { condition } : {}),
+      ...(whoMade !== undefined ? { whoMade } : {}),
+      ...(whenMade !== undefined ? { whenMade } : {}),
+      ...(images !== undefined ? { images: JSON.stringify(images) } : {}),
+      marketplaceData: JSON.stringify(donnees),
+      updatedAt: Math.floor(Date.now() / 1000),
+    })
+    .where(eq(product.id, id));
+
+  const rejetees = (body.images?.length ?? 0) - (images?.length ?? 0);
+  return c.json({
+    ok: true,
+    photos: images?.length ?? null,
+    ...(rejetees > 0
+      ? { avertissement: `${rejetees} adresse(s) ignorée(s) : seules les URL en HTTPS sont acceptées.` }
+      : {}),
+  });
 });

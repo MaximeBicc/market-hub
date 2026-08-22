@@ -115,6 +115,13 @@ export class D1ProductRepository implements ProductRepository {
       stock: row.stock,
       images: parseJson<string[]>(row.images, []),
       tags: parseJson<string[]>(row.tags, []),
+      // Les déclarations obligatoires. `?? undefined` et non `?? "new"` : une
+      // valeur absente doit rester absente, pour que l'adaptateur refuse au
+      // lieu d'inventer.
+      condition: (row.condition ?? undefined) as Product["condition"],
+      whoMade: (row.whoMade ?? undefined) as Product["whoMade"],
+      whenMade: (row.whenMade ?? undefined) as Product["whenMade"],
+      weightGrams: row.weightGrams ?? undefined,
       marketplaceData: parseJson<Record<string, unknown>>(row.marketplaceData, {}),
     };
   }

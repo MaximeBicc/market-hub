@@ -190,7 +190,40 @@ export class MarketplaceOrchestrator {
     const product = await this.products.get(input.productId);
     if (!product) throw new Error(`Produit inconnu : ${input.productId}`);
 
+    /*
+     * IDEMPOTENCE — la vraie, pas celle qui transite sans servir.
+     *
+     * La clé d'idempotence est déclinée par compte et passée aux adaptateurs
+     * depuis le premier jour. Aucun des trois ne s'en sert : rejouer une
+     * création crée un second brouillon chez Etsy, une seconde offre chez
+     * eBay. Or rejouer est le geste NATUREL — on publie vers trois comptes,
+     * un échoue, on appuie à nouveau, et les deux qui avaient réussi se
+     * dupliquent. Chez Etsy chaque publication est facturée.
+     *
+     * Le garde-fou ne consulte pas un journal mais l'état réel : une annonce
+     * existe-t-elle déjà pour ce produit sur ce compte ? Si oui, il n'y a
+     * rien à créer, et c'est un SUCCÈS — l'état voulu est atteint.
+     */
+    const deja = new Map(
+      (await this.listings.listByProduct(input.productId)).map((l) => [
+        l.accountId,
+        l,
+      ]),
+    );
+
     const outcome = await this.fanOut(input.accountIds, "listingCreate", async (ctx, adapter) => {
+      const existante = deja.get(ctx.account.id);
+      if (existante) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "success" as const,
+          ...(existante.remoteId ? { remoteId: existante.remoteId } : {}),
+          message:
+            "Déjà publié sur ce compte — rien à recréer. Utilisez « prix » ou « stock » pour le mettre à jour.",
+        };
+      }
+
       const result = await adapter.createListing(
         ctx,
         product,

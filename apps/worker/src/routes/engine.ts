@@ -116,7 +116,9 @@ engine.post("/listing", async (c) => {
   }>();
   const key = body.idempotencyKey ?? crypto.randomUUID();
 
-  const mod = buildEngine(c.env);
+  // Compteur partagé : une diffusion vers trois comptes peut coûter une
+  // dizaine de sous-requêtes, et le plan gratuit en autorise 50.
+  const mod = buildEngine(c.env, { used: 0 });
   const outcome = await mod.orchestrator.createListing({
     productId: body.productId,
     accountIds: body.accountIds,

@@ -126,6 +126,17 @@ export const product = sqliteTable(
     location: text("location"),
     /** Poids unitaire en grammes pour le calcul d'affranchissement. */
     weightGrams: integer("weight_grams"),
+    /**
+     * Déclarations exigées à la création d'une annonce.
+     *
+     * `condition` : eBay déclasse une annonce dont l'état ne correspond pas à
+     * sa catégorie. `whoMade`/`whenMade` : Etsy suspend une boutique qui
+     * déclare « fait main par le vendeur » sur de la revente. Nullables — un
+     * produit importé n'en a pas — et leur absence bloque la publication.
+     */
+    condition: text("condition"),
+    whoMade: text("who_made"),
+    whenMade: text("when_made"),
     /** Format d'emballage / consommable recommandé par défaut. */
     defaultConsumableId: text("default_consumable_id"),
     /** Couleur(s) du produit (ex. « Noir », « Doré », « Bleu nuit / Argent »). */

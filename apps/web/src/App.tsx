@@ -8,6 +8,7 @@ import { Orders } from "./pages/Orders.js";
 import { Inventory } from "./pages/Inventory.js";
 import { Growth } from "./pages/Growth.js";
 import { Analyse } from "./pages/Analyse.js";
+import { Publier } from "./pages/Publier.js";
 import { Shops } from "./pages/Shops.js";
 import { Settings } from "./pages/Settings.js";
 import { Icon } from "./components/Icon.js";
@@ -30,6 +31,7 @@ const NAV = [
   { to: "/inventory", label: "Stock", icon: "box" as const, end: false },
   { to: "/growth", label: "Croissance", icon: "chart" as const, end: false },
   { to: "/analyse", label: "Analyse", icon: "sparkle" as const, end: false },
+  { to: "/publier", label: "Publier", icon: "upload" as const, end: false },
   { to: "/shops", label: "Boutiques", icon: "shops" as const, end: false },
 ];
 
@@ -39,6 +41,7 @@ const TITLES: Record<string, string> = {
   "/inventory": "Stock",
   "/growth": "Croissance",
   "/analyse": "Analyse",
+  "/publier": "Publier",
   "/shops": "Boutiques",
   "/settings": "Réglages",
 };
@@ -146,6 +149,7 @@ export function App() {
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/growth" element={<Growth />} />
             <Route path="/analyse" element={<Analyse />} />
+            <Route path="/publier" element={<Publier />} />
             <Route path="/shops" element={<Shops />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />
