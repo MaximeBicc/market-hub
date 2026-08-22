@@ -44,6 +44,33 @@ export interface MarketplaceAccount {
 }
 
 /** Le produit « maître », indépendant des plateformes. Clé de rapprochement : le SKU. */
+/**
+ * État de l'article, tel que les places de marché l'entendent.
+ *
+ * Ce n'est pas un détail de confort : eBay refuse ou déclasse une annonce dont
+ * l'état ne correspond pas à sa catégorie, et vendre de l'occasion en la
+ * déclarant neuve est une fausse déclaration, pas une approximation.
+ */
+export type ProductCondition =
+  | "new"
+  | "new_other"
+  | "used_excellent"
+  | "used_good"
+  | "used_acceptable"
+  | "for_parts";
+
+/** Qui a fabriqué l'article — vocabulaire imposé par Etsy. */
+export type WhoMade = "i_did" | "collective" | "someone_else";
+
+/** Quand — vocabulaire imposé par Etsy. */
+export type WhenMade =
+  | "made_to_order"
+  | "2020_2026"
+  | "2010_2019"
+  | "2000_2009"
+  | "before_2000"
+  | "vintage";
+
 export interface Product {
   id: ProductId;
   sku: string;
@@ -53,6 +80,32 @@ export interface Product {
   stock: number;
   images?: string[] | undefined;
   tags?: string[] | undefined;
+
+  /*
+   * ══ DÉCLARATIONS OBLIGATOIRES ══
+   *
+   * Ces champs étaient auparavant codés en dur dans les adaptateurs :
+   * `condition: "NEW"` chez eBay, `who_made: "i_did"` et
+   * `when_made: "made_to_order"` chez Etsy. Autrement dit, tout article
+   * diffusé était déclaré neuf et fait main par le vendeur — ce qui est faux
+   * pour de la revente, et ce qu'aucun écran n'affichait.
+   *
+   * Une valeur fausse envoyée automatiquement, en masse, sans que personne la
+   * voie, n'est pas une dette technique : c'est un risque de suspension de
+   * boutique. Ils sont donc OPTIONNELS dans le type — un produit importé n'en
+   * a pas — mais leur absence bloque la publication au lieu de l'inventer.
+   */
+
+  /** Sans valeur, la diffusion vers eBay renvoie `manual_required`. */
+  condition?: ProductCondition | undefined;
+  /** Sans valeur, la diffusion vers Etsy renvoie `manual_required`. */
+  whoMade?: WhoMade | undefined;
+  whenMade?: WhenMade | undefined;
+  /** Matériaux. Etsy les accepte, les autres les ignorent. */
+  materials?: string[] | undefined;
+  /** Poids en grammes, pour les frais de port calculés. */
+  weightGrams?: number | undefined;
+
   /** Champs spécifiques à une plateforme (catégorie eBay, taxonomie Etsy…). */
   marketplaceData?: Record<string, unknown> | undefined;
 }
@@ -163,6 +216,17 @@ export type TargetResult = {
   status: TargetStatus;
   remoteId?: string | undefined;
   message?: string | undefined;
+  /**
+   * Identifiants secondaires rendus par la plateforme à la création.
+   *
+   * Sans ce champ, eBay n'avait aucun moyen de remonter son `offerId` : il
+   * finissait glissé dans le TEXTE du message, donc nulle part. Conséquence
+   * concrète et vérifiée : une annonce eBay créée par l'outil ne pouvait plus
+   * jamais recevoir de changement de prix, ni être activée, ni désactivée —
+   * un outil de synchronisation qui crée des objets qu'il ne sait pas
+   * resynchroniser.
+   */
+  marketplaceData?: Record<string, unknown> | undefined;
 };
 
 /**

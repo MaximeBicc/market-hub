@@ -199,15 +199,38 @@ export class MarketplaceOrchestrator {
         `${input.idempotencyKey}:${ctx.account.id}`,
       );
 
-      if (result.status === "success" && result.remoteId) {
+      /*
+       * CE QU'ON ÉCRIT LOCALEMENT DOIT ÊTRE VRAI.
+       *
+       * Cette ligne écrivait `status: "active"` alors que les trois
+       * adaptateurs créent des BROUILLONS et le disent dans leur message. La
+       * base affirmait donc « en ligne » ce qui ne l'était pas, et un
+       * `setActive(false)` partait désactiver un objet jamais publié.
+       *
+       * `pending_remote` est enregistré lui aussi : l'objet existe chez la
+       * plateforme, l'oublier reviendrait à le rendre invisible et
+       * impilotable. Seuls `failed`, `unsupported` et `manual_required`
+       * n'écrivent rien — dans ces trois cas rien n'a été créé.
+       */
+      const cree =
+        (result.status === "success" || result.status === "pending_remote") &&
+        Boolean(result.remoteId);
+
+      if (cree) {
         await this.listings.put({
           id: crypto.randomUUID(),
           productId: product.id,
           accountId: ctx.account.id,
-          remoteId: result.remoteId,
-          status: "active",
+          remoteId: result.remoteId!,
+          // Brouillon, parce que c'est ce que l'adaptateur a créé.
+          status: "draft",
           price: product.price,
           stock: product.stock,
+          // Les identifiants secondaires rendus par la plateforme — l'offerId
+          // eBay notamment, sans lequel l'annonce serait impilotable.
+          ...(result.marketplaceData
+            ? { marketplaceData: result.marketplaceData }
+            : {}),
         });
       }
       return result;

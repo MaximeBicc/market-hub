@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EbayAdapter, ebayConsentUrl } from "./ebay.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
-import type { Listing } from "../domain/types.js";
+import type { Listing, Product } from "../domain/types.js";
 
 /**
  * Tests de l'adaptateur eBay, sur un `fetch` simulé.
@@ -279,6 +279,10 @@ describe("écritures", () => {
         title: "Article de test",
         price: { amount: 1990, currency: "EUR" },
         stock: 4,
+        // L'état et la photo sont désormais exigés : sans eux, eBay refuse
+        // avant tout appel réseau. Voir les tests des garde-fous plus bas.
+        condition: "used_good",
+        images: ["https://exemple.fr/photo.jpg"],
       },
       "k",
     );
@@ -416,5 +420,82 @@ describe("environnements", () => {
     await adapter.testConnection(ctxWith(http));
     expect(sent[0]?.url).toContain("api.ebay.com");
     expect(sent[0]?.url).not.toContain("sandbox");
+  });
+});
+
+describe("déclarations obligatoires", () => {
+  const BASE = {
+    id: "p1",
+    sku: "SKU-1",
+    title: "Article",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 4,
+    images: ["https://exemple.fr/photo.jpg"],
+  } satisfies Product;
+
+  it("refuse de publier sans état plutôt que de déclarer « neuf »", async () => {
+    // Cette valeur était codée en dur : tout article diffusé était déclaré
+    // neuf, y compris de la revente d'occasion. Une fausse déclaration
+    // envoyée automatiquement, que personne ne voyait passer.
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.createListing(
+      ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }),
+      { ...BASE },
+      "idem",
+    );
+
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toMatch(/état de l'article/);
+    // Rien n'est parti sur le réseau : le refus précède tout appel.
+    expect(sent).toHaveLength(0);
+  });
+
+  it("refuse de publier sans photo", async () => {
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.createListing(
+      ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }),
+      { ...BASE, condition: "new", images: [] },
+      "idem",
+    );
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toMatch(/photo/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("traduit chaque état dans le vocabulaire d'eBay", async () => {
+    const attendus: Array<[string, string]> = [
+      ["new", "NEW"],
+      ["used_good", "USED_GOOD"],
+      ["for_parts", "FOR_PARTS_OR_NOT_WORKING"],
+    ];
+    for (const [notre, leur] of attendus) {
+      const { http, sent } = fakeHttp([
+        { status: 204, body: {} },
+        { body: { offerId: "off-1" } },
+      ]);
+      await adapter.createListing(
+        ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }),
+        { ...BASE, condition: notre as never },
+        "idem",
+      );
+      expect(sent[0]?.body.condition).toBe(leur);
+    }
+  });
+
+  it("remonte l'identifiant d'offre au lieu de le noyer dans un message", async () => {
+    // Sans lui, l'annonce créée n'accepte plus jamais ni changement de prix,
+    // ni activation, ni retrait : l'outil crée un objet qu'il ne sait plus
+    // piloter.
+    const { http } = fakeHttp([
+      { status: 204, body: {} },
+      { body: { offerId: "off-42" } },
+    ]);
+    const r = await adapter.createListing(
+      ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }),
+      { ...BASE, condition: "new" },
+      "idem",
+    );
+    expect(r.status).toBe("success");
+    expect(r.marketplaceData).toMatchObject({ offerId: "off-42" });
   });
 });

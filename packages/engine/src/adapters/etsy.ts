@@ -557,6 +557,29 @@ export class EtsyAdapter implements MarketplaceAdapter {
       };
     }
 
+    /*
+     * QUI A FABRIQUÉ, ET QUAND — sans valeur par défaut, délibérément.
+     *
+     * Ces deux champs portaient `"i_did"` et `"made_to_order"` en dur, ce qui
+     * déclarait à Etsy un article FAIT MAIN PAR LE VENDEUR, À LA COMMANDE.
+     * Sur de la revente, c'est une fausse déclaration — et Etsy suspend des
+     * boutiques pour ce motif, pas seulement des annonces.
+     *
+     * Inventer une valeur pour « faire passer » la publication reviendrait à
+     * répéter l'erreur en silence. On refuse et on nomme ce qui manque.
+     */
+    const whoMade = product.whoMade;
+    const whenMade = product.whenMade;
+    if (!whoMade || !whenMade) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "manual_required",
+        message:
+          "Etsy exige de déclarer qui a fabriqué l'article et quand. Renseignez-les sur le produit : déclarer « fait main par moi » sur de la revente expose à la suspension de la boutique.",
+      };
+    }
+
     // `createDraftListing` n'accepte PAS de JSON : le corps doit être encodé
     // en formulaire. Envoyer du JSON renvoie une erreur de validation qui
     // désigne des champs pourtant présents.
@@ -570,12 +593,8 @@ export class EtsyAdapter implements MarketplaceAdapter {
           title: product.title.slice(0, 140),
           description: product.description ?? product.title,
           price: (product.price.amount / 100).toFixed(2),
-          who_made:
-            (product.marketplaceData?.["etsyWhoMade"] as string | undefined) ??
-            "i_did",
-          when_made:
-            (product.marketplaceData?.["etsyWhenMade"] as string | undefined) ??
-            "made_to_order",
+          who_made: whoMade,
+          when_made: whenMade,
           taxonomy_id: String(taxonomy),
           shipping_profile_id: String(shipping),
           readiness_state_id: String(readiness),
@@ -586,11 +605,97 @@ export class EtsyAdapter implements MarketplaceAdapter {
       },
     );
 
+    /*
+     * LES PHOTOS — le seul cas des trois plateformes où il faut transporter
+     * les OCTETS.
+     *
+     * Etsy n'accepte aucune URL : ni champ `image_url`, ni récupération côté
+     * serveur. Il faut un `multipart/form-data` sur un point d'entrée séparé,
+     * après création du brouillon. Le Worker fait donc relais : il télécharge
+     * l'image et la retransmet, sans jamais la stocker.
+     *
+     * C'est aussi pour cela qu'un brouillon Etsy sans photo est un cul-de-sac :
+     * Etsy refuse de passer une annonce en `active` sans image.
+     *
+     * L'échec est NON BLOQUANT et rapporté : le brouillon existe déjà chez
+     * Etsy, prétendre le contraire ferait recréer un doublon au prochain essai.
+     */
+    const photos = (product.images ?? []).slice(0, 10);
+    let posees = 0;
+    const refusees: string[] = [];
+
+    for (const url of photos) {
+      try {
+        posees += await this.envoyerImage(ctx, created.listing_id, url, posees);
+      } catch (err) {
+        refusees.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    const note =
+      photos.length === 0
+        ? " · AUCUNE photo : Etsy refusera de la mettre en vente"
+        : refusees.length > 0
+          ? ` · ${posees}/${photos.length} photo(s) transmises — ${refusees[0]}`
+          : ` · ${posees} photo(s) transmises`;
+
     return this.ok(
       ctx,
       String(created.listing_id),
-      "Créée en brouillon — à publier depuis Etsy après relecture",
+      `Créée en brouillon — à publier depuis Etsy après relecture${note}`,
     );
+  }
+
+  /**
+   * Relaie une image vers Etsy : téléchargement puis renvoi en multipart.
+   *
+   * Rien n'est conservé. Le corps est lu en mémoire le temps d'un appel — les
+   * photos produit pèsent quelques centaines de kilo-octets, très en deçà de
+   * ce qu'une invocation de Worker peut tenir.
+   *
+   * `this.call` n'est pas utilisé : il impose un `Content-Type`, or celui d'un
+   * multipart doit contenir la frontière générée par `FormData`. On passe donc
+   * par le transport en laissant l'en-tête être calculé.
+   */
+  private async envoyerImage(
+    ctx: MarketplaceContext,
+    listingId: number,
+    url: string,
+    rang: number,
+  ): Promise<number> {
+    const http = ctx.http ?? fetch;
+
+    const source = await fetch(url);
+    if (!source.ok) {
+      throw new Error(`image inaccessible (${source.status}) : ${url.slice(0, 80)}`);
+    }
+    const octets = await source.blob();
+
+    const corps = new FormData();
+    corps.append("image", octets, `image-${rang + 1}.jpg`);
+    corps.append("rank", String(rang + 1));
+
+    const token = await this.token(ctx);
+    const res = await http(
+      `${API}/shops/${this.shopId(ctx)}/listings/${listingId}/images`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "x-api-key": apiKeyHeader(
+            ctx.credentials?.["clientId"] ?? "",
+            ctx.credentials?.["clientSecret"],
+          ),
+        },
+        body: corps,
+      },
+    );
+
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => "")).slice(0, 150).trim();
+      throw new Error(`Etsy a refusé l'image (${res.status}) ${detail}`);
+    }
+    return 1;
   }
 
   async updatePrice(

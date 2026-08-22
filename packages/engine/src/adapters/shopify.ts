@@ -309,6 +309,24 @@ export class ShopifyAdapter implements MarketplaceAdapter {
   ): Promise<TargetResult> {
     // Depuis l'API 2024-04, `productCreate` n'accepte plus les variantes :
     // il faut créer le produit, puis mettre à jour sa variante par défaut.
+    /*
+     * LES PHOTOS PARTENT PAR LEUR ADRESSE.
+     *
+     * Shopify TÉLÉCHARGE l'image et en héberge sa propre copie — l'URL source
+     * peut disparaître ensuite. C'est ce qui évite d'avoir à stocker quoi que
+     * ce soit de notre côté quand la photo vient déjà d'ailleurs.
+     *
+     * Deux pièges documentés : le téléchargement est ASYNCHRONE, donc un
+     * `userErrors` vide ne prouve pas que la photo est passée ; et le
+     * récupérateur de Shopify est anonyme, donc une URL protégée contre les
+     * liens directs échouera silencieusement.
+     */
+    const media = (product.images ?? []).slice(0, 250).map((url) => ({
+      originalSource: url,
+      mediaContentType: "IMAGE",
+      alt: product.title.slice(0, 512),
+    }));
+
     const created = await this.gql<{
       productCreate: {
         product: { id: string; variants: { nodes: Array<{ id: string }> } };
@@ -316,8 +334,8 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       };
     }>(
       ctx,
-      `mutation Create($input: ProductInput!) {
-        productCreate(input: $input) {
+      `mutation Create($input: ProductInput!, $media: [CreateMediaInput!]) {
+        productCreate(input: $input, media: $media) {
           product { id variants(first: 1) { nodes { id } } }
           userErrors { field message }
         }
@@ -331,6 +349,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
           status: "DRAFT",
           tags: product.tags ?? [],
         },
+        media,
       },
     );
     this.assertNoUserErrors(created.productCreate.userErrors, "création du produit");
@@ -378,11 +397,56 @@ export class ShopifyAdapter implements MarketplaceAdapter {
 
     // L'identifiant retenu est celui de la VARIANTE : c'est lui que portent
     // les lignes de commande, donc lui qui permet de rattacher une vente.
-    return this.ok(
-      ctx,
-      variantId,
-      "Créé en brouillon — à publier depuis l'admin Shopify après relecture",
-    );
+    /*
+     * LE STOCK, qui n'était jamais écrit.
+     *
+     * La variante était marquée `tracked: true` sans quantité : le produit
+     * arrivait donc chez Shopify à zéro, invendable, et le rapprochement
+     * voyait ensuite un écart qu'il « corrigeait » en adoptant ce zéro.
+     *
+     * L'échec est volontairement NON BLOQUANT : le produit existe déjà, et le
+     * signaler vaut mieux que de faire croire que rien n'a été créé. Le
+     * rapprochement de stock repassera de toute façon dans les deux minutes.
+     */
+    let noteStock = "";
+    if (product.stock > 0) {
+      try {
+        await this.updateStock(
+          ctx,
+          {
+            id: "",
+            productId: product.id,
+            accountId: ctx.account.id,
+            remoteId: variantId,
+            status: "draft",
+            price: product.price,
+            stock: product.stock,
+            marketplaceData: {
+              productId,
+              inventoryItemId:
+                updated.productVariantsBulkUpdate.productVariants[0]
+                  ?.inventoryItem.id,
+            },
+          },
+          product.stock,
+        );
+      } catch (err) {
+        noteStock = ` · stock non écrit (${err instanceof Error ? err.message : "échec"})`;
+      }
+    }
+
+    return {
+      ...this.ok(
+        ctx,
+        variantId,
+        `Créé en brouillon — à publier depuis l'admin Shopify après relecture${noteStock}`,
+      ),
+      marketplaceData: {
+        productId,
+        inventoryItemId:
+          updated.productVariantsBulkUpdate.productVariants[0]?.inventoryItem.id,
+      },
+    };
   }
 
   async updatePrice(

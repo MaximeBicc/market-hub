@@ -277,6 +277,10 @@ describe("création d'annonce", () => {
       description: "Cire de soja",
       price: { amount: 1500, currency: "EUR" },
       stock: 4,
+      // Désormais exigées : déclarer « fait main par moi » d'office sur de la
+      // revente expose à la suspension de la boutique.
+      whoMade: "i_did",
+      whenMade: "made_to_order",
     };
     const r = await adapter.createListing(ctxWith(http, PUBLIABLE), p, "idem");
 
@@ -803,5 +807,62 @@ describe("recherche de la boutique", () => {
       fetcher: fetcherFixe(200, { shop_id: 9, shop_name: "Atelier" }),
     });
     expect(nue.shopId).toBe("9");
+  });
+});
+
+describe("déclarations obligatoires", () => {
+  const BASE: Product = {
+    id: "p1",
+    sku: "SKU1",
+    title: "Bougie",
+    price: { amount: 1500, currency: "EUR" },
+    stock: 4,
+  };
+
+  it("refuse plutôt que de déclarer « fait main par moi »", async () => {
+    // who_made: "i_did" et when_made: "made_to_order" étaient codés en dur.
+    // Sur de la revente, c'est une fausse déclaration — et Etsy suspend des
+    // boutiques pour ce motif, pas seulement des annonces.
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.createListing(ctxWith(http, PUBLIABLE), BASE, "i");
+
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toMatch(/qui a fabriqué/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("exige les deux, pas seulement l'un", async () => {
+    const { http } = fakeHttp([]);
+    const r = await adapter.createListing(
+      ctxWith(http, PUBLIABLE),
+      { ...BASE, whoMade: "someone_else" },
+      "i",
+    );
+    expect(r.status).toBe("manual_required");
+  });
+
+  it("transmet la déclaration réelle quand elle est fournie", async () => {
+    const { http, sent } = fakeHttp([{ body: { listing_id: 7 } }]);
+    await adapter.createListing(
+      ctxWith(http, PUBLIABLE),
+      { ...BASE, whoMade: "someone_else", whenMade: "2020_2026" },
+      "i",
+    );
+    const b = form(sent[0]?.raw ?? null);
+    expect(b["who_made"]).toBe("someone_else");
+    expect(b["when_made"]).toBe("2020_2026");
+  });
+
+  it("signale une annonce sans photo comme impubliable", async () => {
+    // Etsy refuse de passer en vente une annonce sans image : un brouillon
+    // sans photo est un cul-de-sac, et le message doit le dire.
+    const { http } = fakeHttp([{ body: { listing_id: 7 } }]);
+    const r = await adapter.createListing(
+      ctxWith(http, PUBLIABLE),
+      { ...BASE, whoMade: "someone_else", whenMade: "2020_2026" },
+      "i",
+    );
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/AUCUNE photo/);
   });
 });

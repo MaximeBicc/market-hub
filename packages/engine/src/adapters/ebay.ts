@@ -152,6 +152,22 @@ interface EbayError {
   longMessage?: string;
 }
 
+/**
+ * L'état de l'article, dans le vocabulaire d'eBay.
+ *
+ * eBay refuse ou déclasse une annonce dont l'état ne correspond pas à sa
+ * catégorie. Il n'y a donc pas de valeur par défaut raisonnable : ne pas
+ * savoir, c'est ne pas publier.
+ */
+const ETATS_EBAY: Record<string, string> = {
+  new: "NEW",
+  new_other: "NEW_OTHER",
+  used_excellent: "USED_EXCELLENT",
+  used_good: "USED_GOOD",
+  used_acceptable: "USED_ACCEPTABLE",
+  for_parts: "FOR_PARTS_OR_NOT_WORKING",
+};
+
 export class EbayAdapter implements MarketplaceAdapter {
   readonly id = "ebay";
 
@@ -444,6 +460,37 @@ export class EbayAdapter implements MarketplaceAdapter {
       };
     }
 
+    /*
+     * L'état de l'article n'a PAS de valeur par défaut, et c'est délibéré.
+     *
+     * Cette ligne portait `condition: "NEW"` en dur. Tout article diffusé
+     * était donc déclaré neuf, y compris de la revente d'occasion — une
+     * fausse déclaration envoyée automatiquement, que personne ne voyait
+     * passer. Mieux vaut une publication refusée qu'une annonce mensongère.
+     */
+    const conditionEbay = product.condition
+      ? ETATS_EBAY[product.condition]
+      : undefined;
+    if (!conditionEbay) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "manual_required",
+        message:
+          "eBay exige l'état de l'article (neuf, très bon état, pour pièces…). Renseignez-le sur le produit : eBay déclasse une annonce dont l'état ne correspond pas à sa catégorie.",
+      };
+    }
+
+    if ((product.images?.length ?? 0) === 0) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "manual_required",
+        message:
+          "eBay exige au moins une photo en HTTPS. Sans elle, l'annonce se crée mais ne peut jamais être mise en vente.",
+      };
+    }
+
     // 1. L'article d'inventaire : ce qu'on possède.
     await this.call(
       ctx,
@@ -454,7 +501,7 @@ export class EbayAdapter implements MarketplaceAdapter {
           availability: {
             shipToLocationAvailability: { quantity: product.stock },
           },
-          condition: "NEW",
+          condition: conditionEbay,
           product: {
             title: product.title.slice(0, 80), // eBay tronque à 80 caractères
             description: product.description ?? product.title,
@@ -500,6 +547,10 @@ export class EbayAdapter implements MarketplaceAdapter {
       marketplace: ctx.account.marketplace,
       status: "success",
       remoteId: product.sku,
+      // L'identifiant d'offre REMONTE, au lieu de finir dans un texte que
+      // personne ne relit. Sans lui, l'annonce créée n'accepterait plus
+      // jamais ni changement de prix, ni activation, ni retrait.
+      marketplaceData: { offerId: offer.offerId, categoryId },
       message: `Offre ${offer.offerId} créée en brouillon — à publier après relecture`,
     };
   }
