@@ -366,7 +366,26 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       };
     }
 
-    const updated = await this.gql<{
+    /*
+     * À PARTIR D'ICI, LE PRODUIT EXISTE CHEZ SHOPIFY.
+     *
+     * Ce qui suit peut échouer — SKU en double, débit saturé, budget de
+     * sous-requêtes épuisé. Laisser l'exception remonter faisait rapporter
+     * « échec » et n'écrivait rien localement : le produit restait chez
+     * Shopify, inconnu de l'outil, et le prochain essai en créait un second.
+     *
+     * On renvoie donc `pending_remote` avec l'identifiant : l'orchestrateur
+     * l'enregistre, l'objet cesse d'être orphelin, et le message dit ce qu'il
+     * reste à finir.
+     */
+    let updated: {
+      productVariantsBulkUpdate: {
+        productVariants: Array<{ id: string; inventoryItem: { id: string } }>;
+        userErrors: UserError[];
+      };
+    };
+    try {
+      updated = await this.gql<{
       productVariantsBulkUpdate: {
         productVariants: Array<{ id: string; inventoryItem: { id: string } }>;
         userErrors: UserError[];
@@ -390,6 +409,17 @@ export class ShopifyAdapter implements MarketplaceAdapter {
         ],
       },
     );
+    } catch (err) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "pending_remote",
+        remoteId: productId,
+        marketplaceData: { productId },
+        message: `Produit créé chez Shopify, mais SKU et prix non écrits (${err instanceof Error ? err.message : "échec"}). À finir depuis l'admin — ne relancez pas, il serait créé en double.`,
+      };
+    }
+
     this.assertNoUserErrors(
       updated.productVariantsBulkUpdate.userErrors,
       "mise à jour de la variante",

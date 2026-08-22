@@ -1187,8 +1187,10 @@ api.post("/products", async (c) => {
     "new", "new_other", "used_excellent", "used_good", "used_acceptable", "for_parts",
   ]);
   const QUI = new Set(["i_did", "collective", "someone_else"]);
+  // Vocabulaire relevé sur la spécification OpenAPI d'Etsy. Trois valeurs
+  // qui figuraient ici n'existaient pas et provoquaient un 400 à la création.
   const QUAND = new Set([
-    "made_to_order", "2020_2026", "2010_2019", "2000_2009", "before_2000", "vintage",
+    "made_to_order", "2020_2026", "2010_2019", "2007_2009", "2000_2006", "before_2007", "1990s", "1980s", "1970s", "1960s", "1950s", "1940s", "1930s", "1920s", "1910s", "1900s", "1800s", "1700s", "before_1700",
   ]);
   const dans = (v: string | undefined, ens: Set<string>) =>
     v && ens.has(v) ? v : null;
@@ -1564,8 +1566,10 @@ api.patch("/products/:id/diffusion", async (c) => {
     "new", "new_other", "used_excellent", "used_good", "used_acceptable", "for_parts",
   ]);
   const QUI = new Set(["i_did", "collective", "someone_else"]);
+  // Vocabulaire relevé sur la spécification OpenAPI d'Etsy. Trois valeurs
+  // qui figuraient ici n'existaient pas et provoquaient un 400 à la création.
   const QUAND = new Set([
-    "made_to_order", "2020_2026", "2010_2019", "2000_2009", "before_2000", "vintage",
+    "made_to_order", "2020_2026", "2010_2019", "2007_2009", "2000_2006", "before_2007", "1990s", "1980s", "1970s", "1960s", "1950s", "1940s", "1930s", "1920s", "1910s", "1900s", "1800s", "1700s", "before_1700",
   ]);
 
   /** Non fourni = on ne touche pas. Fourni mais vide ou invalide = on efface. */

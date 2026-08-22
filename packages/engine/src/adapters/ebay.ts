@@ -491,6 +491,43 @@ export class EbayAdapter implements MarketplaceAdapter {
       };
     }
 
+    /*
+     * VÉRIFIER AVANT D'ÉCRIRE — le défaut le plus grave de ce chemin.
+     *
+     * L'appel suivant est un PUT sur `inventory_item/{sku}` : un remplacement
+     * COMPLET, pas une création. Si le SKU existe déjà chez eBay — annonce
+     * publiée à la main, ou SKU saisi deux fois — ce PUT écrasait le titre
+     * (tronqué à 80 caractères), la description, les photos, l'état, et
+     * forçait la quantité. Une annonce épuisée se remettait à prendre des
+     * commandes. Le `POST /offer` échouait ensuite, la commande était
+     * rapportée « échec », rien n'était écrit localement — et le geste
+     * naturel, réessayer, rejouait l'écrasement.
+     *
+     * Le garde-fou d'idempotence de l'orchestrateur ne pouvait rien : il lit
+     * la base LOCALE, qui ignore tout d'une annonce créée hors de l'outil.
+     *
+     * En cas de doute — réponse illisible, panne réseau — on refuse. L'état
+     * inconnu ne justifie pas d'écrire par-dessus.
+     */
+    const existe = await this.skuExiste(ctx, product.sku);
+    if (existe === true) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "manual_required",
+        message: `Le SKU « ${product.sku} » existe déjà chez eBay. Créer l'annonce écraserait ce qui est en ligne : rattachez-la par un import, ou changez de SKU.`,
+      };
+    }
+    if (existe === null) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "failed",
+        message:
+          "Impossible de vérifier si ce SKU existe déjà chez eBay. Rien n'a été écrit — réessayez plus tard.",
+      };
+    }
+
     // 1. L'article d'inventaire : ce qu'on possède.
     await this.call(
       ctx,
@@ -553,6 +590,31 @@ export class EbayAdapter implements MarketplaceAdapter {
       marketplaceData: { offerId: offer.offerId, categoryId },
       message: `Offre ${offer.offerId} créée en brouillon — à publier après relecture`,
     };
+  }
+
+  /**
+   * Ce SKU existe-t-il déjà chez eBay ?
+   *
+   * `true` il existe · `false` il n'existe pas · `null` on n'a pas pu savoir.
+   * La distinction compte : seul `false` autorise un remplacement complet.
+   */
+  private async skuExiste(
+    ctx: MarketplaceContext,
+    sku: string,
+  ): Promise<boolean | null> {
+    try {
+      await this.call(
+        ctx,
+        `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
+      );
+      return true;
+    } catch (err) {
+      // Le transport lève sur tout code anormal. Seul un 404 signifie
+      // franchement « cet article n'existe pas » ; le reste est une
+      // incertitude, et une incertitude ne doit pas autoriser une écriture.
+      const m = err instanceof Error ? err.message : String(err);
+      return /\b404\b/.test(m) ? false : null;
+    }
   }
 
   async updateStock(

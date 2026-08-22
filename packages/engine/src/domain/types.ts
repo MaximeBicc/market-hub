@@ -62,14 +62,34 @@ export type ProductCondition =
 /** Qui a fabriqué l'article — vocabulaire imposé par Etsy. */
 export type WhoMade = "i_did" | "collective" | "someone_else";
 
-/** Quand — vocabulaire imposé par Etsy. */
+/**
+ * Quand — vocabulaire imposé par Etsy, relevé sur sa spécification OpenAPI.
+ *
+ * Trois valeurs inventées figuraient ici (`2000_2009`, `before_2000`,
+ * `vintage`) : elles n'existent pas chez Etsy et faisaient échouer la
+ * création en 400. Les intervalles ne sont pas réguliers et se chevauchent
+ * — c'est la liste d'Etsy, pas la nôtre.
+ */
 export type WhenMade =
   | "made_to_order"
   | "2020_2026"
   | "2010_2019"
-  | "2000_2009"
-  | "before_2000"
-  | "vintage";
+  | "2007_2009"
+  | "2000_2006"
+  | "before_2007"
+  | "1990s"
+  | "1980s"
+  | "1970s"
+  | "1960s"
+  | "1950s"
+  | "1940s"
+  | "1930s"
+  | "1920s"
+  | "1910s"
+  | "1900s"
+  | "1800s"
+  | "1700s"
+  | "before_1700";
 
 export interface Product {
   id: ProductId;

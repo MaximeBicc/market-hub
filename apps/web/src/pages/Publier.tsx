@@ -80,13 +80,34 @@ const QUI: Array<[string, string]> = [
   ["collective", "Un collectif dont je fais partie"],
 ];
 
+/**
+ * Le vocabulaire d'Etsy, relevé sur sa spécification OpenAPI.
+ *
+ * Trois valeurs inventées figuraient ici — « 2000 – 2009 », « Avant 2000 »
+ * et « Vintage » — soit la moitié de la liste. Elles n'existent pas chez
+ * Etsy : les choisir faisait échouer la création en 400. Les intervalles
+ * se chevauchent et ne sont pas réguliers, c'est leur liste, pas la nôtre.
+ */
 const QUAND: Array<[string, string]> = [
   ["made_to_order", "Fabriqué à la commande"],
   ["2020_2026", "2020 – 2026"],
   ["2010_2019", "2010 – 2019"],
-  ["2000_2009", "2000 – 2009"],
-  ["before_2000", "Avant 2000"],
-  ["vintage", "Vintage (plus de 20 ans)"],
+  ["2007_2009", "2007 – 2009"],
+  ["2000_2006", "2000 – 2006"],
+  ["before_2007", "Avant 2007"],
+  ["1990s", "Années 1990"],
+  ["1980s", "Années 1980"],
+  ["1970s", "Années 1970"],
+  ["1960s", "Années 1960"],
+  ["1950s", "Années 1950"],
+  ["1940s", "Années 1940"],
+  ["1930s", "Années 1930"],
+  ["1920s", "Années 1920"],
+  ["1910s", "Années 1910"],
+  ["1900s", "Années 1900"],
+  ["1800s", "XIXe siècle"],
+  ["1700s", "XVIIIe siècle"],
+  ["before_1700", "Avant 1700"],
 ];
 
 const VERDICTS: Record<Resultat["status"], { libelle: string; cls: string }> = {

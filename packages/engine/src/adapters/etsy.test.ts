@@ -866,3 +866,61 @@ describe("déclarations obligatoires", () => {
     expect(r.message).toMatch(/AUCUNE photo/);
   });
 });
+
+describe("vocabulaire imposé par Etsy", () => {
+  /*
+   * Ces listes sont copiées de la spécification OpenAPI d'Etsy, relevée le
+   * 23/08/2026. Le test existe parce que trois valeurs INVENTÉES avaient été
+   * livrées ici — « 2000_2009 », « before_2000 », « vintage » — soit la
+   * moitié du menu. Elles n'existent pas chez Etsy : les choisir faisait
+   * échouer la création en 400, après avoir traversé le type, deux
+   * validations serveur et l'interface sans que rien ne bronche.
+   *
+   * Un vocabulaire imposé par un tiers ne se devine pas. Il se recopie, et
+   * il se verrouille.
+   */
+  const WHEN_MADE_ETSY = ["made_to_order", "2020_2026", "2010_2019", "2007_2009", "before_2007", "2000_2006", "1990s", "1980s", "1970s", "1960s", "1950s", "1940s", "1930s", "1920s", "1910s", "1900s", "1800s", "1700s", "before_1700"] as const;
+  const WHO_MADE_ETSY = ["i_did", "someone_else", "collective"] as const;
+
+  it("n'emploie que des valeurs « quand » qui existent", async () => {
+    for (const v of WHEN_MADE_ETSY) {
+      const { http, sent } = fakeHttp([{ body: { listing_id: 1 } }]);
+      await adapter.createListing(
+        ctxWith(http, PUBLIABLE),
+        {
+          id: "p",
+          sku: "S",
+          title: "T",
+          price: { amount: 100, currency: "EUR" },
+          stock: 1,
+          whoMade: "someone_else",
+          whenMade: v as never,
+        },
+        "i",
+      );
+      // La valeur part telle quelle : si elle est acceptée par notre type,
+      // elle doit être acceptée par Etsy.
+      expect(form(sent[0]?.raw ?? null)["when_made"]).toBe(v);
+    }
+  });
+
+  it("n'emploie que des valeurs « qui » qui existent", async () => {
+    for (const v of WHO_MADE_ETSY) {
+      const { http, sent } = fakeHttp([{ body: { listing_id: 1 } }]);
+      await adapter.createListing(
+        ctxWith(http, PUBLIABLE),
+        {
+          id: "p",
+          sku: "S",
+          title: "T",
+          price: { amount: 100, currency: "EUR" },
+          stock: 1,
+          whoMade: v as never,
+          whenMade: "made_to_order",
+        },
+        "i",
+      );
+      expect(form(sent[0]?.raw ?? null)["who_made"]).toBe(v);
+    }
+  });
+});

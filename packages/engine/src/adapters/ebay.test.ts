@@ -267,6 +267,8 @@ describe("écritures", () => {
 
   it("crée une offre en brouillon, sans la publier", async () => {
     const { http, sent } = fakeHttp([
+      // La sonde d'existence passe en premier : 404 = ce SKU est libre.
+      { status: 404, body: {} },
       { status: 204, body: {} },
       { body: { offerId: "off-9" } },
     ]);
@@ -292,7 +294,7 @@ describe("écritures", () => {
     // annonce que personne n'a relue.
     expect(r.message).toMatch(/brouillon/);
     expect(sent.some((s) => s.url.includes("/publish"))).toBe(false);
-    expect(sent[1]?.body.pricingSummary.price.value).toBe("19.90");
+    expect(sent[2]?.body.pricingSummary.price.value).toBe("19.90");
   });
 
   it("demande une catégorie plutôt que d'échouer obscurément", async () => {
@@ -470,6 +472,8 @@ describe("déclarations obligatoires", () => {
     ];
     for (const [notre, leur] of attendus) {
       const { http, sent } = fakeHttp([
+        // La sonde d'existence passe en premier : 404 = ce SKU est libre.
+        { status: 404, body: {} },
         { status: 204, body: {} },
         { body: { offerId: "off-1" } },
       ]);
@@ -478,7 +482,7 @@ describe("déclarations obligatoires", () => {
         { ...BASE, condition: notre as never },
         "idem",
       );
-      expect(sent[0]?.body.condition).toBe(leur);
+      expect(sent[1]?.body.condition).toBe(leur);
     }
   });
 
@@ -487,6 +491,8 @@ describe("déclarations obligatoires", () => {
     // ni activation, ni retrait : l'outil crée un objet qu'il ne sait plus
     // piloter.
     const { http } = fakeHttp([
+      // La sonde d'existence passe en premier : 404 = ce SKU est libre.
+      { status: 404, body: {} },
       { status: 204, body: {} },
       { body: { offerId: "off-42" } },
     ]);
@@ -497,5 +503,55 @@ describe("déclarations obligatoires", () => {
     );
     expect(r.status).toBe("success");
     expect(r.marketplaceData).toMatchObject({ offerId: "off-42" });
+  });
+});
+
+describe("ne jamais écraser ce qui est déjà en ligne", () => {
+  const PRODUIT: Product = {
+    id: "p1",
+    sku: "DEJA-LA",
+    title: "Article",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 4,
+    condition: "new",
+    images: ["https://exemple.fr/photo.jpg"],
+  };
+  const CTX = { ...PUBLIABLE, defaultCategoryId: "1234" };
+
+  it("refuse quand le SKU existe déjà chez eBay", async () => {
+    // Le PUT sur inventory_item est un REMPLACEMENT COMPLET. Sur un SKU déjà
+    // publié, il écrasait titre, description, photos, état, et forçait la
+    // quantité — une annonce épuisée se remettait à prendre des commandes.
+    const { http, sent } = fakeHttp([{ body: { sku: "DEJA-LA" } }]);
+    const r = await adapter.createListing(ctxWith(http, CTX), PRODUIT, "i");
+
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toMatch(/existe déjà/);
+    // Une seule requête : la sonde. Rien n'a été écrit.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.method).toBe("GET");
+  });
+
+  it("refuse aussi quand on ne peut PAS savoir", async () => {
+    // Une panne réseau ou un 500 laisse l'état inconnu. L'incertitude ne
+    // justifie pas d'écrire par-dessus.
+    const { http, sent } = fakeHttp([{ status: 500, body: {} }]);
+    const r = await adapter.createListing(ctxWith(http, CTX), PRODUIT, "i");
+
+    expect(r.status).toBe("failed");
+    expect(r.message).toMatch(/Impossible de vérifier/);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("crée normalement quand le SKU est libre", async () => {
+    const { http, sent } = fakeHttp([
+      { status: 404, body: {} },
+      { status: 204, body: {} },
+      { body: { offerId: "off-7" } },
+    ]);
+    const r = await adapter.createListing(ctxWith(http, CTX), PRODUIT, "i");
+
+    expect(r.status).toBe("success");
+    expect(sent[1]?.method).toBe("PUT");
   });
 });

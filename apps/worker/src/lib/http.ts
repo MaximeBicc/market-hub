@@ -61,7 +61,18 @@ export function createHttp({
       );
     }
 
-    counter.used++;
+    /*
+     * DEUX, et non une.
+     *
+     * Cloudflare compte comme sous-requête TOUT appel sortant, y compris vers
+     * ses propres services — le Durable Object de limitation juste au-dessus
+     * en est une. Ne compter que le `fetch` sous-estimait la consommation d'un
+     * facteur deux : le garde-fou se déclenchait bien après que Cloudflare ait
+     * tué l'invocation, et c'est cette mort brutale en plein milieu d'une
+     * diffusion qui laissait des annonces créées chez la plateforme et
+     * inconnues de la base.
+     */
+    counter.used += 2;
     const res = await fetch(input, init);
 
     if (res.status === 401 || res.status === 403) {

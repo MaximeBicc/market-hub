@@ -119,9 +119,17 @@ engine.post("/listing", async (c) => {
   // Compteur partagé : une diffusion vers trois comptes peut coûter une
   // dizaine de sous-requêtes, et le plan gratuit en autorise 50.
   const mod = buildEngine(c.env, { used: 0 });
+  // Dédoublonnage : `{"accountIds":["a","a"]}` créait DEUX annonces en un
+  // seul appel — le garde-fou d'idempotence est construit avant la boucle et
+  // ne voit donc pas la première création de la même passe.
+  const comptes = [...new Set(body.accountIds ?? [])].filter(Boolean);
+  if (comptes.length === 0) {
+    return c.json({ error: "Aucune boutique cible" }, 400);
+  }
+
   const outcome = await mod.orchestrator.createListing({
     productId: body.productId,
-    accountIds: body.accountIds,
+    accountIds: comptes,
     idempotencyKey: key,
   });
 
