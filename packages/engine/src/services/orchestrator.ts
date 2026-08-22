@@ -101,15 +101,20 @@ export class MarketplaceOrchestrator {
   private async ctx(accountId: AccountId): Promise<MarketplaceContext> {
     const account = await this.accounts.get(accountId);
     if (!account) throw new Error(`Compte inconnu : ${accountId}`);
-    const credentials = await this.credentials.get(accountId);
+    // Copie MUTABLE : c'est elle que l'adaptateur relit, et elle doit
+    // refléter un jeton renouvelé au cours de la même invocation.
+    const credentials = { ...(await this.credentials.get(accountId)) };
     return {
       account,
       credentials,
       http: this.httpFor?.(account),
       // Fusion, jamais substitution : écrire le jeton dérivé ne doit pas
       // effacer l'ID client et le secret qui permettent de le renouveler.
+      // Et mise à jour EN MÉMOIRE autant qu'en base — voir plus bas pourquoi
+      // l'oublier condamnait Etsy.
       saveCredentials: async (patch) => {
-        await this.credentials.put(accountId, { ...credentials, ...patch });
+        Object.assign(credentials, patch);
+        await this.credentials.put(accountId, credentials);
       },
     };
   }

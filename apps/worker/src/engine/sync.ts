@@ -41,7 +41,9 @@ export async function runEngineSync(
   if (!account.enabled) return;
 
   const adapter = mod.registry.get(account.marketplace);
-  const credentials = await repos.credentials.get(task.shopId);
+  // Copie mutable : un jeton renouvelé doit être visible des appels suivants
+  // de cette même invocation. Voir la note dans l'orchestrateur.
+  const credentials = { ...(await repos.credentials.get(task.shopId)) };
 
   const ctx = {
     account,
@@ -52,7 +54,8 @@ export async function runEngineSync(
     // celui qu'il ne fallait pas laisser hors régulation.
     http: mod.httpFor(account),
     saveCredentials: async (patch: Record<string, string>) => {
-      await repos.credentials.put(task.shopId, { ...credentials, ...patch });
+      Object.assign(credentials, patch);
+      await repos.credentials.put(task.shopId, credentials);
     },
   };
 

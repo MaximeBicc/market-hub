@@ -385,8 +385,17 @@ export class EtsyAdapter implements MarketplaceAdapter {
       ordersRead: true,
       ordersFulfill: true,
       trackingWrite: true,
-      // Etsy ne pousse aucun webhook : le relevé est la seule voie.
-      inboundSales: "poll",
+      /*
+       * Etsy a livré ses premiers webhooks en 2026 : les quatre événements de
+       * commande, et rien sur le stock. Encore faut-il que le point d'entrée
+       * ait été déclaré dans son portail et son secret collé ici — sans quoi
+       * toute notification est refusée faute de signature vérifiable.
+       *
+       * D'où « both » plutôt que « webhook » : les ventes arrivent en direct,
+       * mais le relevé reste la seule voie pour le stock, et le filet quand
+       * une notification se perd.
+       */
+      inboundSales: c["webhookSecret"] ? "both" : "poll",
     };
   }
 

@@ -233,7 +233,8 @@ accounts.post("/shopify", async (c) => {
       // Le jeton dérivé de l'échange est mémorisé dès le test : sans cela, la
       // première commande réelle devrait le redemander inutilement.
       saveCredentials: async (patch) => {
-        await repos.credentials.put(accountId, { ...credentials, ...patch });
+        Object.assign(credentials, patch);
+        await repos.credentials.put(accountId, credentials);
       },
     });
   } catch (err) {
@@ -282,7 +283,7 @@ accounts.post("/:id/test", async (c) => {
   try {
     const mod = buildEngine(c.env);
     const adapter = mod.registry.get(account.marketplace);
-    const current = await repos.credentials.get(id);
+    const current = { ...(await repos.credentials.get(id)) };
     await adapter.testConnection({
       account: { ...account, enabled: true },
       credentials: current,
@@ -486,7 +487,8 @@ accounts.post("/ebay/token", async (c) => {
       account: { ...account, enabled: true },
       credentials,
       saveCredentials: async (patch) => {
-        await repos.credentials.put(accountId, { ...credentials, ...patch });
+        Object.assign(credentials, patch);
+        await repos.credentials.put(accountId, credentials);
       },
     });
   } catch (err) {
@@ -632,13 +634,14 @@ accounts.get("/:id/probe", async (c) => {
 
   const mod = buildEngine(c.env);
   const adapter = mod.registry.get(account.marketplace);
-  const current = await repos.credentials.get(id);
+  const current = { ...(await repos.credentials.get(id)) };
 
   const ctx = {
     account,
     credentials: current,
     saveCredentials: async (patch: Record<string, string>) => {
-      await repos.credentials.put(id, { ...current, ...patch });
+      Object.assign(current, patch);
+      await repos.credentials.put(id, current);
     },
   };
 
@@ -734,12 +737,13 @@ accounts.post("/:id/import", async (c) => {
     );
   }
 
-  const current = await repos.credentials.get(id);
+  const current = { ...(await repos.credentials.get(id)) };
   const ctx = {
     account,
     credentials: current,
     saveCredentials: async (patch: Record<string, string>) => {
-      await repos.credentials.put(id, { ...current, ...patch });
+      Object.assign(current, patch);
+      await repos.credentials.put(id, current);
     },
   };
 
@@ -1263,7 +1267,7 @@ accounts.post("/:id/temps-reel", async (c) => {
     );
   }
 
-  const credentials = await repos.credentials.get(id);
+  const credentials = { ...(await repos.credentials.get(id)) };
   const mod = buildEngine(c.env);
   const adaptateur = mod.registry.get("shopify") as ShopifyAdapter;
 
@@ -1277,7 +1281,8 @@ accounts.post("/:id/temps-reel", async (c) => {
         credentials,
         http: mod.httpFor(account),
         saveCredentials: async (patch) => {
-          await repos.credentials.put(id, { ...credentials, ...patch });
+          Object.assign(credentials, patch);
+          await repos.credentials.put(id, credentials);
         },
       },
       rappel,

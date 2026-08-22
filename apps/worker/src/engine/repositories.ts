@@ -413,22 +413,69 @@ export class D1CredentialRepository implements CredentialRepository {
     return out;
   }
 
+  /**
+   * Recopie les échéances hors du chiffré, dans les colonnes indexées.
+   *
+   * POURQUOI CETTE DUPLICATION. Les dates vivent dans les identifiants, donc
+   * dans le blob chiffré : les interroger obligerait à déchiffrer chaque
+   * boutique à chaque passage du cron. Les colonnes existent pour être
+   * indexées et filtrées sans clé. Elles ne sont pas la vérité — le chiffré
+   * l'est — mais son reflet interrogeable.
+   *
+   * CE QUE COÛTAIT LEUR ABSENCE. Elles étaient écrites à `null`, et l'union
+   * de mise à jour ne les touchait pas : elles restaient nulles à vie. Or
+   * `refreshExpiringTokens` et `warnAboutReauth` filtrent sur `isNotNull`.
+   * Les deux garde-fous ne se déclenchaient donc JAMAIS pour une boutique
+   * reliée par le moteur. Conséquence concrète : le jeton Etsy meurt au bout
+   * de 90 jours, la boutique cesse de synchroniser, et aucune alerte ne
+   * part — la panne silencieuse que tout le reste du code cherche à éviter.
+   */
+  private echeances(c: Record<string, string>): {
+    acces: number | null;
+    rafraichissement: number | null;
+  } {
+    const nombre = (v: string | undefined): number | null => {
+      const n = Number(v);
+      return v && Number.isFinite(n) && n > 0 ? n : null;
+    };
+
+    // eBay donne l'échéance du rafraîchissement ; Etsy donne la date
+    // d'obtention et une fenêtre de 90 jours qui repart à chaque rotation.
+    const obtenu = nombre(c["refreshTokenObtainedAt"]);
+    return {
+      acces: nombre(c["accessTokenExpiresAt"]),
+      rafraichissement:
+        nombre(c["refreshTokenExpiresAt"]) ??
+        (obtenu === null ? null : obtenu + 90 * 86400),
+    };
+  }
+
   async put(accountId: AccountId, credentials: Record<string, string>) {
     const ciphertext = await encryptJson(this.masterKey, credentials);
     const now = Math.floor(Date.now() / 1000);
+    const { acces, rafraichissement } = this.echeances(credentials);
+
     await this.db
       .insert(oauthToken)
       .values({
         shopId: accountId,
         ciphertext,
         keyVersion: 1,
-        accessExpiresAt: null,
-        refreshExpiresAt: null,
+        accessExpiresAt: acces,
+        refreshExpiresAt: rafraichissement,
         updatedAt: now,
       })
       .onConflictDoUpdate({
         target: oauthToken.shopId,
-        set: { ciphertext, updatedAt: now },
+        // Les échéances font partie de la mise à jour : les omettre était
+        // exactement le défaut — un jeton renouvelé laissait une date périmée,
+        // ou nulle à jamais.
+        set: {
+          ciphertext,
+          accessExpiresAt: acces,
+          refreshExpiresAt: rafraichissement,
+          updatedAt: now,
+        },
       });
   }
 }

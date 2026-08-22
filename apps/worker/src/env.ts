@@ -118,6 +118,19 @@ export interface Env {
    * révoque l'accès immédiatement, sans redéploiement.
    */
   DIAGNOSTIC_TOKEN?: string;
+
+  /**
+   * Jeton de la route de diagnostic des PLACES DE MARCHÉ.
+   *
+   * Volontairement distinct de `DIAGNOSTIC_TOKEN`, qui ouvre le panel d'IA :
+   * deux surfaces, deux jetons, deux révocations indépendantes. Celui-ci
+   * donne à lire l'état des connexions — capacités, échéances de jetons,
+   * santé des synchronisations — et AUCUNE valeur d'identifiant.
+   *
+   * Absent, la route se ferme. Le supprimer révoque l'accès sans
+   * redéploiement :  wrangler secret delete MARKETS_DIAGNOSTIC_TOKEN
+   */
+  MARKETS_DIAGNOSTIC_TOKEN?: string;
 }
 
 /** Résout les identifiants applicatifs d'une plateforme depuis les secrets. */
