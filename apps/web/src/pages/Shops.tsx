@@ -707,6 +707,7 @@ function RetourOAuth() {
     const p = new URLSearchParams(window.location.search);
     const relie = p.get("relie");
     const erreur = p.get("erreur");
+    const detail = p.get("detail");
     if (!relie && !erreur) return null;
 
     window.history.replaceState({}, "", window.location.pathname);
@@ -728,7 +729,10 @@ function RetourOAuth() {
     return {
       ok: false,
       titre: "Connexion refusée",
-      corps: corps[erreur ?? ""] ?? "La plateforme a refusé la connexion.",
+      // Le détail vient du serveur et nomme la cause réelle. Le texte
+      // générique — une liste d'hypothèses — ne sert plus que lorsque la
+      // plateforme n'a rien dit.
+      corps: detail || (corps[erreur ?? ""] ?? "La plateforme a refusé la connexion."),
     };
   });
 

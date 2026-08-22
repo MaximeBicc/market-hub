@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { EtsyAdapter, ETSY_SCOPES, etsyConsentUrl, etsyPkce } from "./etsy.js";
+import {
+  EtsyAdapter,
+  ETSY_SCOPES,
+  etsyConsentUrl,
+  etsyFindShop,
+  etsyPkce,
+} from "./etsy.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 import type { Listing, Product } from "../domain/types.js";
 
@@ -702,5 +708,60 @@ describe("webhooks", () => {
     // fiable, et deviner la structure d'une vente décrémente un stock deux
     // fois. Le webhook dit « ça a bougé », le relevé va lire quoi.
     expect(adapter.webhookResync()).toEqual(["orders"]);
+  });
+});
+
+describe("recherche de la boutique", () => {
+  /**
+   * Trois échecs très différents arrivaient sous le même message. Le bandeau
+   * de connexion affiche désormais ces textes tels quels : chacun doit dire à
+   * l'utilisateur QUOI vérifier, pas énumérer des hypothèses.
+   */
+  function fetcherFixe(status: number, body: unknown) {
+    return async () =>
+      new Response(status === 204 ? null : JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+  }
+
+  const args = { clientId: "k", accessToken: "12345.t", userId: "12345" };
+
+  it("nomme le compte acheteur sur un 404", async () => {
+    await expect(
+      etsyFindShop({ ...args, fetcher: fetcherFixe(404, {}) }),
+    ).rejects.toThrow(/compte acheteur/);
+  });
+
+  it("pointe la validation de l'application sur un 403", async () => {
+    // L'autorisation a réussi, mais la clé d'API n'ouvre pas encore les
+    // portes : c'est le symptôme d'une application en attente de validation,
+    // pas d'un problème de boutique.
+    await expect(
+      etsyFindShop({ ...args, fetcher: fetcherFixe(403, { error: "forbidden" }) }),
+    ).rejects.toThrow(/pas encore validée/);
+  });
+
+  it("nomme aussi le compte acheteur sur une enveloppe vide", async () => {
+    await expect(
+      etsyFindShop({ ...args, fetcher: fetcherFixe(200, { count: 0, results: [] }) }),
+    ).rejects.toThrow(/compte acheteur/);
+  });
+
+  it("accepte la forme enveloppée et la forme nue", async () => {
+    const enveloppe = await etsyFindShop({
+      ...args,
+      fetcher: fetcherFixe(200, {
+        count: 1,
+        results: [{ shop_id: 9, shop_name: "Atelier", currency_code: "EUR" }],
+      }),
+    });
+    expect(enveloppe).toEqual({ shopId: "9", shopName: "Atelier", currency: "EUR" });
+
+    const nue = await etsyFindShop({
+      ...args,
+      fetcher: fetcherFixe(200, { shop_id: 9, shop_name: "Atelier" }),
+    });
+    expect(nue.shopId).toBe("9");
   });
 });

@@ -565,10 +565,22 @@ accounts.get("/ebay/callback", async (c) => {
     await ensureSyncJobs(c.env, accountId);
     return c.redirect("/shops?relie=ebay", 302);
   } catch (err) {
-    // Le message d'eBay est conservé dans le journal : l'utilisateur, lui,
-    // est renvoyé vers l'interface plutôt que sur une page blanche.
-    console.error("eBay callback", err);
-    return c.redirect("/shops?erreur=ebay", 302);
+    // Ce commentaire promettait « conservé dans le journal » pendant que le
+    // code écrivait dans la console. Maintenant, c'est vrai.
+    const message = err instanceof Error ? err.message : String(err);
+    await drizzle(c.env.DB).insert(eventLog).values({
+      id: randomId(),
+      at: Math.floor(Date.now() / 1000),
+      level: "error",
+      scope: "auth:ebay",
+      shopId: null,
+      message: "Connexion eBay refusée",
+      data: JSON.stringify({ message: message.slice(0, 500) }),
+    });
+    return c.redirect(
+      `/shops?erreur=ebay&detail=${encodeURIComponent(message.slice(0, 280))}`,
+      302,
+    );
   }
 });
 
@@ -1025,8 +1037,27 @@ accounts.get("/etsy/callback", async (c) => {
     await ensureSyncJobs(c.env, accountId);
     return c.redirect("/shops?relie=etsy", 302);
   } catch (err) {
-    console.error("Etsy callback", err);
-    return c.redirect("/shops?erreur=etsy", 302);
+    /*
+     * L'adaptateur produit des messages qui NOMMENT la cause — identifiants
+     * refusés avec la réponse d'Etsy, compte sans boutique, application non
+     * validée. Les laisser dans la console transformait chaque échec en
+     * devinette : le bandeau récitait des hypothèses pendant que la réponse
+     * exacte dormait dans un journal que personne ne lit.
+     */
+    const message = err instanceof Error ? err.message : String(err);
+    await db.insert(eventLog).values({
+      id: randomId(),
+      at: Math.floor(Date.now() / 1000),
+      level: "error",
+      scope: "auth:etsy",
+      shopId: null,
+      message: "Connexion Etsy refusée",
+      data: JSON.stringify({ message: message.slice(0, 500) }),
+    });
+    return c.redirect(
+      `/shops?erreur=etsy&detail=${encodeURIComponent(message.slice(0, 280))}`,
+      302,
+    );
   }
 });
 

@@ -218,8 +218,24 @@ export async function etsyFindShop(args: {
     },
   });
   if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 200).trim();
+    /*
+     * Trois situations très différentes arrivaient ici sous le même message.
+     * Un 404 signifie que l'AUTORISATION A FONCTIONNÉ — c'est un compte
+     * acheteur, sans boutique. Un 401/403 après un échange réussi est le
+     * symptôme classique d'une application pas encore validée par Etsy : le
+     * jeton est bon, mais la clé d'API n'ouvre pas encore les portes.
+     * Les confondre envoie l'utilisateur vérifier la mauvaise chose.
+     */
+    if (res.status === 404) {
+      throw new Error(
+        "Etsy a bien autorisé la connexion, mais ce compte n'a pas de boutique ouverte — c'est un compte acheteur. Reliez le compte Etsy qui possède la boutique.",
+      );
+    }
     throw new Error(
-      `Etsy : boutique introuvable (${res.status}). Le compte relié possède-t-il bien une boutique ouverte ?`,
+      res.status === 401 || res.status === 403
+        ? `Etsy a autorisé la connexion mais refuse de lire la boutique (${res.status})${detail ? ` — ${detail}` : ""}. Symptôme classique d'une application pas encore validée : vérifiez son état dans « Manage Your Apps ».`
+        : `Etsy : lecture de la boutique refusée (${res.status})${detail ? ` — ${detail}` : ""}`,
     );
   }
   const j = (await res.json()) as {
@@ -233,7 +249,11 @@ export async function etsyFindShop(args: {
     }>;
   };
   const shop = j.results?.[0] ?? j;
-  if (!shop?.shop_id) throw new Error("Etsy : ce compte n'a pas de boutique");
+  if (!shop?.shop_id) {
+    throw new Error(
+      "Etsy a bien autorisé la connexion, mais ce compte n'a pas de boutique ouverte — c'est un compte acheteur. Reliez le compte Etsy qui possède la boutique.",
+    );
+  }
 
   return {
     shopId: String(shop.shop_id),
