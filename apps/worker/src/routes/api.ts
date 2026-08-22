@@ -1,11 +1,16 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { and, desc, eq, gte, sql, lte } from "drizzle-orm";
+import { and, desc, eq, gte, gt, sql, lte } from "drizzle-orm";
 import type { QueueTask } from "@hub/core";
 import {
+  consumable,
   eventLog,
+  inventory,
   listing,
   order,
+  orderConsumable,
+  orderLine,
+  product,
   pushSubscription,
   shop,
   syncJob,
@@ -14,6 +19,7 @@ import type { Env } from "../env.js";
 import { randomId } from "../lib/crypto.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
 import { sendPushToUser } from "../lib/push.js";
+import { buildEngine } from "../engine/module.js";
 
 /**
  * API du tableau de bord. Tout est derrière la session — c'est un outil privé.
@@ -106,7 +112,11 @@ api.get("/orders", async (c) => {
       amount: order.totalAmount,
       currency: order.totalCurrency,
       buyer: order.buyerName,
+      shippingCarrier: order.shippingCarrier,
+      trackingNumber: order.trackingNumber,
+      trackingUrl: order.trackingUrl,
       placedAt: order.placedAt,
+      shippedAt: order.shippedAt,
       shopId: order.shopId,
       shopName: shop.displayName,
       platform: shop.platform,
@@ -116,6 +126,860 @@ api.get("/orders", async (c) => {
     .orderBy(desc(order.placedAt))
     .limit(limit);
   return c.json({ orders: rows });
+});
+
+/** Détail complet d'une commande avec ses articles et consommables associés. */
+api.get("/orders/:id", async (c) => {
+  const db = drizzle(c.env.DB);
+  const orderId = c.req.param("id");
+
+  const [orderRow] = await db
+    .select({
+      id: order.id,
+      externalId: order.externalId,
+      status: order.status,
+      amount: order.totalAmount,
+      currency: order.totalCurrency,
+      buyer: order.buyerName,
+      shippingCarrier: order.shippingCarrier,
+      trackingNumber: order.trackingNumber,
+      trackingUrl: order.trackingUrl,
+      shippingLabelUrl: order.shippingLabelUrl,
+      shippingLabelType: order.shippingLabelType,
+      placedAt: order.placedAt,
+      shippedAt: order.shippedAt,
+      shopId: order.shopId,
+      shopName: shop.displayName,
+      platform: shop.platform,
+    })
+    .from(order)
+    .innerJoin(shop, eq(shop.id, order.shopId))
+    .where(eq(order.id, orderId))
+    .limit(1);
+
+  if (!orderRow) {
+    return c.json({ error: "order_not_found" }, 404);
+  }
+
+  const lines = await db
+    .select()
+    .from(orderLine)
+    .where(eq(orderLine.orderId, orderId));
+
+  // Récupérer les images et stocks actuels pour chaque article de commande
+  const linesWithMeta = await Promise.all(
+    lines.map(async (l) => {
+      let imageUrl: string | null = null;
+      let currentStock: number | null = null;
+      let location: string | null = null;
+      let weightGrams: number | null = null;
+      let defaultConsumableId: string | null = null;
+      let color: string | null = null;
+      let material: string | null = null;
+
+      if (l.sku) {
+        const [prod] = await db
+          .select()
+          .from(product)
+          .where(eq(product.sku, l.sku))
+          .limit(1);
+        if (prod) {
+          currentStock = prod.stock;
+          location = prod.location;
+          weightGrams = prod.weightGrams;
+          defaultConsumableId = prod.defaultConsumableId;
+          color = prod.color;
+          material = prod.material;
+          if (prod.images) {
+            try {
+              const parsed = JSON.parse(prod.images);
+              if (Array.isArray(parsed) && parsed.length > 0) imageUrl = parsed[0];
+            } catch {}
+          }
+        }
+      }
+      if (!imageUrl && l.listingExternalId) {
+        const [list] = await db
+          .select({ imageUrl: listing.imageUrl, quantity: listing.quantity })
+          .from(listing)
+          .where(eq(listing.externalId, l.listingExternalId))
+          .limit(1);
+        if (list) {
+          imageUrl = list.imageUrl;
+          if (currentStock === null) currentStock = list.quantity;
+        }
+      }
+      return {
+        ...l,
+        imageUrl,
+        currentStock,
+        location,
+        weightGrams,
+        defaultConsumableId,
+        color,
+        material,
+      };
+    }),
+  );
+
+  const usedConsumables = await db
+    .select({
+      id: orderConsumable.id,
+      consumableId: orderConsumable.consumableId,
+      name: consumable.name,
+      category: consumable.category,
+      quantity: orderConsumable.quantity,
+      usedAt: orderConsumable.usedAt,
+    })
+    .from(orderConsumable)
+    .innerJoin(consumable, eq(consumable.id, orderConsumable.consumableId))
+    .where(eq(orderConsumable.orderId, orderId));
+
+  return c.json({
+    order: orderRow,
+    lines: linesWithMeta,
+    consumablesUsed: usedConsumables,
+  });
+});
+
+/** Consommables d'emballage disponibles et gestion de leur stock. */
+api.get("/consumables", async (c) => {
+  const db = drizzle(c.env.DB);
+  let rows = await db.select().from(consumable).orderBy(consumable.category, consumable.name);
+
+  // Initialisation automatique par défaut si la table est vide
+  if (rows.length === 0) {
+    const now = Math.floor(Date.now() / 1000);
+    const defaults = [
+      { id: "c_env_bubble_s", name: "Enveloppe Bulle S (15x21 cm)", category: "envelope", stock: 50, minAlert: 10, unitCost: 18 },
+      { id: "c_env_bubble_m", name: "Enveloppe Bulle M (18x26 cm)", category: "envelope", stock: 45, minAlert: 10, unitCost: 24 },
+      { id: "c_env_bubble_l", name: "Enveloppe Bulle L (24x33 cm)", category: "envelope", stock: 30, minAlert: 8, unitCost: 38 },
+      { id: "c_box_colissimo_s", name: "Carton Colissimo S (25x18x10 cm)", category: "box", stock: 25, minAlert: 5, unitCost: 65 },
+      { id: "c_box_colissimo_m", name: "Carton Colissimo M (32x23x15 cm)", category: "box", stock: 20, minAlert: 5, unitCost: 95 },
+      { id: "c_label_thermal", name: "Étiquette thermique d'expédition (10x15 cm)", category: "label", stock: 200, minAlert: 30, unitCost: 4 },
+      { id: "c_card_thanks", name: "Carte de remerciement & fidélité", category: "card", stock: 150, minAlert: 25, unitCost: 8 },
+      { id: "c_paper_kraft", name: "Papier de calage & protection kraft", category: "protection", stock: 80, minAlert: 15, unitCost: 12 },
+      { id: "c_tape_fragile", name: "Ruban adhésif renforcé", category: "protection", stock: 15, minAlert: 3, unitCost: 120 },
+    ];
+
+    for (const item of defaults) {
+      await db.insert(consumable).values({
+        ...item,
+        createdAt: now,
+        updatedAt: now,
+      }).onConflictDoNothing();
+    }
+    rows = await db.select().from(consumable).orderBy(consumable.category, consumable.name);
+  }
+
+  return c.json({ consumables: rows });
+});
+
+/** Ajouter ou mettre à jour un consommable. */
+api.post("/consumables", async (c) => {
+  const db = drizzle(c.env.DB);
+  const body = await c.req.json<{
+    id?: string;
+    name: string;
+    category: string;
+    stock: number;
+    minAlert?: number;
+    unitCost?: number;
+  }>();
+
+  if (!body.name || !body.category) {
+    return c.json({ error: "Nom et catégorie requis" }, 400);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const id = body.id || `c_${randomId()}`;
+
+  await db
+    .insert(consumable)
+    .values({
+      id,
+      name: body.name,
+      category: body.category,
+      stock: Math.max(0, body.stock ?? 0),
+      minAlert: body.minAlert ?? 5,
+      unitCost: body.unitCost ?? 0,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: consumable.id,
+      set: {
+        name: body.name,
+        category: body.category,
+        stock: Math.max(0, body.stock ?? 0),
+        minAlert: body.minAlert ?? 5,
+        unitCost: body.unitCost ?? 0,
+        updatedAt: now,
+      },
+    });
+
+  return c.json({ ok: true, id });
+});
+
+/** Ajustement rapide du stock d'un consommable. */
+api.post("/consumables/:id/stock", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  const body = await c.req.json<{ stock?: number; delta?: number }>();
+  const now = Math.floor(Date.now() / 1000);
+
+  const [existing] = await db.select().from(consumable).where(eq(consumable.id, id)).limit(1);
+  if (!existing) return c.json({ error: "consumable_not_found" }, 404);
+
+  let newStock = existing.stock;
+  if (typeof body.stock === "number") {
+    newStock = Math.max(0, body.stock);
+  } else if (typeof body.delta === "number") {
+    newStock = Math.max(0, existing.stock + body.delta);
+  }
+
+  await db
+    .update(consumable)
+    .set({ stock: newStock, updatedAt: now })
+    .where(eq(consumable.id, id));
+
+  return c.json({ ok: true, id, stock: newStock });
+});
+
+/**
+ * EXÉCUTION / EXPÉDITION DE COMMANDE EN 5 ÉTAPES.
+ *
+ * Décrémente les stocks produits & consommables, met à jour le statut,
+ * renseigne le suivi et propage l'exécution.
+ */
+api.post("/orders/:id/fulfill", async (c) => {
+  const db = drizzle(c.env.DB);
+  const orderId = c.req.param("id");
+  const body = await c.req.json<{
+    carrier?: string;
+    trackingNumber?: string;
+    trackingUrl?: string;
+    notifyBuyer?: boolean;
+    decrementProductStock?: boolean;
+    consumables?: Array<{ id: string; quantity: number }>;
+    giftProductId?: string;
+  }>();
+
+  const [ord] = await db.select().from(order).where(eq(order.id, orderId)).limit(1);
+  if (!ord) return c.json({ error: "order_not_found" }, 404);
+
+  const now = Math.floor(Date.now() / 1000);
+
+  // 1. Mise à jour de la commande en statut "shipped"
+  await db
+    .update(order)
+    .set({
+      status: "shipped",
+      shippingCarrier: body.carrier || ord.shippingCarrier || "La Poste",
+      trackingNumber: body.trackingNumber || ord.trackingNumber,
+      trackingUrl: body.trackingUrl || ord.trackingUrl,
+      shippedAt: now,
+      syncedAt: now,
+    })
+    .where(eq(order.id, orderId));
+
+  // 2. Décrémentation et enregistrement des consommables utilisés
+  const usedConsumablesSummary: Array<{ id: string; name: string; quantity: number; remaining: number }> = [];
+  if (Array.isArray(body.consumables)) {
+    for (const item of body.consumables) {
+      if (!item.id || item.quantity <= 0) continue;
+      const [cons] = await db.select().from(consumable).where(eq(consumable.id, item.id)).limit(1);
+      if (cons) {
+        const nextStock = Math.max(0, cons.stock - item.quantity);
+        await db
+          .update(consumable)
+          .set({ stock: nextStock, updatedAt: now })
+          .where(eq(consumable.id, item.id));
+
+        await db.insert(orderConsumable).values({
+          id: randomId(),
+          orderId,
+          consumableId: item.id,
+          quantity: item.quantity,
+          usedAt: now,
+        });
+
+        usedConsumablesSummary.push({
+          id: cons.id,
+          name: cons.name,
+          quantity: item.quantity,
+          remaining: nextStock,
+        });
+      }
+    }
+  }
+
+  // 3. Décrémentation du stock des produits de la commande
+  const decrementedProductsSummary: Array<{
+    sku?: string | undefined;
+    title: string;
+    quantity: number;
+    remainingStock: number | null;
+  }> = [];
+  if (body.decrementProductStock !== false) {
+    const lines = await db.select().from(orderLine).where(eq(orderLine.orderId, orderId));
+
+    for (const line of lines) {
+      let remaining: number | null = null;
+      if (line.sku) {
+        // Décrémente le catalogue maître `product`
+        const [prod] = await db.select().from(product).where(eq(product.sku, line.sku)).limit(1);
+        if (prod) {
+          remaining = Math.max(0, prod.stock - line.quantity);
+          await db
+            .update(product)
+            .set({ stock: remaining, updatedAt: now })
+            .where(eq(product.id, prod.id));
+
+          // Décrémente le stock central `inventory`
+          const [inv] = await db.select().from(inventory).where(eq(inventory.productId, prod.id)).limit(1);
+          if (inv) {
+            await db
+              .update(inventory)
+              .set({
+                onHand: Math.max(0, inv.onHand - line.quantity),
+                reserved: Math.max(0, inv.reserved - line.quantity),
+                version: inv.version + 1,
+                updatedAt: now,
+              })
+              .where(eq(inventory.productId, prod.id));
+          }
+        }
+
+        // Décrémente les annonces `listing` avec ce SKU
+        await db
+          .update(listing)
+          .set({
+            quantity: sql`max(0, ${listing.quantity} - ${line.quantity})`,
+            syncedAt: now,
+          })
+          .where(eq(listing.sku, line.sku));
+      } else if (line.listingExternalId) {
+        await db
+          .update(listing)
+          .set({
+            quantity: sql`max(0, ${listing.quantity} - ${line.quantity})`,
+            syncedAt: now,
+          })
+          .where(eq(listing.externalId, line.listingExternalId));
+      }
+
+      decrementedProductsSummary.push({
+        sku: line.sku ?? undefined,
+        title: line.title,
+        quantity: line.quantity,
+        remainingStock: remaining,
+      });
+    }
+  }
+
+  // 3b. Décrémentation du cadeau offert si sélectionné
+  let decrementedGift: { id: string; title: string; sku?: string; remainingStock: number } | null = null;
+  if (body.giftProductId) {
+    const [giftProd] = await db
+      .select()
+      .from(product)
+      .where(eq(product.id, body.giftProductId))
+      .limit(1);
+
+    if (giftProd) {
+      const remaining = Math.max(0, giftProd.stock - 1);
+      await db
+        .update(product)
+        .set({ stock: remaining, updatedAt: now })
+        .where(eq(product.id, giftProd.id));
+
+      await db
+        .update(inventory)
+        .set({
+          onHand: sql`max(0, ${inventory.onHand} - 1)`,
+          updatedAt: now,
+        })
+        .where(eq(inventory.productId, giftProd.id));
+
+      if (giftProd.sku) {
+        await db
+          .update(listing)
+          .set({
+            quantity: sql`max(0, ${listing.quantity} - 1)`,
+            syncedAt: now,
+          })
+          .where(eq(listing.sku, giftProd.sku));
+      }
+
+      decrementedGift = {
+        id: giftProd.id,
+        title: giftProd.title,
+        sku: giftProd.sku,
+        remainingStock: remaining,
+      };
+    }
+  }
+
+  // 4. Transmission à la plateforme marketplace si possible via le moteur
+  try {
+    const mod = buildEngine(c.env);
+    await mod.orchestrator.fulfillOrder({
+      accountId: ord.shopId,
+      fulfillment: {
+        remoteOrderId: ord.externalId,
+        trackingNumber: body.trackingNumber,
+        carrier: body.carrier,
+        trackingUrl: body.trackingUrl,
+        notifyBuyer: body.notifyBuyer ?? true,
+      },
+      idempotencyKey: `fulfill:${orderId}:${now}`,
+    });
+  } catch (e) {
+    // Si la boutique est locale ou déconnectée, on ne bloque pas la finalisation locale
+  }
+
+  // 5. Journalisation de l'événement
+  await db.insert(eventLog).values({
+    id: randomId(),
+    at: now,
+    level: "info",
+    scope: "order:fulfill",
+    shopId: ord.shopId,
+    message: `Commande #${ord.externalId} exécutée (${body.carrier || "Standard"} - Suivi: ${body.trackingNumber || "Sans suivi"})`,
+    data: JSON.stringify({
+      orderId,
+      carrier: body.carrier,
+      trackingNumber: body.trackingNumber,
+      consumables: usedConsumablesSummary,
+      products: decrementedProductsSummary,
+      gift: decrementedGift,
+    }),
+  });
+
+  return c.json({
+    ok: true,
+    orderId,
+    status: "shipped",
+    shippedAt: now,
+    consumables: usedConsumablesSummary,
+    products: decrementedProductsSummary,
+    gift: decrementedGift,
+  });
+});
+
+/** Téléverser ou associer une étiquette d'expédition à une commande (PDF ou image). */
+api.post("/orders/:id/shipping-label", async (c) => {
+  const db = drizzle(c.env.DB);
+  const orderId = c.req.param("id");
+  const body = await c.req.json<{
+    shippingLabelUrl: string;
+    shippingLabelType?: "scraped" | "uploaded" | "generated";
+    trackingNumber?: string;
+    carrier?: string;
+  }>();
+
+  const [ord] = await db.select().from(order).where(eq(order.id, orderId)).limit(1);
+  if (!ord) return c.json({ error: "order_not_found" }, 404);
+
+  const updates: Record<string, any> = {
+    shippingLabelUrl: body.shippingLabelUrl,
+    shippingLabelType: body.shippingLabelType || "uploaded",
+  };
+
+  if (body.trackingNumber) {
+    updates.trackingNumber = body.trackingNumber.trim();
+  }
+  if (body.carrier) {
+    updates.shippingCarrier = body.carrier.trim();
+  }
+
+  await db.update(order).set(updates).where(eq(order.id, orderId));
+
+  return c.json({ ok: true, orderId, ...updates });
+});
+
+/** Calcul des suggestions de cadeaux offerts (coût unitaire <= 2.5% du CA de la commande) et affinité de tags */
+api.get("/orders/:id/gift-suggestions", async (c) => {
+  const db = drizzle(c.env.DB);
+  const orderId = c.req.param("id");
+  const [ord] = await db.select().from(order).where(eq(order.id, orderId)).limit(1);
+  if (!ord) return c.json({ error: "order_not_found" }, 404);
+
+  // Budget max cadeau = 2.5% du montant de la commande
+  const maxGiftBudget = Math.max(0, Math.floor(ord.totalAmount * 0.025)); // en centimes
+
+  // Récupérer les articles de la commande pour extraire tous leurs tags et matières
+  const lines = await db.select().from(orderLine).where(eq(orderLine.orderId, orderId));
+  const orderTags = new Set<string>();
+  const orderMaterials = new Set<string>();
+
+  for (const line of lines) {
+    if (line.sku) {
+      const [p] = await db
+        .select({ tags: product.tags, material: product.material })
+        .from(product)
+        .where(eq(product.sku, line.sku))
+        .limit(1);
+      if (p?.tags) {
+        try {
+          const parsed = JSON.parse(p.tags);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((t) => orderTags.add(String(t).toLowerCase().trim()));
+          }
+        } catch {}
+      }
+      if (p?.material) {
+        const words = p.material.toLowerCase().split(/[\s,/-]+/).filter((w) => w.length > 2);
+        words.forEach((w) => orderMaterials.add(w));
+      }
+    }
+  }
+
+  // Récupérer tous les produits en stock
+  const allProducts = await db.select().from(product).where(gt(product.stock, 0));
+
+  const candidates: Array<{
+    product: {
+      id: string;
+      sku: string;
+      title: string;
+      costPrice: number | null;
+      priceAmount: number;
+      stock: number;
+      color: string | null;
+      material: string | null;
+      images: string[];
+      tags: string[];
+    };
+    costPrice: number;
+    percentOfOrder: number;
+    commonTags: string[];
+    materialMatch: boolean;
+    matchingMaterial: string | null;
+    score: number;
+  }> = [];
+
+  for (const p of allProducts) {
+    let images: string[] = [];
+    let tags: string[] = [];
+    if (p.images) {
+      try {
+        const parsed = JSON.parse(p.images);
+        if (Array.isArray(parsed)) images = parsed;
+      } catch {}
+    }
+    if (p.tags) {
+      try {
+        const parsed = JSON.parse(p.tags);
+        if (Array.isArray(parsed)) tags = parsed;
+      } catch {}
+    }
+
+    // Le produit doit avoir un coût défini et être inférieur ou égal à 2.5% du total commande
+    const cost = p.costPrice !== null && p.costPrice !== undefined ? p.costPrice : Math.round(p.priceAmount * 0.3);
+    if (cost > maxGiftBudget && maxGiftBudget > 0) continue;
+
+    // Calcul de l'affinité des tags (critère principal)
+    const commonTags = tags.filter((t) => orderTags.has(t.toLowerCase().trim()));
+    const isExplicitGoodie = tags.some((t) =>
+      ["cadeau", "goodie", "gift", "sticker", "badge", "carte", "freebie"].includes(t.toLowerCase().trim()),
+    );
+
+    // Calcul de l'affinité de matière (critère secondaire)
+    let materialMatch = false;
+    let matchingMaterial: string | null = null;
+    if (p.material && orderMaterials.size > 0) {
+      const candidateWords = p.material.toLowerCase().split(/[\s,/-]+/).filter((w) => w.length > 2);
+      const matchedWord = candidateWords.find((w) => orderMaterials.has(w));
+      if (matchedWord) {
+        materialMatch = true;
+        matchingMaterial = p.material;
+      }
+    }
+
+    // Calcul du score global : Tags (+15/tag) + Goodie (+10) + Matière (+8) + Qualité/Budget (+5 max)
+    let score = commonTags.length * 15 + (isExplicitGoodie ? 10 : 0) + (materialMatch ? 8 : 0);
+    if (maxGiftBudget > 0) {
+      score += (cost / maxGiftBudget) * 5;
+    }
+
+    const percentOfOrder = ord.totalAmount > 0 ? Number(((cost / ord.totalAmount) * 100).toFixed(2)) : 0;
+
+    candidates.push({
+      product: {
+        id: p.id,
+        sku: p.sku,
+        title: p.title,
+        costPrice: p.costPrice,
+        priceAmount: p.priceAmount,
+        stock: p.stock,
+        color: p.color,
+        material: p.material,
+        images,
+        tags,
+      },
+      costPrice: cost,
+      percentOfOrder,
+      commonTags,
+      materialMatch,
+      matchingMaterial,
+      score,
+    });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  return c.json({
+    orderTotal: ord.totalAmount,
+    maxBudget: maxGiftBudget,
+    orderTags: Array.from(orderTags),
+    orderMaterials: Array.from(orderMaterials),
+    suggestions: candidates,
+  });
+});
+
+/** Liste de tous les tags existants dans le catalogue avec fréquence */
+api.get("/products/tags", async (c) => {
+  const db = drizzle(c.env.DB);
+  const products = await db.select({ tags: product.tags }).from(product);
+
+  const counts = new Map<string, number>();
+  for (const p of products) {
+    if (!p.tags) continue;
+    try {
+      const parsed = JSON.parse(p.tags);
+      if (Array.isArray(parsed)) {
+        for (const t of parsed) {
+          const clean = String(t).trim();
+          if (clean) {
+            counts.set(clean, (counts.get(clean) ?? 0) + 1);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const tagList = Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return c.json({ tags: tagList });
+});
+
+/** Créer une commande de test liée aux vrais produits du stock */
+api.post("/orders/sample", async (c) => {
+  const db = drizzle(c.env.DB);
+  const now = Math.floor(Date.now() / 1000);
+  const body = (await c.req.json<{ productId?: string }>().catch(() => ({}))) as {
+    productId?: string;
+  };
+
+  // 1. Trouver ou créer une boutique de test
+  let [testShop] = await db.select().from(shop).limit(1);
+  if (!testShop) {
+    testShop = {
+      id: "shop_demo",
+      platform: "shopify",
+      externalId: "demo-store.myshopify.com",
+      displayName: "Boutique Démo (Shopify)",
+      slug: "boutique_demo",
+      status: "active",
+      config: "{}",
+      connectedAt: now,
+    };
+    await db.insert(shop).values(testShop).onConflictDoNothing();
+  }
+
+  // 2. Récupérer les produits existants dans le catalogue maître
+  let existingProducts = await db.select().from(product).limit(10);
+
+  // Si le catalogue est vide, créer automatiquement 2 produits réalistes
+  if (existingProducts.length === 0) {
+    const defaults = [
+      {
+        id: "prod_mug_demo",
+        sku: "ACC-MUG-01",
+        title: "Mug Céramique Artisanal 350ml",
+        description: "Mug tourné à la main, émaillage mat résistant.",
+        priceAmount: 2490, // 24.90 €
+        priceCurrency: "EUR",
+        costPrice: 850, // 8.50 €
+        stock: 12,
+        minAlert: 3,
+        location: "Étagère A-03 (Bac 2)",
+        weightGrams: 340,
+        defaultConsumableId: "c_box_colissimo_s",
+        images: JSON.stringify(["https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?w=400"]),
+        tags: JSON.stringify(["Céramique", "Mug", "Artisanat"]),
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "prod_carnet_demo",
+        sku: "ACC-CARNET-02",
+        title: "Carnet Cuir Végane A5 (Pages recyclées)",
+        description: "Couverture souple recyclée, 160 pages lignées.",
+        priceAmount: 2500, // 25.00 €
+        priceCurrency: "EUR",
+        costPrice: 900, // 9.00 €
+        stock: 18,
+        minAlert: 4,
+        location: "Rayon B-01 (Casier 5)",
+        weightGrams: 190,
+        defaultConsumableId: "c_env_bubble_m",
+        images: JSON.stringify(["https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400"]),
+        tags: JSON.stringify(["Papeterie", "Carnet", "Éco", "Artisanat"]),
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "prod_sticker_demo",
+        sku: "ACC-STICKER-01",
+        title: "Sticker Holographique Chat & Étoiles",
+        description: "Vinyle résistant à l'eau, reflets holographiques.",
+        priceAmount: 200, // 2.00 €
+        priceCurrency: "EUR",
+        costPrice: 35, // 0.35 € (éligible cadeau dès 14 € de commande)
+        stock: 50,
+        minAlert: 10,
+        location: "Tiroir Goodies G-01",
+        weightGrams: 5,
+        defaultConsumableId: "c_env_bubble_s",
+        images: JSON.stringify(["https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=400"]),
+        tags: JSON.stringify(["Chat", "Papeterie", "Artisanat", "Goodie", "Sticker", "Éco"]),
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "prod_badge_demo",
+        sku: "ACC-BADGE-02",
+        title: "Badge Émaillé Feuille Botanique",
+        description: "Finition dorée brillante et émail vert forêt.",
+        priceAmount: 350, // 3.50 €
+        priceCurrency: "EUR",
+        costPrice: 60, // 0.60 € (éligible cadeau dès 24 € de commande)
+        stock: 35,
+        minAlert: 8,
+        location: "Tiroir Goodies G-02",
+        weightGrams: 15,
+        defaultConsumableId: "c_env_bubble_s",
+        images: JSON.stringify(["https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=400"]),
+        tags: JSON.stringify(["Artisanat", "Éco", "Goodie", "Badge", "Céramique"]),
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+
+    for (const p of defaults) {
+      await db.insert(product).values(p).onConflictDoNothing();
+      await db
+        .insert(inventory)
+        .values({
+          productId: p.id,
+          onHand: p.stock,
+          reserved: 0,
+          version: 1,
+          updatedAt: now,
+        })
+        .onConflictDoNothing();
+
+      await db
+        .insert(listing)
+        .values({
+          id: `list_${p.sku.toLowerCase()}`,
+          shopId: testShop.id,
+          productId: p.id,
+          externalId: `ext_${p.sku.toLowerCase()}`,
+          sku: p.sku,
+          title: p.title,
+          priceAmount: p.priceAmount,
+          priceCurrency: p.priceCurrency,
+          quantity: p.stock,
+          status: "active",
+          imageUrl: p.images ? JSON.parse(p.images)[0] : null,
+          contentHash: `hash_${p.sku.toLowerCase()}`,
+          syncedAt: now,
+        })
+        .onConflictDoNothing();
+    }
+
+    existingProducts = await db.select().from(product).limit(10);
+  }
+
+  // 3. Sélectionner les produits pour la commande
+  let chosenProducts: typeof existingProducts = [];
+  if (body.productId) {
+    const specific = existingProducts.find((p) => p.id === body.productId);
+    if (specific) chosenProducts = [specific];
+  }
+
+  if (chosenProducts.length === 0) {
+    // Prendre en priorité 1 ou 2 produits ayant du stock
+    const inStock = existingProducts.filter((p) => p.stock > 0);
+    chosenProducts = inStock.length > 0 ? inStock.slice(0, Math.min(2, inStock.length)) : existingProducts.slice(0, 1);
+  }
+
+  const orderNum = Math.floor(1000 + Math.random() * 9000);
+  const orderId = `ord_${randomId()}`;
+  const externalId = `#${orderNum}`;
+
+  const buyers = [
+    "Camille Dupont",
+    "Alexandre Martin",
+    "Élodie Bernard",
+    "Thomas Petit",
+    "Léa Robert",
+    "Lucas Richard",
+  ];
+  const buyerName = buyers[Math.floor(Math.random() * buyers.length)];
+
+  let totalAmount = 0;
+  const orderLinesToInsert = chosenProducts.map((p) => {
+    const qty = 1;
+    totalAmount += p.priceAmount * qty;
+    return {
+      id: randomId(),
+      orderId,
+      sku: p.sku,
+      listingExternalId: `ext_${p.sku.toLowerCase()}`,
+      title: p.title,
+      quantity: qty,
+      unitPriceAmount: p.priceAmount,
+      unitPriceCurrency: p.priceCurrency || "EUR",
+    };
+  });
+
+  const sampleTracking = `6A${Math.floor(100000000000 + Math.random() * 900000000000)}`;
+
+  await db.insert(order).values({
+    id: orderId,
+    shopId: testShop.id,
+    externalId,
+    status: "paid",
+    totalAmount,
+    totalCurrency: "EUR",
+    buyerName,
+    shippingCarrier: "La Poste - Colissimo",
+    trackingNumber: sampleTracking,
+    trackingUrl: `https://www.laposte.fr/outils/suivre-vos-envois?code=${sampleTracking}`,
+    shippingLabelType: "scraped",
+    placedAt: now - Math.floor(Math.random() * 7200 + 300),
+    shippedAt: null,
+    contentHash: `hash_${orderId}`,
+    syncedAt: now,
+  });
+
+  await db.insert(orderLine).values(orderLinesToInsert);
+
+  return c.json({
+    ok: true,
+    orderId,
+    externalId,
+    buyerName,
+    productsCount: orderLinesToInsert.length,
+    totalAmount,
+  });
 });
 
 /**
@@ -199,32 +1063,300 @@ api.get("/growth", async (c) => {
   });
 });
 
-api.get("/inventory", async (c) => {
+/* ------------------------------------------------------------------ */
+/* Gestion des Produits du Catalogue Maître                            */
+/* ------------------------------------------------------------------ */
+
+/** Liste de tous les produits du catalogue maître avec leurs annonces associées. */
+api.get("/products", async (c) => {
   const db = drizzle(c.env.DB);
-  const rows = await db
+  const products = await db.select().from(product).orderBy(desc(product.updatedAt));
+  const listings = await db
     .select({
       id: listing.id,
-      externalId: listing.externalId,
+      productId: listing.productId,
       sku: listing.sku,
       title: listing.title,
       price: listing.priceAmount,
       currency: listing.priceCurrency,
       quantity: listing.quantity,
       status: listing.status,
-      imageUrl: listing.imageUrl,
       shopId: listing.shopId,
       shopName: shop.displayName,
       platform: shop.platform,
     })
     .from(listing)
-    .innerJoin(shop, eq(shop.id, listing.shopId))
-    .orderBy(listing.quantity)
-    .limit(500);
+    .innerJoin(shop, eq(shop.id, listing.shopId));
 
-  // Regroupement par SKU : c'est LA valeur du multi-boutiques — voir d'un coup
-  // d'œil que le même article est à 24 € sur Etsy et 29 € sur eBay.
-  const bySku = new Map<string, typeof rows>();
-  for (const r of rows) {
+  // Rattachement des annonces à chaque produit par SKU ou productId
+  const listingsBySku = new Map<string, typeof listings>();
+  const listingsByPid = new Map<string, typeof listings>();
+  for (const l of listings) {
+    if (l.sku) {
+      const arr = listingsBySku.get(l.sku) ?? [];
+      arr.push(l);
+      listingsBySku.set(l.sku, arr);
+    }
+    if (l.productId) {
+      const arr = listingsByPid.get(l.productId) ?? [];
+      arr.push(l);
+      listingsByPid.set(l.productId, arr);
+    }
+  }
+
+  const items = products.map((p) => {
+    const matched = listingsByPid.get(p.id) || (p.sku ? listingsBySku.get(p.sku) : []) || [];
+    let images: string[] = [];
+    let tags: string[] = [];
+    if (p.images) {
+      try {
+        images = JSON.parse(p.images);
+      } catch {}
+    }
+    if (p.tags) {
+      try {
+        tags = JSON.parse(p.tags);
+      } catch {}
+    }
+    return {
+      ...p,
+      images,
+      tags,
+      listings: matched,
+    };
+  });
+
+  return c.json({ products: items });
+});
+
+/** Ajouter ou modifier un produit maître. */
+api.post("/products", async (c) => {
+  const db = drizzle(c.env.DB);
+  const body = await c.req.json<{
+    id?: string;
+    sku: string;
+    title: string;
+    description?: string;
+    costPrice?: number;
+    priceAmount?: number;
+    priceCurrency?: string;
+    stock?: number;
+    minAlert?: number;
+    location?: string;
+    weightGrams?: number;
+    defaultConsumableId?: string;
+    color?: string;
+    material?: string;
+    images?: string[];
+    tags?: string[];
+  }>();
+
+  const sku = (body.sku ?? "").trim().toUpperCase();
+  const title = (body.title ?? "").trim();
+
+  if (!sku || !title) {
+    return c.json({ error: "SKU et Titre requis" }, 400);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const stock = Math.max(0, Number(body.stock ?? 0));
+
+  // Chercher si le produit existe déjà (par ID ou par SKU)
+  let existing = null;
+  if (body.id) {
+    [existing] = await db.select().from(product).where(eq(product.id, body.id)).limit(1);
+  }
+  if (!existing) {
+    [existing] = await db.select().from(product).where(eq(product.sku, sku)).limit(1);
+  }
+
+  const id = existing ? existing.id : (body.id || `prod_${randomId()}`);
+
+  if (existing) {
+    await db
+      .update(product)
+      .set({
+        sku,
+        title,
+        description: body.description ?? null,
+        costPrice: body.costPrice !== undefined && body.costPrice !== null ? Math.max(0, Math.round(body.costPrice)) : null,
+        priceAmount: Math.max(0, Math.round(body.priceAmount ?? 0)),
+        priceCurrency: body.priceCurrency ?? "EUR",
+        stock,
+        minAlert: body.minAlert ? Math.max(1, body.minAlert) : 3,
+        location: body.location?.trim() || null,
+        weightGrams: body.weightGrams ? Math.max(0, body.weightGrams) : null,
+        defaultConsumableId: body.defaultConsumableId || null,
+        color: body.color?.trim() || null,
+        material: body.material?.trim() || null,
+        images: body.images ? JSON.stringify(body.images) : null,
+        tags: body.tags ? JSON.stringify(body.tags) : null,
+        updatedAt: now,
+      })
+      .where(eq(product.id, id));
+  } else {
+    await db.insert(product).values({
+      id,
+      sku,
+      title,
+      description: body.description ?? null,
+      costPrice: body.costPrice !== undefined && body.costPrice !== null ? Math.max(0, Math.round(body.costPrice)) : null,
+      priceAmount: Math.max(0, Math.round(body.priceAmount ?? 0)),
+      priceCurrency: body.priceCurrency ?? "EUR",
+      stock,
+      minAlert: body.minAlert ? Math.max(1, body.minAlert) : 3,
+      location: body.location?.trim() || null,
+      weightGrams: body.weightGrams ? Math.max(0, body.weightGrams) : null,
+      defaultConsumableId: body.defaultConsumableId || null,
+      color: body.color?.trim() || null,
+      material: body.material?.trim() || null,
+      images: body.images ? JSON.stringify(body.images) : null,
+      tags: body.tags ? JSON.stringify(body.tags) : null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // Maintenir la table de stock central `inventory` synchronisée
+  await db
+    .insert(inventory)
+    .values({
+      productId: id,
+      onHand: stock,
+      reserved: 0,
+      version: 1,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: inventory.productId,
+      set: {
+        onHand: stock,
+        updatedAt: now,
+      },
+    });
+
+  // Lier automatiquement les annonces orphelines ayant ce SKU
+  await db
+    .update(listing)
+    .set({ productId: id, syncedAt: now })
+    .where(and(eq(listing.sku, sku)));
+
+  return c.json({ ok: true, id, sku });
+});
+
+/** Ajustement rapide du stock d'un produit. */
+api.post("/products/:id/stock", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  const body = await c.req.json<{ stock?: number; delta?: number }>();
+  const now = Math.floor(Date.now() / 1000);
+
+  const [existing] = await db.select().from(product).where(eq(product.id, id)).limit(1);
+  if (!existing) return c.json({ error: "product_not_found" }, 404);
+
+  let newStock = existing.stock;
+  if (typeof body.stock === "number") {
+    newStock = Math.max(0, body.stock);
+  } else if (typeof body.delta === "number") {
+    newStock = Math.max(0, existing.stock + body.delta);
+  }
+
+  await db
+    .update(product)
+    .set({ stock: newStock, updatedAt: now })
+    .where(eq(product.id, id));
+
+  await db
+    .update(inventory)
+    .set({ onHand: newStock, updatedAt: now })
+    .where(eq(inventory.productId, id));
+
+  // Met à jour les listings synchronisés avec ce SKU
+  if (existing.sku) {
+    await db
+      .update(listing)
+      .set({ quantity: newStock, syncedAt: now })
+      .where(eq(listing.sku, existing.sku));
+  }
+
+  return c.json({ ok: true, id, stock: newStock });
+});
+
+/** Supprimer un produit maître. */
+api.delete("/products/:id", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+
+  await db.update(listing).set({ productId: null }).where(eq(listing.productId, id));
+  await db.delete(inventory).where(eq(inventory.productId, id));
+  await db.delete(product).where(eq(product.id, id));
+
+  return c.json({ ok: true, id });
+});
+
+/** Supprimer un consommable d'emballage. */
+api.delete("/consumables/:id", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  await db.delete(consumable).where(eq(consumable.id, id));
+  return c.json({ ok: true, id });
+});
+
+/* ------------------------------------------------------------------ */
+/* Vue d'ensemble du Stock (Produits + Consommables + Multi-canaux)    */
+/* ------------------------------------------------------------------ */
+
+api.get("/inventory", async (c) => {
+  const db = drizzle(c.env.DB);
+  const [productRows, consumableRows, listingRows] = await Promise.all([
+    db.select().from(product).orderBy(desc(product.updatedAt)),
+    db.select().from(consumable).orderBy(consumable.category, consumable.name),
+    db
+      .select({
+        id: listing.id,
+        productId: listing.productId,
+        externalId: listing.externalId,
+        sku: listing.sku,
+        title: listing.title,
+        price: listing.priceAmount,
+        currency: listing.priceCurrency,
+        quantity: listing.quantity,
+        status: listing.status,
+        imageUrl: listing.imageUrl,
+        shopId: listing.shopId,
+        shopName: shop.displayName,
+        platform: shop.platform,
+      })
+      .from(listing)
+      .innerJoin(shop, eq(shop.id, listing.shopId))
+      .orderBy(listing.quantity)
+      .limit(500),
+  ]);
+
+  // Si pas de consommables, initialiser par défaut
+  let consumables = consumableRows;
+  if (consumables.length === 0) {
+    const now = Math.floor(Date.now() / 1000);
+    const defaults = [
+      { id: "c_env_bubble_s", name: "Enveloppe Bulle S (15x21 cm)", category: "envelope", stock: 50, minAlert: 10, unitCost: 18 },
+      { id: "c_env_bubble_m", name: "Enveloppe Bulle M (18x26 cm)", category: "envelope", stock: 45, minAlert: 10, unitCost: 24 },
+      { id: "c_env_bubble_l", name: "Enveloppe Bulle L (24x33 cm)", category: "envelope", stock: 30, minAlert: 8, unitCost: 38 },
+      { id: "c_box_colissimo_s", name: "Carton Colissimo S (25x18x10 cm)", category: "box", stock: 25, minAlert: 5, unitCost: 65 },
+      { id: "c_box_colissimo_m", name: "Carton Colissimo M (32x23x15 cm)", category: "box", stock: 20, minAlert: 5, unitCost: 95 },
+      { id: "c_label_thermal", name: "Étiquette thermique d'expédition (10x15 cm)", category: "label", stock: 200, minAlert: 30, unitCost: 4 },
+      { id: "c_card_thanks", name: "Carte de remerciement & fidélité", category: "card", stock: 150, minAlert: 25, unitCost: 8 },
+      { id: "c_paper_kraft", name: "Papier de calage & protection kraft", category: "protection", stock: 80, minAlert: 15, unitCost: 12 },
+      { id: "c_tape_fragile", name: "Ruban adhésif renforcé", category: "protection", stock: 15, minAlert: 3, unitCost: 120 },
+    ];
+    for (const item of defaults) {
+      await db.insert(consumable).values({ ...item, createdAt: now, updatedAt: now }).onConflictDoNothing();
+    }
+    consumables = await db.select().from(consumable).orderBy(consumable.category, consumable.name);
+  }
+
+  // Regroupement par SKU
+  const bySku = new Map<string, typeof listingRows>();
+  for (const r of listingRows) {
     if (!r.sku) continue;
     const arr = bySku.get(r.sku) ?? [];
     arr.push(r);
@@ -234,7 +1366,47 @@ api.get("/inventory", async (c) => {
     .filter(([, v]) => v.length > 1)
     .map(([sku, v]) => ({ sku, listings: v }));
 
-  return c.json({ listings: rows, multiChannel });
+  const mappedProducts = productRows.map((p) => {
+    let images: string[] = [];
+    let tags: string[] = [];
+    if (p.images) {
+      try {
+        const parsed = JSON.parse(p.images);
+        if (Array.isArray(parsed)) images = parsed;
+      } catch {}
+    }
+    if (p.tags) {
+      try {
+        const parsed = JSON.parse(p.tags);
+        if (Array.isArray(parsed)) tags = parsed;
+      } catch {}
+    }
+    return {
+      ...p,
+      images,
+      tags,
+    };
+  });
+
+  // Statistiques globales
+  const totalStockUnits = productRows.reduce((s, p) => s + p.stock, 0);
+  const totalStockValue = productRows.reduce((s, p) => s + (p.stock * p.priceAmount), 0);
+  const lowStockProductsCount = productRows.filter((p) => p.stock <= p.minAlert).length;
+  const lowStockConsumablesCount = consumables.filter((c) => c.stock <= c.minAlert).length;
+
+  return c.json({
+    products: mappedProducts,
+    consumables,
+    listings: listingRows,
+    multiChannel,
+    stats: {
+      totalProducts: productRows.length,
+      totalStockUnits,
+      totalStockValue,
+      lowStockProductsCount,
+      lowStockConsumablesCount,
+    },
+  });
 });
 
 /** Écriture vers une plateforme : passe par la Queue, jamais en direct. */

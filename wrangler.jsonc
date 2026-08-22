@@ -83,7 +83,7 @@
   // « Binding AI needs to be run remotely », ce qui rend le panel intestable
   // hors production. En déploiement, le drapeau n'a aucun effet — la liaison
   // pointe de toute façon sur le service réel.
-  "ai": { "binding": "AI", "remote": true },
+  "ai": { "binding": "AI" },
 
   // --- Durable Objects (backend SQLite = disponible en gratuit) ---
   // Un objet par (plateforme, boutique) : token bucket + verrou de refresh OAuth.

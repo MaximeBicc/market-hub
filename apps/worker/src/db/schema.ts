@@ -121,6 +121,17 @@ export const product = sqliteTable(
     priceCurrency: text("price_currency").notNull().default("EUR"),
     /** Stock de référence à la création d'une annonce. Le stock VIVANT est dans `inventory`. */
     stock: integer("stock").notNull().default(0),
+    minAlert: integer("min_alert").notNull().default(3),
+    /** Emplacement physique en atelier / entrepôt (ex. « Étagère A2 »). */
+    location: text("location"),
+    /** Poids unitaire en grammes pour le calcul d'affranchissement. */
+    weightGrams: integer("weight_grams"),
+    /** Format d'emballage / consommable recommandé par défaut. */
+    defaultConsumableId: text("default_consumable_id"),
+    /** Couleur(s) du produit (ex. « Noir », « Doré », « Bleu nuit / Argent »). */
+    color: text("color"),
+    /** Matière / Matériau de confection (ex. « Céramique émaillée », « Coton bio »). */
+    material: text("material"),
     images: text("images"), // JSON: string[]
     tags: text("tags"), // JSON: string[]
     marketplaceData: text("marketplace_data"), // JSON, champs propres à une plateforme
@@ -177,7 +188,15 @@ export const order = sqliteTable(
     totalAmount: integer("total_amount").notNull(),
     totalCurrency: text("total_currency").notNull(),
     buyerName: text("buyer_name"),
+    shippingCarrier: text("shipping_carrier"),
+    trackingNumber: text("tracking_number"),
+    trackingUrl: text("tracking_url"),
+    /** URL ou payload de l'étiquette d'expédition (PDF ou image). */
+    shippingLabelUrl: text("shipping_label_url"),
+    /** Origine de l'étiquette : 'scraped' (récupérée de la marketplace) | 'uploaded' (fournie par l'utilisateur) | 'generated'. */
+    shippingLabelType: text("shipping_label_type"),
     placedAt: integer("placed_at").notNull(),
+    shippedAt: integer("shipped_at"),
     contentHash: text("content_hash").notNull(),
     syncedAt: integer("synced_at").notNull(),
   },
@@ -201,6 +220,34 @@ export const orderLine = sqliteTable(
     unitPriceCurrency: text("unit_price_currency").notNull(),
   },
   (t) => [index("order_line_order_idx").on(t.orderId)],
+);
+
+/* ------------------------------------------------------------------ */
+/* Consommables d'emballage & préparation de commande                  */
+/* ------------------------------------------------------------------ */
+
+export const consumable = sqliteTable("consumable", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  category: text("category").notNull(), // envelope | box | card | label | protection | other
+  stock: integer("stock").notNull().default(0),
+  minAlert: integer("min_alert").notNull().default(5),
+  unitCost: integer("unit_cost").default(0),
+  imageUrl: text("image_url"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const orderConsumable = sqliteTable(
+  "order_consumable",
+  {
+    id: text("id").primaryKey(),
+    orderId: text("order_id").notNull().references(() => order.id),
+    consumableId: text("consumable_id").notNull().references(() => consumable.id),
+    quantity: integer("quantity").notNull().default(1),
+    usedAt: integer("used_at").notNull(),
+  },
+  (t) => [index("order_consumable_order_idx").on(t.orderId)],
 );
 
 /* ------------------------------------------------------------------ */

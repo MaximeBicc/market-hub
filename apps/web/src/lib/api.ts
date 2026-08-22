@@ -36,6 +36,7 @@ export const api = {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
 /* ------------------------------ Types ------------------------------ */
@@ -62,10 +63,112 @@ export interface OrderRow {
   amount: number;
   currency: string;
   buyer: string | null;
+  shippingCarrier?: string | null;
+  trackingNumber?: string | null;
+  trackingUrl?: string | null;
+  shippingLabelUrl?: string | null;
+  shippingLabelType?: "scraped" | "uploaded" | "generated" | string | null;
   placedAt: number;
+  shippedAt?: number | null;
   shopId: string;
   shopName: string;
   platform: string;
+}
+
+export interface OrderLineItem {
+  id: string;
+  sku: string | null;
+  listingExternalId: string | null;
+  title: string;
+  quantity: number;
+  unitPriceAmount: number;
+  unitPriceCurrency: string;
+  imageUrl: string | null;
+  currentStock: number | null;
+  location?: string | null;
+  weightGrams?: number | null;
+  defaultConsumableId?: string | null;
+  color?: string | null;
+  material?: string | null;
+}
+
+export interface OrderDetailResponse {
+  order: OrderRow;
+  lines: OrderLineItem[];
+  consumablesUsed: Array<{
+    id: string;
+    consumableId: string;
+    name: string;
+    category: string;
+    quantity: number;
+    usedAt: number;
+  }>;
+}
+
+export interface ConsumableItem {
+  id: string;
+  name: string;
+  category: "envelope" | "box" | "card" | "label" | "protection" | "other" | string;
+  stock: number;
+  minAlert: number;
+  unitCost?: number | null;
+  imageUrl?: string | null;
+}
+
+export interface FulfillOrderPayload {
+  carrier?: string;
+  trackingNumber?: string;
+  trackingUrl?: string;
+  consumables: Array<{ id: string; quantity: number }>;
+  giftProductId?: string;
+  decrementProductStock?: boolean;
+  notifyBuyer?: boolean;
+}
+
+export interface FulfillOrderResponse {
+  ok: boolean;
+  orderId: string;
+  status: string;
+  shippedAt: number;
+  consumables: Array<{ id: string; name: string; quantity: number; remaining: number }>;
+  products: Array<{ sku?: string; title: string; quantity: number; remainingStock: number | null }>;
+  gift?: { id: string; title: string; sku?: string; remainingStock: number } | null;
+}
+
+export interface ProductItem {
+  id: string;
+  sku: string;
+  title: string;
+  description?: string | null;
+  costPrice?: number | null; // centimes
+  priceAmount: number; // centimes
+  priceCurrency: string;
+  stock: number;
+  minAlert: number;
+  location?: string | null;
+  weightGrams?: number | null;
+  defaultConsumableId?: string | null;
+  color?: string | null;
+  material?: string | null;
+  images?: string[] | null;
+  tags?: string[] | null;
+  listings?: ListingRow[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface InventoryResponse {
+  products: ProductItem[];
+  consumables: ConsumableItem[];
+  listings: ListingRow[];
+  multiChannel: Array<{ sku: string; listings: ListingRow[] }>;
+  stats: {
+    totalProducts: number;
+    totalStockUnits: number;
+    totalStockValue: number;
+    lowStockProductsCount: number;
+    lowStockConsumablesCount: number;
+  };
 }
 
 export interface ListingRow {

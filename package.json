@@ -5,7 +5,8 @@
   "type": "module",
   "packageManager": "pnpm@9.12.0",
   "scripts": {
-    "dev": "pnpm --filter @hub/web build && wrangler dev",
+    "dev": "pnpm --filter @hub/web build && wrangler dev --local --test-scheduled",
+    "dev:worker": "wrangler dev --local --test-scheduled",
     "dev:web": "pnpm --filter @hub/web dev",
     "build": "pnpm --filter @hub/web build",
     "mise-en-ligne": "node scripts/deploy.mjs",
@@ -15,6 +16,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply market-hub-db --remote",
     "cf-typegen": "wrangler types",
     "login": "wrangler login",
+    "print-server": "python3 pdf-to-l100.py --server",
     "test": "pnpm --filter @hub/engine --filter @hub/ai test"
   },
   "devDependencies": {
