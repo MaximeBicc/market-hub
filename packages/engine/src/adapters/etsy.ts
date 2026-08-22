@@ -20,9 +20,11 @@ import type {
  * TROIS PARTICULARITÉS QUI STRUCTURENT TOUT LE FICHIER
  *
  * 1. DEUX en-têtes sur CHAQUE appel : `Authorization: Bearer` ET `x-api-key`.
- *    En oublier un renvoie 401 sans dire lequel manque. C'est la première
- *    cause d'échec sur cette API, et c'est pour cela que rien ici n'appelle
- *    l'API sans passer par `call()`.
+ *    En oublier un renvoie 401 sans dire lequel manque. Et depuis le
+ *    9 février 2026, `x-api-key` doit porter « keystring:secret_partagé » —
+ *    la keystring seule est rejetée en 403. C'est la première cause d'échec
+ *    sur cette API, et c'est pour cela que rien ici n'appelle l'API sans
+ *    passer par `call()`.
  *
  * 2. PKCE OBLIGATOIRE. Etsy refuse l'échange de code sans `code_verifier`,
  *    même pour une application serveur qui garde son secret. Le vérificateur
@@ -56,6 +58,18 @@ export const ETSY_SCOPES = [
   "transactions_w",
   "shops_r",
 ] as const;
+
+/**
+ * L'en-tête `x-api-key`, au format qu'Etsy IMPOSE depuis le 9 février 2026 :
+ * « keystring:secret_partagé ». La keystring seule est rejetée par un 403
+ * dont le message ne se lit que si on va le chercher dans le corps.
+ *
+ * Sans secret connu, la keystring part seule : le refus d'Etsy nommera alors
+ * la valeur manquante — mieux qu'un échec muet fabriqué de notre côté.
+ */
+function apiKeyHeader(clientId: string, sharedSecret?: string | undefined): string {
+  return sharedSecret ? `${clientId}:${sharedSecret}` : clientId;
+}
 
 /* ------------------------------------------------------------------ */
 /* Parcours d'autorisation                                             */
@@ -108,11 +122,16 @@ export function etsyConsentUrl(args: {
 /**
  * Poste sur le point de jeton d'Etsy.
  *
- * Le corps part en `application/x-www-form-urlencoded`, comme l'exige
- * OAuth 2.0 et comme le documente Etsy. Un repli en JSON existe parce que
- * plusieurs intégrations rapportent le cas inverse : il ne coûte rien tant
- * que le premier essai réussit, et il évite qu'une boutique reste bloquée
- * sur un détail d'encodage après plusieurs jours d'attente de validation.
+ * Le corps part en JSON, et ce choix est réfléchi. La spécification OAuth
+ * voudrait du `x-www-form-urlencoded`, et Etsy le documente — mais son propre
+ * tutoriel officiel échange le code en JSON, et depuis juillet 2026 une
+ * régression avérée (etsy/open-api nº 1678) fait rejeter l'envoi en
+ * formulaire chez certaines applications avec un 403 au message trompeur
+ * (« Invalid API key »), pendant que le MÊME envoi en JSON passe. Le support
+ * d'Etsy a confirmé accepter les deux formats ; seul le JSON marche partout.
+ *
+ * Le repli en formulaire couvre le cas symétrique. Il inclut le 403 : c'est
+ * sous ce statut, pas 400, que les refus de passerelle d'Etsy arrivent.
  */
 async function postToken(
   body: Record<string, string>,
@@ -120,15 +139,15 @@ async function postToken(
 ): Promise<{ access_token: string; refresh_token: string; expires_in: number }> {
   let res = await fetcher(TOKEN_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(body).toString(),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 
-  if (res.status === 400 || res.status === 415) {
+  if (res.status === 400 || res.status === 403 || res.status === 415) {
     res = await fetcher(TOKEN_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(body).toString(),
     });
   }
 
@@ -204,6 +223,7 @@ export async function etsyExchangeCode(args: {
  */
 export async function etsyFindShop(args: {
   clientId: string;
+  sharedSecret?: string | undefined;
   accessToken: string;
   userId: string;
   fetcher?:
@@ -214,7 +234,7 @@ export async function etsyFindShop(args: {
   const res = await f(`${API}/users/${args.userId}/shops`, {
     headers: {
       Authorization: `Bearer ${args.accessToken}`,
-      "x-api-key": args.clientId,
+      "x-api-key": apiKeyHeader(args.clientId, args.sharedSecret),
     },
   });
   if (!res.ok) {
@@ -442,7 +462,10 @@ export class EtsyAdapter implements MarketplaceAdapter {
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
-      "x-api-key": ctx.credentials?.["clientId"] ?? "",
+      "x-api-key": apiKeyHeader(
+        ctx.credentials?.["clientId"] ?? "",
+        ctx.credentials?.["clientSecret"],
+      ),
       ...(rest.headers as Record<string, string> | undefined),
     };
     if (form) headers["Content-Type"] = "application/x-www-form-urlencoded";

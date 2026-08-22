@@ -109,13 +109,25 @@ describe("authentification", () => {
 
     expect(sent[0]?.headers["Authorization"]).toBe("Bearer 12345.atok");
     // Oublier celui-ci renvoie un 401 qui ressemble à un jeton expiré.
-    expect(sent[0]?.headers["x-api-key"]).toBe("keystring123");
+    expect(sent[0]?.headers["x-api-key"]).toBe("keystring123:secret");
   });
 
-  it("porte la keystring seule, jamais keystring:secret", async () => {
+  it("porte keystring:secret — le format imposé depuis février 2026", async () => {
+    // Un test affirmait ici l'exact inverse, sur la foi de la doc de
+    // démarrage d'Etsy restée en retard sur sa propre exigence. La keystring
+    // seule est rejetée en 403 sur chaque appel depuis le 9 février 2026.
     const { http, sent } = fakeHttp([{ body: { shop_id: 777 } }]);
     await adapter.testConnection(ctxWith(http));
-    expect(sent[0]?.headers["x-api-key"]).not.toContain(":");
+    expect(sent[0]?.headers["x-api-key"]).toBe("keystring123:secret");
+  });
+
+  it("retombe sur la keystring seule quand le secret est inconnu", async () => {
+    // Le refus d'Etsy nommera la valeur manquante — mieux qu'un échec muet.
+    const { http, sent } = fakeHttp([{ body: { shop_id: 777 } }]);
+    const ctx = ctxWith(http);
+    delete ctx.credentials?.["clientSecret"];
+    await adapter.testConnection(ctx);
+    expect(sent[0]?.headers["x-api-key"]).toBe("keystring123");
   });
 
   it("réutilise un jeton encore valide sans appel réseau", async () => {
@@ -142,32 +154,47 @@ describe("authentification", () => {
     );
 
     expect(sent[0]?.url).toBe("https://api.etsy.com/v3/public/oauth/token");
-    expect(form(sent[0]?.raw ?? null)["grant_type"]).toBe("refresh_token");
+    expect(JSON.parse(sent[0]?.raw ?? "{}")["grant_type"]).toBe("refresh_token");
     // Etsy fait TOURNER le refresh : ne pas garder le neuf condamne la
     // boutique à une réautorisation manuelle.
     expect(saved[0]?.["refreshToken"]).toBe("refresh-v2");
     expect(saved[0]?.["accessToken"]).toBe("12345.neuf");
   });
 
-  it("poste le jeton en formulaire, pas en JSON", async () => {
+  it("poste le jeton en JSON, comme le tutoriel officiel d'Etsy", async () => {
+    // Depuis juillet 2026, une régression Etsy avérée rejette l'envoi en
+    // formulaire chez certaines applications (403 « Invalid API key »),
+    // pendant que le même envoi en JSON passe. Seul le JSON marche partout.
     const { http, sent } = fakeHttp([
       { body: { access_token: "1.a", refresh_token: "r", expires_in: 3600 } },
       { body: { shop_id: 777 } },
     ]);
     await adapter.testConnection(ctxWith(http, { accessTokenExpiresAt: "0" }));
-    expect(sent[0]?.headers["Content-Type"]).toBe(
-      "application/x-www-form-urlencoded",
-    );
+    expect(sent[0]?.headers["Content-Type"]).toBe("application/json");
   });
 
-  it("retombe sur JSON si Etsy refuse le formulaire", async () => {
+  it("retombe sur le formulaire si Etsy refuse le JSON", async () => {
     const { http, sent } = fakeHttp([
       { status: 400, body: { error: "unsupported" } },
       { body: { access_token: "1.a", refresh_token: "r", expires_in: 3600 } },
       { body: { shop_id: 777 } },
     ]);
     await adapter.testConnection(ctxWith(http, { accessTokenExpiresAt: "0" }));
-    expect(sent[1]?.headers["Content-Type"]).toBe("application/json");
+    expect(sent[1]?.headers["Content-Type"]).toBe(
+      "application/x-www-form-urlencoded",
+    );
+    expect(sent).toHaveLength(3);
+  });
+
+  it("réessaie aussi sur un 403 — le statut des refus de passerelle d'Etsy", async () => {
+    // C'est LE cas de la régression de juillet 2026 : un repli qui n'écoute
+    // que le 400 ne se déclenche jamais, et l'échange échoue en silence.
+    const { http, sent } = fakeHttp([
+      { status: 403, body: { error: "Invalid API key" } },
+      { body: { access_token: "1.a", refresh_token: "r", expires_in: 3600 } },
+      { body: { shop_id: 777 } },
+    ]);
+    await adapter.testConnection(ctxWith(http, { accessTokenExpiresAt: "0" }));
     expect(sent).toHaveLength(3);
   });
 
@@ -731,6 +758,19 @@ describe("recherche de la boutique", () => {
     await expect(
       etsyFindShop({ ...args, fetcher: fetcherFixe(404, {}) }),
     ).rejects.toThrow(/compte acheteur/);
+  });
+
+  it("assemble keystring:secret quand le secret est fourni", async () => {
+    const entetes: Record<string, string>[] = [];
+    const fetcher = async (_url: string, init?: RequestInit) => {
+      entetes.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response(JSON.stringify({ shop_id: 9, shop_name: "A" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+    await etsyFindShop({ ...args, sharedSecret: "s3cret", fetcher });
+    expect(entetes[0]?.["x-api-key"]).toBe("k:s3cret");
   });
 
   it("pointe la validation de l'application sur un 403", async () => {

@@ -759,6 +759,7 @@ function RetourOAuth() {
 function ConnectEtsy() {
   const [open, setOpen] = useState(false);
   const [clientId, setClientId] = useState("");
+  const [sharedSecret, setSharedSecret] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -788,6 +789,7 @@ function ConnectEtsy() {
     try {
       const r = await api.post<{ url: string }>("/engine/accounts/etsy/start", {
         clientId,
+        sharedSecret,
         displayName,
       });
       window.location.href = r.url;
@@ -806,10 +808,11 @@ function ConnectEtsy() {
       <div className="banner banner--warn" style={{ marginTop: 0 }}>
         <span className="banner__t">Deux conditions avant que cela marche</span>
         <span className="banner__b">
-          Etsy valide chaque application à la main : la keystring ne fonctionne
-          qu'une fois l'app approuvée. Et l'URL de retour ci-dessous doit être
-          déclarée <b>à l'identique</b> dans les réglages de l'app — une barre
-          oblique en trop suffit à faire échouer la connexion.
+          L'URL de retour ci-dessous doit être déclarée <b>à l'identique</b>{" "}
+          dans les réglages de l'app — une barre oblique en trop suffit à
+          faire échouer la connexion. Et si la page d'autorisation d'Etsy ne
+          s'affiche pas, c'est que l'application attend encore sa validation :
+          tant qu'elle est « Pending », Etsy bloque tout le parcours.
         </span>
       </div>
 
@@ -835,6 +838,24 @@ function ConnectEtsy() {
         />
         <span className="muted">
           Portail développeur Etsy → Your Apps → votre application.
+        </span>
+      </div>
+
+      <div className="field">
+        <label htmlFor="ts">Secret partagé (shared secret)</label>
+        <input
+          id="ts"
+          className="input"
+          type="password"
+          value={sharedSecret}
+          onChange={(e) => setSharedSecret(e.target.value)}
+          placeholder="a1b2c3d4e5"
+          required
+        />
+        <span className="muted">
+          Affiché sous « See API Key Details », à côté de la keystring. Etsy
+          l'exige sur chaque appel depuis février 2026 — sans lui,
+          l'autorisation réussit puis toutes les lectures échouent.
         </span>
       </div>
 

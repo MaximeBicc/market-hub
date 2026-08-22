@@ -918,16 +918,28 @@ function etsyRedirectUri(env: Env): string {
 
 accounts.post("/etsy/start", async (c) => {
   const body = await c.req
-    .json<{ clientId?: string; displayName?: string }>()
+    .json<{ clientId?: string; sharedSecret?: string; displayName?: string }>()
     .catch(() => ({}) as Record<string, string>);
 
   const clientId = (body.clientId ?? "").trim();
+  const sharedSecret = (body.sharedSecret ?? "").trim();
 
   if (!clientId) {
     return c.json(
       {
         error:
-          "La keystring est requise. Elle se trouve dans « Your Apps » sur le portail développeur Etsy, une fois l'application validée.",
+          "La keystring est requise. Elle se trouve dans « Your Apps » sur le portail développeur Etsy.",
+      },
+      400,
+    );
+  }
+  // Obligatoire depuis le 9 février 2026 : sans lui, l'autorisation réussit
+  // puis CHAQUE appel d'API échoue en 403 — le pire des deux mondes.
+  if (!sharedSecret) {
+    return c.json(
+      {
+        error:
+          "Le secret partagé (shared secret) est requis : Etsy l'exige sur chaque appel depuis février 2026. Il est affiché sous « See API Key Details », à côté de la keystring.",
       },
       400,
     );
@@ -944,6 +956,7 @@ accounts.post("/etsy/start", async (c) => {
     `etsy:${state}`,
     JSON.stringify({
       clientId,
+      sharedSecret,
       verifier,
       displayName: body.displayName ?? "Etsy",
     }),
@@ -972,6 +985,7 @@ accounts.get("/etsy/callback", async (c) => {
 
   const p = JSON.parse(pending) as {
     clientId: string;
+    sharedSecret?: string;
     verifier: string;
     displayName: string;
   };
@@ -992,6 +1006,7 @@ accounts.get("/etsy/callback", async (c) => {
     // une boutique qui ne synchroniserait jamais rien.
     const shopInfo = await etsyFindShop({
       clientId: p.clientId,
+      sharedSecret: p.sharedSecret,
       accessToken: tokens.accessToken,
       userId: tokens.userId,
     });
@@ -1023,6 +1038,7 @@ accounts.get("/etsy/callback", async (c) => {
 
     await repos.credentials.put(accountId, {
       clientId: p.clientId,
+      ...(p.sharedSecret ? { clientSecret: p.sharedSecret } : {}),
       refreshToken: tokens.refreshToken,
       accessToken: tokens.accessToken,
       accessTokenExpiresAt: String(tokens.expiresAt),
