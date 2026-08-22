@@ -2,10 +2,12 @@ import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import { desc, eq } from "drizzle-orm";
 import type { CanonicalOrderEvent } from "@hub/engine";
+import { COMMANDES, etatCommande } from "@hub/engine";
 import { commandLog, inventory, product, shop } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
 import { buildEngine } from "../engine/module.js";
+import { d1Repositories } from "../engine/repositories.js";
 
 /**
  * API de l'orchestrateur.
@@ -34,6 +36,54 @@ engine.get("/capabilities", async (c) => {
 });
 
 /** Adaptateurs enregistrés, indépendamment des comptes connectés. */
+/**
+ * Le catalogue des commandes, boutique par boutique.
+ *
+ * AUCUN APPEL RÉSEAU : `capabilities()` est pure sur les trois adaptateurs
+ * réels — elle lit les identifiants déjà déchiffrés et renvoie des booléens.
+ * La page peut donc s'ouvrir sans consommer un seul quota de plateforme.
+ *
+ * Ce qui distingue cette route de `/capabilities` : elle ne renvoie pas des
+ * booléens bruts mais des COMMANDES, avec leur état et, quand une commande
+ * est fermée, ce qui manque pour l'ouvrir. « eBay ne gère pas listingCreate »
+ * est vrai et inutile ; « il manque une adresse d'expédition et trois
+ * politiques, voici où les créer » est actionnable.
+ */
+engine.get("/catalogue", async (c) => {
+  const db = drizzle(c.env.DB);
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const mod = buildEngine(c.env);
+
+  const lignes = await db.select().from(shop).orderBy(shop.platform);
+  const boutiques = [];
+
+  for (const s of lignes) {
+    const account = await repos.accounts.get(s.id);
+    if (!account) continue;
+    const credentials = await repos.credentials.get(s.id);
+    const capacites = await mod.registry
+      .get(account.marketplace)
+      .capabilities({ account, credentials });
+
+    boutiques.push({
+      id: s.id,
+      plateforme: s.platform,
+      nom: s.displayName,
+      statut: s.status,
+      ventesEntrantes: capacites.inboundSales,
+      commandes: COMMANDES.map((cmd) => ({
+        id: cmd.id,
+        libelle: cmd.libelle,
+        ecrit: cmd.ecrit,
+        portee: cmd.portee,
+        ...etatCommande(cmd, account.marketplace, capacites, credentials),
+      })),
+    });
+  }
+
+  return c.json({ boutiques });
+});
+
 engine.get("/adapters", async (c) => {
   const mod = buildEngine(c.env);
   const out = [];

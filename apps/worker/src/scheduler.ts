@@ -1,5 +1,5 @@
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq, inArray, lte, sql, isNotNull, lt } from "drizzle-orm";
+import { and, eq, inArray, lte, sql, isNotNull, isNull, lt } from "drizzle-orm";
 import type { QueueTask, SyncResource } from "@hub/core";
 import {
   aiCache,
@@ -13,6 +13,7 @@ import {
   syncJob,
 } from "./db/schema.js";
 import type { Env } from "./env.js";
+import { d1Repositories } from "./engine/repositories.js";
 import { randomId } from "./lib/crypto.js";
 import { sendPushToUser } from "./lib/push.js";
 
@@ -67,6 +68,9 @@ export async function handleScheduled(
       await enqueueDueJobs(env);
       break;
     case "17 * * * *":
+      // Le rattrapage d'abord : sans échéances renseignées, le renouvellement
+      // anticipé qui suit ne voit rien à renouveler.
+      await backfillExpiries(env);
       await refreshExpiringTokens(env);
       break;
     case "40 3 * * *":
@@ -143,6 +147,40 @@ function backoff(intervalSec: number, failures: number): number {
  * Passe par la Queue : le rafraîchissement est un appel réseau, donc jamais
  * dans le cron lui-même.
  */
+/**
+ * Recopie les échéances manquantes hors du chiffré.
+ *
+ * POURQUOI C'EST NÉCESSAIRE. Les colonnes `access_expires_at` et
+ * `refresh_expires_at` ont longtemps été écrites à `null` et jamais mises à
+ * jour. Or les deux garde-fous ci-dessous filtrent sur `isNotNull` : ils ne se
+ * déclenchaient donc pour AUCUNE boutique reliée par le moteur. Le défaut est
+ * corrigé à la source — `D1CredentialRepository.put` renseigne maintenant les
+ * deux colonnes — mais une ligne déjà en base reste nulle jusqu'au prochain
+ * renouvellement, c'est-à-dire jusqu'à 18 mois pour eBay.
+ *
+ * Ce rattrapage déchiffre uniquement les lignes restées nulles, recalcule les
+ * échéances et les réécrit. Il ne touche à aucune plateforme, ne consomme
+ * aucun quota, et devient inopérant dès que tout est renseigné. Le laisser en
+ * place le rend aussi auto-réparateur : un futur chemin d'écriture qui
+ * oublierait les colonnes serait rattrapé à l'heure suivante.
+ */
+async function backfillExpiries(env: Env): Promise<void> {
+  const db = drizzle(env.DB);
+  const repos = d1Repositories(env.DB, env.MASTER_KEY);
+
+  const nulles = await db
+    .select({ shopId: oauthToken.shopId })
+    .from(oauthToken)
+    .where(isNull(oauthToken.accessExpiresAt))
+    .limit(20);
+
+  for (const n of nulles) {
+    const c = await repos.credentials.get(n.shopId);
+    // Réécrire à l'identique suffit : `put` dérive les colonnes du contenu.
+    if (c && Object.keys(c).length > 0) await repos.credentials.put(n.shopId, c);
+  }
+}
+
 async function refreshExpiringTokens(env: Env): Promise<void> {
   const db = drizzle(env.DB);
   const horizon = Math.floor(Date.now() / 1000) + 2 * 3600;

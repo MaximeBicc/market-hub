@@ -258,6 +258,8 @@ export function Shops() {
       <ConnectEbay />
       <ConnectEtsy />
 
+      <Catalogue />
+
       <h2 className="sec">Pas encore disponibles</h2>
       <div className="card planned" style={{ display: "grid", gap: 12 }}>
         {A_VENIR.map(([nom, note]) => (
@@ -890,5 +892,112 @@ function ConnectEtsy() {
         trois mois d'affilée.
       </p>
     </form>
+  );
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Catalogue des commandes                                             */
+/* ------------------------------------------------------------------ */
+
+interface CommandeVue {
+  id: string;
+  libelle: string;
+  ecrit: boolean;
+  portee: "multi" | "unique";
+  etat: "possible" | "impossible" | "bloquee";
+  manque?: string[];
+  raison?: string;
+}
+
+interface BoutiqueVue {
+  id: string;
+  plateforme: string;
+  nom: string;
+  statut: string;
+  ventesEntrantes: string;
+  commandes: CommandeVue[];
+}
+
+const VENTES_ENTRANTES: Record<string, string> = {
+  webhook: "poussées en direct",
+  both: "poussées en direct, avec relevé de secours",
+  poll: "relevées toutes les 2 minutes",
+  manual: "à saisir à la main",
+  none: "aucune remontée",
+};
+
+/**
+ * Ce que chaque boutique sait faire — et ce qui manque quand elle ne peut pas.
+ *
+ * Une capacité absente n'est pas une fatalité : le plus souvent c'est une
+ * configuration qui manque dans le compte marchand. Griser un bouton sans le
+ * dire oblige à deviner ; nommer la valeur absente et l'endroit où la créer
+ * transforme un mur en tâche. C'est toute la différence entre les deux états
+ * « impossible » et « bloquée ».
+ */
+function Catalogue() {
+  const { data } = useQuery({
+    queryKey: ["catalogue"],
+    queryFn: () => api.get<{ boutiques: BoutiqueVue[] }>("/engine/catalogue"),
+  });
+
+  if (!data || data.boutiques.length === 0) return null;
+
+  return (
+    <>
+      <h2 className="sec">Ce que chaque boutique sait faire</h2>
+      <div style={{ display: "grid", gap: 9 }}>
+        {data.boutiques.map((b) => (
+          <div className="card" key={b.id}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <span className="row__t">{b.nom}</span>
+              <span className="muted">
+                {b.plateforme} · ventes {VENTES_ENTRANTES[b.ventesEntrantes] ?? b.ventesEntrantes}
+              </span>
+            </div>
+
+            <div style={{ display: "grid", gap: 7, marginTop: 10 }}>
+              {b.commandes.map((cmd) => (
+                <div key={cmd.id}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      className={
+                        cmd.etat === "possible"
+                          ? "pill pill--ok"
+                          : cmd.etat === "bloquee"
+                            ? "pill pill--warn"
+                            : "pill pill--mute"
+                      }
+                    >
+                      {cmd.etat === "possible"
+                        ? "oui"
+                        : cmd.etat === "bloquee"
+                          ? "à configurer"
+                          : "non"}
+                    </span>
+                    <span className="row__t" style={{ fontWeight: 500 }}>
+                      {cmd.libelle}
+                    </span>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      {cmd.ecrit ? "écriture" : "lecture"}
+                    </span>
+                  </div>
+
+                  {cmd.etat === "bloquee" && (
+                    <div
+                      className="row__s"
+                      style={{ whiteSpace: "normal", lineHeight: 1.45, marginTop: 3 }}
+                    >
+                      Manque : {cmd.manque?.join(", ")}. {cmd.raison}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
   );
 }

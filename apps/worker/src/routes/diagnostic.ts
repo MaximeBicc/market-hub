@@ -6,6 +6,7 @@ import type {
   MarketplaceAdapter,
   MarketplaceContext,
 } from "@hub/engine";
+import { COMMANDES, etatCommande } from "@hub/engine";
 import { inventory, listing, shop, syncJob, webhookReceipt } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { buildEngine } from "../engine/module.js";
@@ -315,6 +316,16 @@ diagnostic.get("/", async (c) => {
       capacites.inboundSales === "webhook" || capacites.inboundSales === "both";
 
     boutiques.push({
+      // LE CATALOGUE : commande par commande, ce que ce compte peut faire, et
+      // ce qui manque quand il ne peut pas. C'est la réponse à « qu'est-ce qui
+      // est possible ? », posée boutique par boutique plutôt qu'en général.
+      commandes: COMMANDES.map((cmd) => ({
+        id: cmd.id,
+        libelle: cmd.libelle,
+        ecrit: cmd.ecrit,
+        portee: cmd.portee,
+        ...etatCommande(cmd, account.marketplace, capacites, credentials),
+      })),
       identite: {
         id: s.id,
         plateforme: s.platform,
