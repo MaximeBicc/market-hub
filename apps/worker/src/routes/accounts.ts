@@ -53,7 +53,35 @@ import { ensureSyncJobs } from "../engine/sync.js";
 
 export const accounts = new Hono<{ Bindings: Env }>();
 
+/*
+ * LES RAPPELS OAUTH SONT PUBLICS, ET C'EST VOLONTAIRE.
+ *
+ * Un rappel OAuth revient d'un AUTRE site. Le faire dépendre du cookie de
+ * session paraît prudent et ne l'est pas : le cookie est en `SameSite=Lax`,
+ * qui survit à une navigation de premier niveau simple — mais pas à la chaîne
+ * de redirections d'eBay, qui part d'une soumission de formulaire chez lui.
+ * Constaté en production : le rappel eBay recevait 401 sans que le
+ * gestionnaire tourne une seule fois, donc sans laisser la moindre trace.
+ *
+ * Ce qui autorise réellement l'opération n'est pas le cookie mais le `state` :
+ * 24 caractères aléatoires, rangés en KV à l'ouverture du parcours, à USAGE
+ * UNIQUE et périmés en dix minutes. Or ce parcours ne s'ouvre que depuis une
+ * route protégée. Nul ne peut donc fabriquer un `state` valable sans être déjà
+ * authentifié, et personne ne peut en rejouer un.
+ *
+ * C'est le rôle que le `state` a dans OAuth depuis le début. S'appuyer sur lui
+ * plutôt que sur un cookie rend aussi le retour indifférent au navigateur —
+ * Safari, iOS et la navigation privée traitent les cookies tiers autrement.
+ */
+const RAPPELS_PUBLICS = new Set([
+  "/api/engine/accounts/ebay/callback",
+  "/api/engine/accounts/etsy/callback",
+]);
+
 accounts.use("*", async (c, next) => {
+  if (c.req.method === "GET" && RAPPELS_PUBLICS.has(c.req.path)) {
+    return next();
+  }
   const me = await authenticate(c.env, c.req.raw);
   if (!me) return c.json({ error: "unauthorized" }, 401);
   await next();
