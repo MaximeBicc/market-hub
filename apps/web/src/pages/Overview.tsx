@@ -22,9 +22,29 @@ export function Overview() {
   if (isLoading || !data) return <div className="boot">Chargement…</div>;
 
   const noShops = data.shops.length === 0;
-  const stale = data.health.filter(
-    (h) => h.failureCount > 0 || (h.lastOkAt !== null && Date.now() / 1000 - h.lastOkAt > 7200),
-  );
+  /*
+   * QUAND UNE TÂCHE EST-ELLE VRAIMENT EN RETARD ?
+   *
+   * Le seuil était fixe : deux heures, pour toutes les ressources. Or leurs
+   * rythmes n'ont rien à voir — le stock se relit toutes les deux minutes, le
+   * catalogue complet une fois par jour. « listings » se déclarait donc en
+   * retard vingt-deux heures sur vingt-quatre, et le bandeau d'alerte devenait
+   * un décor qu'on apprend à ne plus lire.
+   *
+   * Le retard se juge maintenant contre le rythme PROPRE de chaque tâche :
+   * trois cycles manqués. La marge de trois absorbe le repli exponentiel qui
+   * suit un échec passager, sans masquer une panne installée.
+   */
+  const maintenant = Date.now() / 1000;
+  const nomBoutique = (id: string) =>
+    data.shops.find((s) => s.id === id)?.name ?? id;
+
+  const stale = data.health.filter((h) => {
+    if (h.failureCount > 0) return true;
+    if (h.lastOkAt === null) return false;
+    const tolerance = Math.max(h.intervalSec * 3, 900);
+    return maintenant - h.lastOkAt > tolerance;
+  });
 
   async function sync(shopId: string, name: string) {
     await api.post(`/sync/${shopId}`);
@@ -106,7 +126,9 @@ export function Overview() {
               <span className="banner__t">Synchronisation en retard</span>
               {stale.map((h) => (
                 <span className="banner__b" key={h.shopId + h.resource}>
-                  {h.resource} —{" "}
+                  {/* Le nom de la boutique, pas seulement la ressource : avec
+                      trois boutiques, « listings » seul ne dit pas laquelle. */}
+                  {nomBoutique(h.shopId)} · {h.resource} —{" "}
                   {h.lastOkAt ? `dernier succès ${when(h.lastOkAt)}` : "jamais synchronisé"}
                   {h.lastError ? ` · ${h.lastError}` : ""}
                 </span>

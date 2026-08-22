@@ -13,6 +13,50 @@ interface Account {
   externalId: string;
   status: string;
   connectedAt: number;
+  jeton?: {
+    /** Secondes avant expiration du jeton d'accès. Court par nature. */
+    accesExpireDansSec: number | null;
+    /**
+     * Jours avant qu'une réautorisation au navigateur devienne obligatoire.
+     * `null` quand la plateforme n'a pas de jeton de rafraîchissement —
+     * Shopify régénère le sien tout seul, il n'y a rien à surveiller.
+     */
+    reautoriserDansJours: number | null;
+  };
+}
+
+/**
+ * L'échéance d'un jeton, dite en clair.
+ *
+ * C'est la panne la plus traître de l'outil : un jeton Etsy vit 90 jours, et
+ * passé ce délai la boutique cesse de synchroniser sans que rien n'ait l'air
+ * cassé. L'afficher en permanence vaut mieux qu'une alerte qui arrive trop
+ * tard — et le seuil de quinze jours laisse le temps d'agir sans presser.
+ */
+function Echeance({ jeton }: { jeton: Account["jeton"] }) {
+  if (!jeton) return null;
+
+  const j = jeton.reautoriserDansJours;
+  if (j === null) {
+    return (
+      <span className="muted">
+        · jeton renouvelé automatiquement, sans échéance
+      </span>
+    );
+  }
+
+  const urgent = j <= 15;
+  return (
+    <span
+      className="muted"
+      style={urgent ? { color: "var(--warn)", fontWeight: 500 } : undefined}
+    >
+      ·{" "}
+      {j <= 0
+        ? "jeton expiré — reconnexion nécessaire"
+        : `à réautoriser dans ${j} jour${j > 1 ? "s" : ""}`}
+    </span>
+  );
 }
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -31,6 +75,8 @@ const A_VENIR = [
 ] as const;
 
 export function Shops() {
+  /** Boutique dont le nom est en cours d'édition, le cas échéant. */
+  const [edite, setEdite] = useState<string | null>(null);
   const qc = useQueryClient();
   const [importing, setImporting] = useState<string | null>(null);
   const { data, isLoading } = useQuery({
@@ -97,6 +143,26 @@ export function Shops() {
       await qc.invalidateQueries({ queryKey: ["accounts"] });
     } catch (e) {
       toast(e instanceof Error ? e.message : "Suppression impossible");
+    }
+  }
+
+  /**
+   * Renomme une boutique.
+   *
+   * Le nom n'a aucun rôle technique — le rapprochement se fait sur
+   * l'identifiant distant. Il n'y a donc rien à confirmer : on modifie, et si
+   * le serveur refuse, le nom revient de lui-même au rechargement.
+   */
+  async function renommer(a: Account, nom: string) {
+    const propre = nom.trim();
+    if (!propre || propre === a.displayName) return;
+    try {
+      await api.patch(`/engine/accounts/${a.id}`, { displayName: propre });
+      await qc.invalidateQueries({ queryKey: ["accounts"] });
+      await qc.invalidateQueries({ queryKey: ["catalogue"] });
+      toast("Nom modifié");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Renommage impossible");
     }
   }
 
@@ -192,9 +258,37 @@ export function Shops() {
                   {a.displayName.slice(0, 2).toUpperCase()}
                 </span>
                 <div className="row__main">
-                  <div className="row__t">{a.displayName}</div>
+                  <div className="row__t">
+                    {edite === a.id ? (
+                      <input
+                        className="input"
+                        style={{ maxWidth: 260, padding: "4px 8px" }}
+                        defaultValue={a.displayName}
+                        autoFocus
+                        maxLength={60}
+                        onBlur={(e) => {
+                          void renommer(a, e.target.value);
+                          setEdite(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.currentTarget.blur();
+                          if (e.key === "Escape") setEdite(null);
+                        }}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="renommer"
+                        title="Renommer"
+                        onClick={() => setEdite(a.id)}
+                      >
+                        {a.displayName}
+                        <Icon name="pencil" />
+                      </button>
+                    )}
+                  </div>
                   <div className="row__s">
-                    {a.marketplace} · {a.externalId}
+                    {a.marketplace} · {a.externalId} <Echeance jeton={a.jeton} />
                   </div>
                 </div>
                 <div className="row__end">

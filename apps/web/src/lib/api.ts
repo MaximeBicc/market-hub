@@ -30,6 +30,11 @@ export const api = {
   // La clé `body` est omise plutôt que mise à undefined : sous
   // `exactOptionalPropertyTypes`, RequestInit refuse un body explicitement
   // undefined, et un POST sans corps doit vraiment ne pas en avoir.
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: "PATCH",
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, {
       method: "POST",
@@ -52,6 +57,8 @@ export interface Overview {
     lastOkAt: number | null;
     failureCount: number;
     lastError: string | null;
+    /** Rythme prévu de cette tâche. Un retard ne se juge que contre lui. */
+    intervalSec: number;
   }>;
   needsAttention: Array<{ id: string; name: string; status: string }>;
 }

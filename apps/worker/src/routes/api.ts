@@ -85,6 +85,16 @@ api.get("/overview", async (c) => {
         lastOkAt: syncJob.lastOkAt,
         failureCount: syncJob.failureCount,
         lastError: syncJob.lastError,
+        /*
+         * L'INTERVALLE FAIT PARTIE DE LA SANTÉ.
+         *
+         * Sans lui, l'interface ne peut juger un retard que sur un seuil fixe,
+         * le même pour toutes les ressources. Or « listings » ne tourne qu'une
+         * fois par jour : mesuré à deux heures, il se déclarait en retard
+         * vingt-deux heures sur vingt-quatre. Une alerte permanente n'alerte
+         * plus de rien — elle apprend à ignorer le bandeau.
+         */
+        intervalSec: syncJob.intervalSec,
       })
       .from(syncJob)
       .where(eq(syncJob.enabled, 1)),

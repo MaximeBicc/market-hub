@@ -110,6 +110,9 @@ function normalizeShopDomain(raw: string): string | null {
 /** Liste des comptes. Aucun secret n'apparaît ici, par construction. */
 accounts.get("/", async (c) => {
   const db = drizzle(c.env.DB);
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const maintenant = Math.floor(Date.now() / 1000);
+
   const rows = await db
     .select({
       id: shop.id,
@@ -121,7 +124,86 @@ accounts.get("/", async (c) => {
       connectedAt: shop.connectedAt,
     })
     .from(shop);
-  return c.json({ accounts: rows });
+
+  /*
+   * L'ÉCHÉANCE DU JETON, lue dans les identifiants plutôt que dans les
+   * colonnes indexées.
+   *
+   * Les colonnes existent et sont désormais renseignées, mais elles ne le
+   * deviennent qu'à la première réécriture : une boutique reliée avant cette
+   * correction y a encore `null`. Déchiffrer trois lignes coûte trois
+   * déchiffrements AES — négligeable — et donne la bonne valeur tout de
+   * suite, sans dépendre d'un rattrapage.
+   *
+   * Ce qui sort d'ici est une DURÉE, jamais un jeton.
+   */
+  const comptes = [];
+  for (const r of rows) {
+    const c2 = (await repos.credentials.get(r.id)) ?? {};
+
+    const nombre = (v: string | undefined): number | null => {
+      const n = Number(v);
+      return v && Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const obtenu = nombre(c2["refreshTokenObtainedAt"]);
+    // eBay donne la date de fin ; Etsy donne la date d'obtention et une
+    // fenêtre de 90 jours qui repart à chaque rotation. Shopify n'a pas de
+    // jeton de rafraîchissement du tout : le sien se régénère seul.
+    const finRafraichissement =
+      nombre(c2["refreshTokenExpiresAt"]) ??
+      (obtenu === null ? null : obtenu + 90 * 86400);
+
+    comptes.push({
+      ...r,
+      jeton: {
+        accesExpireDansSec: (() => {
+          const f = nombre(c2["accessTokenExpiresAt"]);
+          return f === null ? null : f - maintenant;
+        })(),
+        reautoriserDansJours:
+          finRafraichissement === null
+            ? null
+            : Math.floor((finRafraichissement - maintenant) / 86400),
+      },
+    });
+  }
+
+  return c.json({ accounts: comptes });
+});
+
+/**
+ * Renomme une boutique.
+ *
+ * Le nom affiché n'a AUCUN rôle technique : le rapprochement se fait sur
+ * `externalId`, les journaux sur `slug`, et rien n'indexe le libellé. Il n'y
+ * a donc rien à casser — mais tout à gagner quand on tient deux comptes eBay
+ * et que la liste affiche « eBay » deux fois.
+ *
+ * Ni le `slug` ni l'`externalId` ne bougent : les renommer romprait le lien
+ * avec les annonces déjà importées.
+ */
+accounts.patch("/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{ displayName?: string }>()
+    .catch(() => ({}) as Record<string, string>);
+
+  const nom = (body.displayName ?? "").trim();
+  if (!nom) return c.json({ error: "Le nom ne peut pas être vide" }, 400);
+  if (nom.length > 60) {
+    return c.json({ error: "60 caractères au maximum" }, 400);
+  }
+
+  const db = drizzle(c.env.DB);
+  const existe = await db
+    .select({ id: shop.id })
+    .from(shop)
+    .where(eq(shop.id, id))
+    .limit(1);
+  if (!existe[0]) return c.json({ error: "Boutique inconnue" }, 404);
+
+  await db.update(shop).set({ displayName: nom }).where(eq(shop.id, id));
+  return c.json({ ok: true, displayName: nom });
 });
 
 /**

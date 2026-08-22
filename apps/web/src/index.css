@@ -2074,3 +2074,28 @@ h2.sec:first-child {
 }
 
 
+
+/* Renommer une boutique : le nom EST le bouton.
+   Un bouton « Renommer » de plus aurait fait six actions sur une ligne déjà
+   dense ; le crayon n'apparaît qu'au survol et ne coûte aucune place. */
+.renommer {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.renommer svg {
+  width: 14px;
+  height: 14px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.renommer:hover svg,
+.renommer:focus-visible svg {
+  opacity: 0.65;
+}

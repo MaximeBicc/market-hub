@@ -31,6 +31,7 @@ const PATHS = {
   chevronLeft: <><path d="m15 18-6-6 6-6" /></>,
   alert: <><circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" /></>,
   upload: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m17 8-5-5-5 5" /><path d="M12 3v12" /></>,
+  pencil: <><path d="M4 20h4L19 9a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5 4 20Z" /><path d="M14.5 6.5 17.5 9.5" /></>,
   close: <><path d="M18 6 6 18M6 6l12 12" /></>,
 } as const;
 
