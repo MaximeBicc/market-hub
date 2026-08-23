@@ -5,7 +5,7 @@ import {
   shopifyEnsureWebhooks,
 } from "./shopify.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
-import type { Listing } from "../domain/types.js";
+import type { Listing, Product } from "../domain/types.js";
 
 /**
  * Tests de l'adaptateur Shopify, sur un `fetch` simulé.
@@ -897,6 +897,119 @@ describe("abonnement aux webhooks", () => {
       shopifyEnsureWebhooks(adapter, ctxAbo(http), "http://exemple.fr/hook"),
     ).rejects.toThrow(/HTTPS/);
     // Rien n'a été tenté : la vérification est en amont de tout appel.
+    expect(sent).toHaveLength(0);
+  });
+});
+
+describe("création avec déclinaisons", () => {
+  const MULTI: Product = {
+    id: "p1",
+    sku: "SUPPORT",
+    title: "Support téléphone",
+    price: { amount: 990, currency: "EUR" },
+    stock: 0,
+    images: ["https://exemple.fr/a.jpg"],
+    options: [{ name: "Couleur", values: ["Violet", "Noir"] }],
+    variants: [
+      {
+        id: "v1",
+        productId: "p1",
+        sku: "SUP-VIO",
+        optionValues: ["Violet"],
+        optionKey: "couleur=violet",
+        price: { amount: 990, currency: "EUR" },
+        position: 0,
+        status: "active",
+        marketplaceData: { stock: 6 },
+      },
+      {
+        id: "v2",
+        productId: "p1",
+        sku: "SUP-NOI",
+        optionValues: ["Noir"],
+        optionKey: "couleur=noir",
+        price: { amount: 1090, currency: "EUR" },
+        position: 1,
+        status: "active",
+        marketplaceData: { stock: 4 },
+      },
+    ],
+  };
+
+  it("crée UNE annonce avec ses options et ses deux coloris", async () => {
+    const { http, sent } = fakeHttp([
+      {
+        data: {
+          productCreate: {
+            product: { id: "gid://shopify/Product/1", variants: { nodes: [] } },
+            userErrors: [],
+          },
+        },
+      },
+      // Pas de lecture d'emplacement : le contexte de test en a déjà un en
+      // cache dans ses identifiants.
+      {
+        data: {
+          productVariantsBulkCreate: {
+            productVariants: [
+              {
+                id: "gid://v/1",
+                selectedOptions: [{ name: "Couleur", value: "Violet" }],
+                inventoryItem: { id: "gid://ii/1" },
+              },
+              {
+                id: "gid://v/2",
+                selectedOptions: [{ name: "Couleur", value: "Noir" }],
+                inventoryItem: { id: "gid://ii/2" },
+              },
+            ],
+            userErrors: [],
+          },
+        },
+      },
+    ]);
+
+    const r = await adapter.createListing(ctxWith(http), MULTI, "k");
+
+    // Un seul produit chez Shopify, pas deux annonces concurrentes.
+    const creations = sent.filter((x) => String(x.body.query).includes("productCreate"));
+    expect(creations).toHaveLength(1);
+
+    const opts = creations[0]?.body.variables.input.productOptions;
+    expect(opts?.[0]?.name).toBe("Couleur");
+    expect(opts?.[0]?.values).toHaveLength(2);
+    expect(r.status).toBe("success");
+
+    // Le stock de CHAQUE coloris part, et il est distinct. C'est le défaut
+    // qu'une revue a trouvé : la valeur était lue sur la variante et écrite
+    // nulle part, donc les dix-sept coloris arrivaient à zéro, invendables.
+    const lot = sent.find((x) =>
+      String(x.body.query).includes("productVariantsBulkCreate"),
+    );
+    const quantites = (lot?.body.variables.variants ?? []).map(
+      (v: { inventoryQuantities?: Array<{ availableQuantity: number }> }) =>
+        v.inventoryQuantities?.[0]?.availableQuantity,
+    );
+    expect(quantites).toEqual([6, 4]);
+  });
+
+  it("refuse une mise à jour de stock qui écraserait les autres coloris", async () => {
+    // La valeur mémorisée est celle de la PREMIÈRE variante : l'écrire
+    // laisserait les autres à zéro, sans erreur, pour toujours.
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      {
+        ...listing,
+        marketplaceData: {
+          productId: "gid://shopify/Product/1",
+          variants: [{ id: "gid://v/1" }, { id: "gid://v/2" }],
+        },
+      },
+      5,
+    );
+    expect(r.status).toBe("unsupported");
+    expect(r.message).toMatch(/déclinaisons/);
     expect(sent).toHaveLength(0);
   });
 });

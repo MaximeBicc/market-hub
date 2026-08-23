@@ -4,6 +4,7 @@ import type {
   FulfillmentInput,
   Listing,
   Money,
+  Product,
   ProductId,
   TargetResult,
   VariantId,
@@ -13,7 +14,9 @@ import type {
   AccountRepository,
   CredentialRepository,
   ListingRepository,
+  InventoryRepository,
   ProductRepository,
+  VariantRepository,
 } from "../ports/repositories.js";
 import { MarketplaceRegistry } from "../core/registry.js";
 
@@ -73,6 +76,8 @@ export class MarketplaceOrchestrator {
     private readonly accounts: AccountRepository,
     private readonly credentials: CredentialRepository,
     private readonly products: ProductRepository,
+    private readonly variants: VariantRepository,
+    private readonly inventory: InventoryRepository,
     private readonly listings: ListingRepository,
     /** Fabrique le fetch instrumenté propre à un compte, si l'hôte en fournit un. */
     private readonly httpFor?: (
@@ -192,6 +197,51 @@ export class MarketplaceOrchestrator {
     if (!product) throw new Error(`Produit inconnu : ${input.productId}`);
 
     /*
+     * CHARGER LES VARIANTES AVANT DE DIFFUSER.
+     *
+     * C'est ici que « un produit, dix-sept coloris » devient réel pour les
+     * adaptateurs. Sans cette lecture, chacun ne verrait qu'un produit nu et
+     * créerait dix-sept annonces séparées — ce qui viderait le plafond
+     * vendeur eBay avec un seul objet, et présenterait à l'acheteur dix-sept
+     * annonces quasi identiques.
+     *
+     * Les variantes archivées sont écartées : la plateforme ne les renvoie
+     * plus, les republier ressusciterait un coloris retiré.
+     */
+    const actives = (await this.variants.listByProduct(input.productId)).filter(
+      (v) => v.status === "active",
+    );
+
+    /*
+     * LE STOCK DE CHAQUE VARIANTE, joint ici et nulle part ailleurs.
+     *
+     * Les trois adaptateurs lisent `variant.marketplaceData.stock` pour savoir
+     * combien annoncer par coloris. Personne ne l'écrivait : la valeur vivait
+     * dans la table d'inventaire, que l'orchestrateur ne consultait pas.
+     *
+     * Les conséquences n'étaient pas symétriques, ce qui les rendait
+     * difficiles à voir : Shopify n'envoyait aucune quantité — dix-sept
+     * coloris créés à zéro, invendables ; eBay posait zéro ; Etsy se rabattait
+     * sur le stock du PARENT et l'annonçait sur chaque déclinaison, soit
+     * deux cent quatre pièces en vente pour douze en stock.
+     *
+     * Un seul point de jonction, donc un seul endroit où cela peut être faux.
+     */
+    const variantes = await Promise.all(
+      actives.map(async (v) => {
+        const stock = (await this.inventory.get(v.id))?.onHand;
+        return stock === undefined
+          ? v
+          : { ...v, marketplaceData: { ...(v.marketplaceData ?? {}), stock } };
+      }),
+    );
+
+    const aDiffuser: Product = {
+      ...product,
+      ...(variantes.length > 0 ? { variants: variantes } : {}),
+    };
+
+    /*
      * IDEMPOTENCE — la vraie, pas celle qui transite sans servir.
      *
      * La clé d'idempotence est déclinée par compte et passée aux adaptateurs
@@ -227,7 +277,7 @@ export class MarketplaceOrchestrator {
 
       const result = await adapter.createListing(
         ctx,
-        product,
+        aDiffuser,
         // La clé d'idempotence est déclinée par compte : rejouer la commande
         // ne doit pas créer un doublon chez la plateforme.
         `${input.idempotencyKey}:${ctx.account.id}`,

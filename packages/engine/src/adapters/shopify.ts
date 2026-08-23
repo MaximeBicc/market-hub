@@ -4,9 +4,11 @@ import type {
   FulfillmentInput,
   Listing,
   Money,
+  OptionAxis,
   Product,
   RemoteListing,
   TargetResult,
+  Variant,
 } from "../domain/types.js";
 import type {
   MarketplaceAdapter,
@@ -46,6 +48,69 @@ const API_VERSION = "2026-01";
 
 /** Marge de sécurité : on renouvelle avant l'expiration réelle. */
 const TOKEN_SKEW_SEC = 300;
+
+/*
+ * LIMITES DE SHOPIFY SUR LES DÉCLINAISONS — ce sont les siennes, pas les
+ * nôtres. Les dépasser ne se rattrape pas côté client : la mutation est
+ * refusée en bloc, et le produit reste sans aucune variante.
+ */
+/** Trois axes maximum (« Couleur », « Taille », « Matière »). */
+const MAX_AXES = 3;
+/** 2048 variantes maximum par produit. */
+const MAX_VARIANTES = 2048;
+/**
+ * Taille d'un lot de création.
+ *
+ * Le budget est de 40 sous-requêtes par invocation et chaque appel en
+ * consomme 2 : un produit à 2048 variantes tient en 9 lots (18 sous-requêtes),
+ * ce qui laisse la place à la création du produit et à la lecture de
+ * l'emplacement de stock. Des lots plus petits seraient plus sûrs vis-à-vis du
+ * coût GraphQL, mais épuiseraient le budget avant la fin.
+ */
+const LOT_VARIANTES = 250;
+
+/** Séparateur de clé interne — le caractère de contrôle « unit separator ». */
+const SEP_OPTIONS = String.fromCharCode(31);
+
+/** Prix Shopify : une chaîne décimale. Nos montants sont en centimes. */
+function prixShopify(m: Money): string {
+  return (m.amount / 100).toFixed(2);
+}
+
+/**
+ * Le stock d'UNE variante — s'il est connu.
+ *
+ * `Variant` ne porte pas de quantité : le stock central est compté par
+ * variante dans `InventoryItem`, et le contrat `createListing` ne reçoit que
+ * le produit. L'appelant qui charge les variantes peut joindre la quantité
+ * dans `marketplaceData` ; quand il ne le fait pas, on n'invente RIEN.
+ *
+ * Répartir `product.stock` entre les variantes serait le pire des choix : un
+ * parent à dix-sept coloris verrait chaque coloris hériter du total, soit
+ * dix-sept fois le stock réel mis en vente.
+ */
+function stockDeVariante(v: Variant): number | undefined {
+  const brut = v.marketplaceData?.["stock"] ?? v.marketplaceData?.["onHand"];
+  if (typeof brut !== "number" || !Number.isFinite(brut) || brut < 0) {
+    return undefined;
+  }
+  return Math.trunc(brut);
+}
+
+/**
+ * Clé de comparaison d'une combinaison d'options.
+ *
+ * Shopify renormalise ce qu'on lui envoie — espaces rognés, casse parfois
+ * retouchée. Comparer les chaînes brutes ferait échouer le rapprochement entre
+ * ce qu'on a demandé et ce qui a été créé, et on perdrait le lien entre nos
+ * variantes locales et leurs identifiants distants.
+ */
+function cleOptions(valeurs: readonly string[]): string {
+  // Séparateur non imprimable : sans lui, « rouge » + « xl » et « rougex » +
+  // « l » donneraient la même clé, et deux variantes distinctes se
+  // confondraient au moment du rapprochement.
+  return valeurs.map((v) => v.trim().toLowerCase()).join(SEP_OPTIONS);
+}
 
 function shopDomainOf(ctx: MarketplaceContext): string {
   const d =
@@ -299,6 +364,55 @@ export class ShopifyAdapter implements MarketplaceAdapter {
 
   /* ---------------------------------------------------------------- */
 
+  /**
+   * LES PHOTOS PARTENT PAR LEUR ADRESSE.
+   *
+   * Shopify TÉLÉCHARGE l'image et en héberge sa propre copie — l'URL source
+   * peut disparaître ensuite. C'est ce qui évite d'avoir à stocker quoi que
+   * ce soit de notre côté quand la photo vient déjà d'ailleurs.
+   *
+   * Deux pièges documentés : le téléchargement est ASYNCHRONE, donc un
+   * `userErrors` vide ne prouve pas que la photo est passée ; et le
+   * récupérateur de Shopify est anonyme, donc une URL protégée contre les
+   * liens directs échouera silencieusement.
+   *
+   * Les visuels PROPRES AUX VARIANTES sont joints à la même liste. Ils ne
+   * sont pas rattachés à leur variante — le champ qui le permettrait n'a pas
+   * été vérifié sur cette version d'API, et une supposition ferait rejeter
+   * tout le lot. Sans ce versement, la photo du coloris violet n'existerait
+   * nulle part chez Shopify et il faudrait la retéléverser à la main.
+   */
+  private mediaDe(
+    product: Product,
+    variantes: readonly Variant[],
+  ): Array<{ originalSource: string; mediaContentType: string; alt: string }> {
+    const vues = new Set<string>();
+    const urls: string[] = [];
+    for (const url of [
+      ...(product.images ?? []),
+      ...variantes.map((v) => v.imageUrl ?? ""),
+    ]) {
+      if (!url || vues.has(url)) continue;
+      vues.add(url);
+      urls.push(url);
+    }
+    return urls.slice(0, 250).map((url) => ({
+      originalSource: url,
+      mediaContentType: "IMAGE",
+      alt: product.title.slice(0, 512),
+    }));
+  }
+
+  /** Refus explicite : la plateforme ne peut pas, quelqu'un doit trancher. */
+  private manuel(ctx: MarketplaceContext, message: string): TargetResult {
+    return {
+      accountId: ctx.account.id,
+      marketplace: ctx.account.marketplace,
+      status: "manual_required",
+      message,
+    };
+  }
+
   async createListing(
     ctx: MarketplaceContext,
     product: Product,
@@ -307,25 +421,38 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     // contre les doublons se fait en amont, dans le journal de commandes.
     _idempotencyKey: string,
   ): Promise<TargetResult> {
+    /*
+     * UN PRODUIT, TOUTES SES DÉCLINAISONS, EN UNE FOIS.
+     *
+     * Créer dix-sept coloris comme dix-sept produits séparés serait une faute
+     * de modèle : chez Shopify, ce sont dix-sept VARIANTES d'un même produit,
+     * et c'est la variante que portent les lignes de commande. Publier à plat
+     * casserait le rapprochement des ventes et afficherait dix-sept fiches
+     * concurrentes dans la boutique.
+     *
+     * `archived` est exclu : la variante n'existe plus chez la plateforme
+     * d'origine, la recréer ici ressusciterait un coloris retiré. L'ordre
+     * d'affichage est celui de `position` — il détermine quelle variante
+     * devient l'identifiant de rattachement.
+     */
+    const axes = (product.options ?? []).filter(
+      (a) => a.name.trim() !== "" && a.values.length > 0,
+    );
+    const variantes = (product.variants ?? [])
+      .filter((v) => v.status !== "archived")
+      .sort((a, b) => a.position - b.position);
+
+    // Sans axe ou sans variante, il n'y a rien à décliner : on reste sur le
+    // chemin historique, qui crée un produit à variante unique. Ce cas couvre
+    // tout le catalogue importé avant l'arrivée des déclinaisons, et il ne
+    // doit surtout pas changer de comportement.
+    if (axes.length > 0 && variantes.length > 0) {
+      return this.creerAvecVariantes(ctx, product, axes, variantes);
+    }
+
     // Depuis l'API 2024-04, `productCreate` n'accepte plus les variantes :
     // il faut créer le produit, puis mettre à jour sa variante par défaut.
-    /*
-     * LES PHOTOS PARTENT PAR LEUR ADRESSE.
-     *
-     * Shopify TÉLÉCHARGE l'image et en héberge sa propre copie — l'URL source
-     * peut disparaître ensuite. C'est ce qui évite d'avoir à stocker quoi que
-     * ce soit de notre côté quand la photo vient déjà d'ailleurs.
-     *
-     * Deux pièges documentés : le téléchargement est ASYNCHRONE, donc un
-     * `userErrors` vide ne prouve pas que la photo est passée ; et le
-     * récupérateur de Shopify est anonyme, donc une URL protégée contre les
-     * liens directs échouera silencieusement.
-     */
-    const media = (product.images ?? []).slice(0, 250).map((url) => ({
-      originalSource: url,
-      mediaContentType: "IMAGE",
-      alt: product.title.slice(0, 512),
-    }));
+    const media = this.mediaDe(product, []);
 
     const created = await this.gql<{
       productCreate: {
@@ -403,7 +530,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
         variants: [
           {
             id: variantId,
-            price: (product.price.amount / 100).toFixed(2),
+            price: prixShopify(product.price),
             inventoryItem: { sku: product.sku, tracked: true },
           },
         ],
@@ -479,6 +606,345 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     };
   }
 
+  /**
+   * Crée le produit ET toutes ses déclinaisons, en deux temps.
+   *
+   * Shopify propose bien `productSet`, qui fait tout en un seul appel — mais
+   * il REMPLACE les listes qu'on lui donne : options, variantes, médias. Le
+   * jour où il servirait à mettre à jour un produit existant, tout ce qui
+   * n'aurait pas été renvoyé serait supprimé chez Shopify. Pour une CRÉATION,
+   * `productCreate` puis `productVariantsBulkCreate` coûte un appel de plus et
+   * ne peut rien détruire : c'est le bon compromis ici.
+   *
+   * Deux pièges de forme, qui ne se voient qu'à l'exécution :
+   *   — dans `productOptions`, la clé des valeurs est `values`, pas
+   *     `optionValues` (ce dernier nom n'existe qu'à la création des VARIANTES);
+   *   — le SKU d'une variante vit dans `inventoryItem.sku`, jamais au niveau
+   *     de la variante elle-même.
+   */
+  private async creerAvecVariantes(
+    ctx: MarketplaceContext,
+    product: Product,
+    axes: OptionAxis[],
+    variantes: Variant[],
+  ): Promise<TargetResult> {
+    /*
+     * TOUT CE QUI PEUT ÊTRE REFUSÉ EST VÉRIFIÉ AVANT LA MOINDRE ÉCRITURE.
+     *
+     * `productVariantsBulkCreate` rejette le LOT ENTIER sur une seule entrée
+     * invalide. Découvrir le problème après `productCreate` laisserait un
+     * produit sans aucune variante chez Shopify — invendable, et à nettoyer à
+     * la main. Ces refus sont donc rendus en `manual_required` : la plateforme
+     * ne peut pas décider à la place du vendeur, et rien n'a été créé.
+     */
+    if (axes.length > MAX_AXES) {
+      return this.manuel(
+        ctx,
+        `Shopify n'accepte que ${MAX_AXES} axes de déclinaison ; ce produit en a ${axes.length} (${axes
+          .map((a) => a.name)
+          .join(", ")}). Rien n'a été créé.`,
+      );
+    }
+    if (variantes.length > MAX_VARIANTES) {
+      return this.manuel(
+        ctx,
+        `Shopify n'accepte que ${MAX_VARIANTES} variantes par produit ; ce produit en a ${variantes.length}. Rien n'a été créé.`,
+      );
+    }
+
+    const incomplete = variantes.find(
+      (v) =>
+        v.optionValues.length !== axes.length ||
+        v.optionValues.some((x) => x.trim() === ""),
+    );
+    if (incomplete) {
+      return this.manuel(
+        ctx,
+        `La variante « ${incomplete.optionKey || incomplete.id} » ne porte pas une valeur par axe (${axes.length} attendue(s), ${incomplete.optionValues.length} fournie(s)). Shopify refuserait le produit entier. Rien n'a été créé.`,
+      );
+    }
+
+    // Deux variantes sur la même combinaison : Shopify refuse le lot. Le
+    // signaler ici nomme le doublon ; le laisser passer rendrait un message
+    // d'API générique sur un produit déjà à moitié créé.
+    const parCombinaison = new Map<string, Variant>();
+    for (const v of variantes) {
+      const cle = cleOptions(v.optionValues);
+      if (parCombinaison.has(cle)) {
+        return this.manuel(
+          ctx,
+          `Deux variantes portent la même combinaison « ${v.optionValues.join(" / ")} ». Shopify n'en accepte qu'une. Rien n'a été créé.`,
+        );
+      }
+      parCombinaison.set(cle, v);
+    }
+
+    /*
+     * Les valeurs déclarées sur l'axe, PLUS celles réellement portées par les
+     * variantes.
+     *
+     * Une valeur utilisée par une variante mais absente de son axe fait
+     * échouer la création de cette variante — et donc du lot. L'union évite ce
+     * refus sans jamais inventer de valeur : tout ce qui est envoyé vient du
+     * produit. L'ordre déclaré sur l'axe est conservé, il fixe l'affichage.
+     */
+    const valeursParAxe = axes.map((axe, i) => {
+      const vues = new Set<string>();
+      const ordre: string[] = [];
+      for (const brut of [
+        ...axe.values,
+        ...variantes.map((v) => v.optionValues[i] ?? ""),
+      ]) {
+        const val = brut.trim();
+        if (val === "") continue;
+        const cle = val.toLowerCase();
+        if (vues.has(cle)) continue;
+        vues.add(cle);
+        ordre.push(val);
+      }
+      return ordre;
+    });
+
+    const created = await this.gql<{
+      productCreate: {
+        product: { id: string } | null;
+        userErrors: UserError[];
+      };
+    }>(
+      ctx,
+      `mutation CreateDecline($input: ProductInput!, $media: [CreateMediaInput!]) {
+        productCreate(input: $input, media: $media) {
+          product { id }
+          userErrors { field message }
+        }
+      }`,
+      {
+        input: {
+          title: product.title,
+          descriptionHtml: product.description ?? "",
+          // Brouillon, toujours. Publier engage une vente que personne n'a
+          // relue — et sur les autres places, une mise en ligne facturée.
+          status: "DRAFT",
+          tags: product.tags ?? [],
+          productOptions: axes.map((axe, i) => ({
+            name: axe.name,
+            position: i + 1,
+            // `values`, et non `optionValues` : la faute la plus coûteuse ici,
+            // parce que Shopify refuse la requête sans dire quel nom il attend.
+            values: (valeursParAxe[i] ?? []).map((name) => ({ name })),
+          })),
+        },
+        media: this.mediaDe(product, variantes),
+      },
+    );
+    this.assertNoUserErrors(
+      created.productCreate.userErrors,
+      "création du produit à déclinaisons",
+    );
+
+    const productId = created.productCreate.product?.id;
+    if (!productId) {
+      throw new Error(
+        "Shopify : produit créé sans identifiant renvoyé — rien à rattacher",
+      );
+    }
+
+    /*
+     * À PARTIR D'ICI, LE PRODUIT EXISTE CHEZ SHOPIFY.
+     *
+     * Tout échec ultérieur se rend en `pending_remote` AVEC l'identifiant :
+     * l'orchestrateur l'enregistre, l'objet cesse d'être orphelin, et un
+     * nouvel essai ne créera pas un second produit.
+     */
+    let locationId: string | undefined;
+    let noteStock = "";
+    try {
+      locationId = await this.primaryLocationId(ctx);
+    } catch (err) {
+      // Non bloquant : mieux vaut des variantes créées sans quantité que pas
+      // de variantes du tout. Le rapprochement de stock repassera.
+      noteStock = ` · stock non écrit (${err instanceof Error ? err.message : "emplacement illisible"})`;
+    }
+
+    const sansStock = variantes.filter(
+      (v) => stockDeVariante(v) === undefined,
+    ).length;
+    if (locationId && sansStock > 0) {
+      noteStock = ` · quantité inconnue pour ${sansStock} variante(s), laissée au prochain rapprochement`;
+    }
+
+    /** Une entrée de `ProductVariantsBulkInput`. */
+    const entree = (v: Variant) => {
+      const quantite = stockDeVariante(v);
+      return {
+        // À la création des variantes, la clé EST `optionValues`, et chaque
+        // valeur se rattache à son axe par `optionName`. C'est l'inverse du
+        // vocabulaire de `productOptions` — l'API n'est pas symétrique.
+        optionValues: v.optionValues.map((valeur, i) => ({
+          optionName: axes[i]?.name ?? "",
+          name: valeur.trim(),
+        })),
+        price: prixShopify(v.price),
+        // Le SKU appartient à l'article d'inventaire, pas à la variante.
+        inventoryItem: { tracked: true, ...(v.sku ? { sku: v.sku } : {}) },
+        // Le stock de CHAQUE variante, écrit dans le même appel : une
+        // quantité par variante, pas un total réparti au hasard. Le champ est
+        // `availableQuantity` et il n'y a pas de champ `name` ici — contraire
+        // à `productSet`, où c'est `{ name: "available", quantity }`.
+        ...(locationId && quantite !== undefined
+          ? {
+              inventoryQuantities: [
+                { locationId, availableQuantity: quantite },
+              ],
+            }
+          : {}),
+      };
+    };
+
+    type ReponseLot = {
+      productVariantsBulkCreate: {
+        productVariants: Array<{
+          id: string;
+          selectedOptions: Array<{ name: string; value: string }>;
+          inventoryItem: { id: string } | null;
+        }> | null;
+        userErrors: UserError[];
+      };
+    };
+
+    /** Ce que Shopify a réellement créé, indexé par combinaison d'options. */
+    const distantes = new Map<string, { id: string; inventoryItemId?: string }>();
+
+    const partiel = (raison: string): TargetResult => ({
+      accountId: ctx.account.id,
+      marketplace: ctx.account.marketplace,
+      status: "pending_remote",
+      remoteId: productId,
+      marketplaceData: {
+        productId,
+        variants: [...distantes.entries()].map(([, d]) => ({ id: d.id })),
+      },
+      message: `Produit créé chez Shopify avec ${distantes.size}/${variantes.length} variantes, puis ${raison}. À finir depuis l'admin — ne relancez pas, il serait créé en double.`,
+    });
+
+    for (let i = 0; i < variantes.length; i += LOT_VARIANTES) {
+      const lot = variantes.slice(i, i + LOT_VARIANTES);
+      let res: ReponseLot;
+      try {
+        res = await this.gql<ReponseLot>(
+          ctx,
+          `mutation Variantes(
+             $productId: ID!,
+             $variants: [ProductVariantsBulkInput!]!,
+             $strategy: ProductVariantsBulkCreateStrategy
+           ) {
+            productVariantsBulkCreate(
+              productId: $productId, variants: $variants, strategy: $strategy
+            ) {
+              productVariants {
+                id
+                selectedOptions { name value }
+                inventoryItem { id }
+              }
+              userErrors { field message }
+            }
+          }`,
+          {
+            productId,
+            variants: lot.map(entree),
+            // Au PREMIER lot seulement. `productCreate` a fabriqué une
+            // variante par défaut « Default Title » ; sans cette stratégie
+            // elle traîne à côté des vraies déclinaisons, achetable et sans
+            // SKU. Aux lots suivants elle n'existe plus, et redemander sa
+            // suppression ferait échouer l'appel.
+            strategy: i === 0 ? "REMOVE_STANDALONE_VARIANT" : "DEFAULT",
+          },
+        );
+        this.assertNoUserErrors(
+          res.productVariantsBulkCreate.userErrors,
+          "création des variantes",
+        );
+      } catch (err) {
+        return partiel(err instanceof Error ? err.message : "échec");
+      }
+
+      for (const pv of res.productVariantsBulkCreate.productVariants ?? []) {
+        // On retrouve NOTRE variante par sa combinaison d'options, pas par
+        // l'ordre du tableau : Shopify ne garantit pas de renvoyer les
+        // variantes dans l'ordre où on les a envoyées.
+        const cle = cleOptions((pv.selectedOptions ?? []).map((o) => o.value));
+        distantes.set(cle, {
+          id: pv.id,
+          ...(pv.inventoryItem ? { inventoryItemId: pv.inventoryItem.id } : {}),
+        });
+      }
+    }
+
+    /*
+     * CE QUE LE RAPPROCHEMENT LOCAL A BESOIN DE SAVOIR.
+     *
+     * `optionKey` est notre identité de repli quand le SKU manque — et il
+     * manque presque toujours chez Shopify. Rendre la liste { id, optionKey }
+     * permet de coller chaque variante locale à son identifiant distant sans
+     * relire le catalogue.
+     */
+    const rendu: Array<{
+      id: string;
+      optionKey: string;
+      sku?: string;
+      inventoryItemId?: string;
+    }> = [];
+    for (const v of variantes) {
+      const d = distantes.get(cleOptions(v.optionValues));
+      if (!d) continue;
+      rendu.push({
+        id: d.id,
+        optionKey: v.optionKey,
+        ...(v.sku ? { sku: v.sku } : {}),
+        ...(d.inventoryItemId ? { inventoryItemId: d.inventoryItemId } : {}),
+      });
+    }
+
+    if (rendu.length === 0) {
+      return partiel("aucune variante n'a pu être rattachée");
+    }
+
+    // L'identifiant retenu est celui de la PREMIÈRE variante : c'est un
+    // identifiant de variante que portent les lignes de commande, donc le seul
+    // qui permette de rattacher une vente. Le produit parent, lui, voyage dans
+    // `marketplaceData`.
+    const premiere = rendu[0]!;
+    const manquantes = variantes.length - rendu.length;
+
+    const marketplaceData = {
+      productId,
+      ...(premiere.inventoryItemId
+        ? { inventoryItemId: premiere.inventoryItemId }
+        : {}),
+      variants: rendu,
+    };
+
+    if (manquantes > 0) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "pending_remote",
+        remoteId: premiere.id,
+        marketplaceData,
+        message: `Créé en brouillon, mais ${manquantes} variante(s) sur ${variantes.length} n'ont pas été rattachées — à vérifier dans l'admin Shopify${noteStock}`,
+      };
+    }
+
+    return {
+      ...this.ok(
+        ctx,
+        premiere.id,
+        `Créé en brouillon avec ${rendu.length} variante(s) — à publier depuis l'admin Shopify après relecture${noteStock}`,
+      ),
+      marketplaceData,
+    };
+  }
+
   async updatePrice(
     ctx: MarketplaceContext,
     listing: Listing,
@@ -520,7 +986,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       }`,
       {
         productId,
-        variants: [{ id: variantId, price: (price.amount / 100).toFixed(2) }],
+        variants: [{ id: variantId, price: prixShopify(price) }],
       },
     );
     this.assertNoUserErrors(d.productVariantsBulkUpdate.userErrors, "prix");
@@ -533,6 +999,29 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     stock: number,
     _idempotencyKey?: string,
   ): Promise<TargetResult> {
+    /*
+     * L'IDENTIFIANT D'INVENTAIRE MÉMORISÉ EST CELUI DE LA PREMIÈRE VARIANTE.
+     *
+     * Pour une annonce créée avec des déclinaisons, écrire dessus mettrait le
+     * stock sur le premier coloris et laisserait les seize autres à zéro —
+     * sans erreur, sans message, pour toujours. La liste complète existe dans
+     * `marketplaceData.variants`, mais rien ne dit encore QUELLE déclinaison
+     * est visée.
+     *
+     * On refuse donc, en le disant. Une annonce sans déclinaison — le cas de
+     * tout ce qui tourne aujourd'hui — passe par le chemin normal.
+     */
+    const declinaisons = listing.marketplaceData?.["variants"];
+    if (Array.isArray(declinaisons) && declinaisons.length > 1) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "unsupported",
+        message:
+          "Annonce à déclinaisons : la mise à jour coloris par coloris n'est pas encore branchée. Modifiez depuis l'admin Shopify en attendant.",
+      };
+    }
+
     let inventoryItemId = listing.marketplaceData?.["inventoryItemId"] as
       | string
       | undefined;

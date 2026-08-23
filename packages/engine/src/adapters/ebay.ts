@@ -4,10 +4,12 @@ import type {
   FulfillmentInput,
   Listing,
   Money,
+  OptionAxis,
   Product,
   RemoteListing,
   RemoteSetting,
   TargetResult,
+  Variant,
 } from "../domain/types.js";
 import type {
   MarketplaceAdapter,
@@ -154,6 +156,28 @@ interface EbayError {
 }
 
 /**
+ * Erreur HTTP d'eBay, avec son CODE conservé.
+ *
+ * Sans elle, le code de statut se perdait : `call` fabriquait un message à
+ * partir du tableau `errors` d'eBay, et la sonde d'existence cherchait
+ * ensuite « 404 » dans ce TEXTE. Or un article inconnu répond
+ * « The specified SKU was not found », sans le moindre chiffre — la sonde
+ * concluait « je ne sais pas » et la création était refusée alors que le SKU
+ * était libre. Le garde-fou anti-écrasement bloquait donc les créations
+ * légitimes, et ne se déclenchait correctement que dans les tests, où le
+ * corps d'erreur est vide.
+ */
+class EbayHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "EbayHttpError";
+  }
+}
+
+/**
  * L'état de l'article, dans le vocabulaire d'eBay.
  *
  * eBay refuse ou déclasse une annonce dont l'état ne correspond pas à sa
@@ -168,6 +192,322 @@ const ETATS_EBAY: Record<string, string> = {
   used_acceptable: "USED_ACCEPTABLE",
   for_parts: "FOR_PARTS_OR_NOT_WORKING",
 };
+
+/* ------------------------------------------------------------------ */
+/* Un produit, plusieurs déclinaisons, UNE annonce                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * LE BUDGET DE SOUS-REQUÊTES EST LA VRAIE LIMITE, pas eBay.
+ *
+ * Une invocation dispose de 40 sous-requêtes et chaque appel en consomme 2 :
+ * vingt allers-retours, pas un de plus. Or une variante en coûte trois — la
+ * sonde d'existence, l'article d'inventaire, l'offre — auxquels s'ajoutent la
+ * sonde du groupe, son écriture, et une marge pour un renouvellement de jeton.
+ *
+ * D'où un plafond calculé, et non deviné. Il tombe à cinq variantes : très en
+ * dessous des vingt-cinq qu'eBay accepte dans un groupe. Le lever demande les
+ * points d'entrée groupés (`bulk_create_or_replace_inventory_item`,
+ * `bulk_create_offer`, 25 objets par appel), qui ramèneraient les dix-sept
+ * coloris à trois allers-retours — c'est la suite à écrire, pas un détail
+ * d'optimisation.
+ */
+const SOUS_REQUETES_PAR_INVOCATION = 40;
+const SOUS_REQUETES_PAR_APPEL = 2;
+/** Sonde d'existence + article d'inventaire + offre. */
+const APPELS_PAR_VARIANTE = 3;
+/** Sonde du groupe + écriture du groupe + marge de renouvellement de jeton. */
+const APPELS_RESERVES = 3;
+export const EBAY_MAX_VARIANTES = Math.floor(
+  (SOUS_REQUETES_PAR_INVOCATION / SOUS_REQUETES_PAR_APPEL - APPELS_RESERVES) /
+    APPELS_PAR_VARIANTE,
+);
+
+/** Limites d'eBay, relevées sur la Sell Inventory API. */
+const SKU_MAX = 50;
+const CLE_GROUPE_MAX = 50;
+const ASPECT_NOM_MAX = 40;
+const ASPECT_VALEUR_MAX = 65;
+const TITRE_MAX = 80;
+
+/** Une unité vendable, réduite à ce que la création d'annonce exige. */
+interface UniteEbay {
+  sku: string;
+  /** Vrai quand le SKU a été FABRIQUÉ faute d'en trouver un sur la variante. */
+  skuFabrique: boolean;
+  prix: Money;
+  quantite: number;
+  imageUrl?: string | undefined;
+  /** Un couple nom → valeur par axe. Repris verbatim dans le groupe. */
+  aspects: Record<string, string>;
+  /** « Violet / M » — pour parler de cette variante à un humain. */
+  etiquette: string;
+}
+
+/** Minuscules pliées, ponctuation retirée : de quoi fabriquer un code stable. */
+function pliure(texte: string): string {
+  return texte
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+}
+
+/**
+ * Empreinte courte et DÉTERMINISTE (FNV-1a 32 bits).
+ *
+ * Elle ne sert qu'à désambiguïser un code tronqué. Une valeur aléatoire ferait
+ * changer le SKU d'un passage à l'autre — donc recréer la variante à chaque
+ * diffusion, ce qui est exactement le défaut qu'on cherche à éviter.
+ */
+function empreinte(texte: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < texte.length; i++) {
+    h ^= texte.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36).toUpperCase().padStart(7, "0").slice(-7);
+}
+
+/**
+ * Le SKU d'une variante qui n'en a pas.
+ *
+ * Vingt-six variantes sur vingt-huit n'en portent pas chez Shopify, et eBay en
+ * EXIGE un par article d'inventaire. On le dérive donc du couple stable
+ * (SKU parent, clé d'options) : « SUPPORT-TEL-COULEUR-VIOLET ». Deux appels
+ * successifs produisent le même code, ce qui rend la variante retrouvable.
+ */
+function skuDerive(skuParent: string, optionKey: string): string {
+  const base = pliure(`${skuParent}-${optionKey}`);
+  if (base.length <= SKU_MAX) return base || empreinte(optionKey);
+  return `${base.slice(0, SKU_MAX - 8)}-${empreinte(optionKey)}`;
+}
+
+/** La clé du groupe vit dans l'URI : lettres, chiffres, tiret ou souligné. */
+function cleGroupe(skuParent: string): string {
+  if (/^[A-Za-z0-9_-]{1,50}$/.test(skuParent)) return skuParent;
+  const base = pliure(skuParent);
+  return base.length <= CLE_GROUPE_MAX
+    ? base || empreinte(skuParent)
+    : `${base.slice(0, CLE_GROUPE_MAX - 8)}-${empreinte(skuParent)}`;
+}
+
+/*
+ * LA RÈGLE D'OR D'eBAY : le nom d'un aspect qui varie doit apparaître
+ * VERBATIM — même casse, mêmes accents — dans `variesBy.specifications` du
+ * groupe ET dans les `aspects` de chaque article, et la valeur de l'article
+ * doit figurer telle quelle parmi les valeurs déclarées. Un « Couleur » d'un
+ * côté, « couleur » de l'autre, et eBay refuse le groupe sans dire lequel des
+ * deux il attendait.
+ *
+ * D'où ces deux fonctions : elles coupent aux longueurs maximales d'eBay, et
+ * elles sont les SEULES à le faire. Le groupe et les articles lisent la même
+ * chaîne déjà coupée, donc aucune troncature ne peut les désaccorder.
+ */
+function nomAspect(brut: string): string {
+  return brut.trim().slice(0, ASPECT_NOM_MAX);
+}
+
+function valeurAspect(brut: string): string {
+  return brut.trim().slice(0, ASPECT_VALEUR_MAX);
+}
+
+/**
+ * Les noms des axes, dans l'ordre des `optionValues`.
+ *
+ * `product.options` est la source à préférer — c'est le vocabulaire du
+ * vendeur. Mais il n'est pas toujours chargé, alors que `optionKey` porte les
+ * mêmes noms sous forme normalisée (« couleur=violet|taille=m »). Un repli
+ * moins joli vaut mieux qu'un refus : ce qu'eBay exige, c'est la constance,
+ * pas l'élégance.
+ *
+ * `null` = les axes ne sont pas cohérents, il ne faut rien écrire.
+ */
+function nomsAxes(
+  options: OptionAxis[] | undefined,
+  variantes: Variant[],
+): string[] | null {
+  const nb = variantes[0]?.optionValues.length ?? 0;
+  if (nb === 0) return null;
+  if (variantes.some((v) => v.optionValues.length !== nb)) return null;
+
+  const declares = (options ?? [])
+    .map((o) => nomAspect(o.name))
+    .filter((n) => n.length > 0);
+
+  const noms =
+    declares.length === nb
+      ? declares
+      : (variantes[0]?.optionKey ?? "")
+          .split("|")
+          .slice(0, nb)
+          .map((c, i) => nomAspect(c.split("=")[0] ?? "") || `Option ${i + 1}`);
+
+  if (noms.length !== nb) return null;
+  // Deux axes de même nom rendraient la combinaison ambiguë côté eBay.
+  if (new Set(noms).size !== noms.length) return null;
+  return noms;
+}
+
+/**
+ * Le stock d'une variante, quand on le connaît.
+ *
+ * `Variant` n'en porte pas : le stock central est compté par variante, mais il
+ * vit dans `InventoryItem` et l'appelant ne le joint pas encore. Plutôt que de
+ * recopier `product.stock` sur chaque coloris — ce qui multiplierait le stock
+ * par le nombre de déclinaisons et ferait vendre ce qui n'existe pas — on pose
+ * zéro et on le DIT. Un brouillon à zéro ne peut pas être mis en vente : la
+ * décision revient à un humain, ce qui est exactement le but.
+ */
+function quantiteVariante(v: Variant): number | null {
+  const brut = v.marketplaceData?.["stock"];
+  const n =
+    typeof brut === "number"
+      ? brut
+      : typeof brut === "string" && brut.trim() !== ""
+        ? Number(brut)
+        : NaN;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+/**
+ * Les aspects COMMUNS à toutes les déclinaisons — marque, matière…
+ *
+ * Ils vivent sur le groupe, jamais sur un article : posés sur un article, ils
+ * ne s'appliqueraient qu'à un coloris. Rien n'est inventé ici : on relaie ce
+ * que le produit porte sous `marketplaceData.ebayAspects`, et seulement s'il
+ * a la forme attendue.
+ */
+function aspectsCommuns(
+  product: Product,
+): Record<string, string[]> | undefined {
+  const brut = product.marketplaceData?.["ebayAspects"];
+  if (!brut || typeof brut !== "object" || Array.isArray(brut)) return undefined;
+
+  const sortie: Record<string, string[]> = {};
+  for (const [nom, valeur] of Object.entries(brut as Record<string, unknown>)) {
+    const cle = nomAspect(nom);
+    const valeurs = (Array.isArray(valeur) ? valeur : [valeur])
+      .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+      .map((v) => valeurAspect(String(v)))
+      .filter((v) => v.length > 0);
+    if (cle.length > 0 && valeurs.length > 0) sortie[cle] = valeurs;
+  }
+  return Object.keys(sortie).length > 0 ? sortie : undefined;
+}
+
+type Preparation =
+  | {
+      ok: true;
+      unites: UniteEbay[];
+      specifications: Array<{ name: string; values: string[] }>;
+      /** L'axe dont l'image change, quand toutes les variantes en ont une. */
+      axeImage?: string | undefined;
+      quantitesInconnues: boolean;
+      skusFabriques: number;
+    }
+  | { ok: false; message: string };
+
+/**
+ * Traduit les variantes en unités eBay, ou explique pourquoi c'est impossible.
+ *
+ * Tout est vérifié AVANT le premier appel réseau. Un groupe à moitié écrit ne
+ * se rattrape pas : `variantSKUs` est un remplacement complet, et l'appelant
+ * refuse de recréer une annonce déjà rattachée.
+ */
+function preparerUnites(product: Product, variantes: Variant[]): Preparation {
+  const noms = nomsAxes(product.options, variantes);
+  if (!noms) {
+    return {
+      ok: false,
+      message:
+        "Les déclinaisons de ce produit ne forment pas des axes cohérents : chaque variante doit porter une valeur par axe, et deux axes ne peuvent pas avoir le même nom. eBay refuse un groupe dont les aspects ne correspondent pas exactement.",
+    };
+  }
+
+  const unites: UniteEbay[] = [];
+  const parCombinaison = new Map<string, string>();
+  const parSku = new Map<string, string>();
+  const valeursParAxe = noms.map(() => new Set<string>());
+  let quantitesInconnues = false;
+  let skusFabriques = 0;
+
+  for (const v of variantes) {
+    const valeurs = v.optionValues.map(valeurAspect);
+    if (valeurs.some((x) => x.length === 0)) {
+      return {
+        ok: false,
+        message: `La variante « ${v.optionKey || v.id} » a une valeur d'option vide. eBay exige une valeur pour chaque aspect qui varie.`,
+      };
+    }
+
+    const etiquette = valeurs.join(" / ");
+    const combinaison = JSON.stringify(valeurs);
+    const deja = parCombinaison.get(combinaison);
+    if (deja) {
+      return {
+        ok: false,
+        message: `Deux variantes portent la même combinaison « ${etiquette} » (${deja} et ${v.id}). eBay exige qu'elle soit unique dans un groupe.`,
+      };
+    }
+    parCombinaison.set(combinaison, v.id);
+
+    const skuPropre = v.sku?.trim() ?? "";
+    const sku = skuPropre.length > 0 ? skuPropre.slice(0, SKU_MAX) : skuDerive(product.sku, v.optionKey);
+    if (skuPropre.length === 0) skusFabriques += 1;
+
+    const dejaSku = parSku.get(sku);
+    if (dejaSku) {
+      return {
+        ok: false,
+        message: `Deux variantes aboutissent au même SKU « ${sku} » (${dejaSku} et ${etiquette}). Donnez un SKU distinct à chacune : eBay compte un article d'inventaire par SKU.`,
+      };
+    }
+    parSku.set(sku, etiquette);
+
+    const aspects: Record<string, string> = {};
+    noms.forEach((nom, i) => {
+      const valeur = valeurs[i] ?? "";
+      aspects[nom] = valeur;
+      valeursParAxe[i]?.add(valeur);
+    });
+
+    const quantite = quantiteVariante(v);
+    if (quantite === null) quantitesInconnues = true;
+
+    unites.push({
+      sku,
+      skuFabrique: skuPropre.length === 0,
+      prix: v.price,
+      quantite: quantite ?? 0,
+      ...(v.imageUrl ? { imageUrl: v.imageUrl } : {}),
+      aspects,
+      etiquette,
+    });
+  }
+
+  /*
+   * `aspectsImageVariesBy` n'est déclaré que si TOUTES les variantes ont une
+   * photo propre. Déclaré à moitié, eBay réclame une image pour chaque valeur
+   * de l'aspect et refuse le groupe — mieux vaut une galerie commune qu'un
+   * refus.
+   */
+  const axeImage =
+    unites.length > 0 && unites.every((u) => u.imageUrl) ? noms[0] : undefined;
+
+  return {
+    ok: true,
+    unites,
+    specifications: noms.map((name, i) => ({
+      name,
+      values: Array.from(valeursParAxe[i] ?? []),
+    })),
+    ...(axeImage ? { axeImage } : {}),
+    quantitesInconnues,
+    skusFabriques,
+  };
+}
 
 export class EbayAdapter implements MarketplaceAdapter {
   readonly id = "ebay";
@@ -303,7 +643,8 @@ export class EbayAdapter implements MarketplaceAdapter {
       const detail = errs
         .map((e) => e.longMessage || e.message || `erreur ${e.errorId}`)
         .join(" ; ");
-      throw new Error(
+      throw new EbayHttpError(
+        res.status,
         detail || `eBay a répondu ${res.status} sur ${path.split("?")[0]}`,
       );
     }
@@ -440,6 +781,23 @@ export class EbayAdapter implements MarketplaceAdapter {
   /* Écritures                                                         */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Crée UNE annonce, avec toutes ses déclinaisons.
+   *
+   * Ce chemin créait autrefois un article par produit. Sur un support de
+   * téléphone à dix-sept coloris, l'appelant diffusait donc dix-sept fois —
+   * dix-sept annonces quasi identiques, dix-sept lignes du plafond vendeur
+   * eBay consommées, et un acheteur qui voit la même chose dix-sept fois au
+   * lieu d'un menu déroulant. eBay a un objet pour ça : l'`inventory_item_group`.
+   *
+   * La séquence, dans cet ordre et pas un autre :
+   *   1. un `PUT inventory_item/{sku}` par variante — ce qu'on possède
+   *   2. un `PUT inventory_item_group/{cle}` — ce qui les relie
+   *   3. un `POST offer` par SKU — à quel prix, sous quelles politiques
+   *
+   * Et surtout PAS de `publish_by_inventory_item_group` : publier engage un
+   * contrat de vente sur une annonce que personne n'a relue.
+   */
   async createListing(
     ctx: MarketplaceContext,
     product: Product,
@@ -452,13 +810,10 @@ export class EbayAdapter implements MarketplaceAdapter {
       c["defaultCategoryId"];
 
     if (!categoryId) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "manual_required",
-        message:
-          "eBay exige une catégorie. Renseignez-la sur le produit ou définissez une catégorie par défaut sur le compte.",
-      };
+      return this.manuel(
+        ctx,
+        "eBay exige une catégorie. Renseignez-la sur le produit ou définissez une catégorie par défaut sur le compte.",
+      );
     }
 
     /*
@@ -473,24 +828,54 @@ export class EbayAdapter implements MarketplaceAdapter {
       ? ETATS_EBAY[product.condition]
       : undefined;
     if (!conditionEbay) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "manual_required",
-        message:
-          "eBay exige l'état de l'article (neuf, très bon état, pour pièces…). Renseignez-le sur le produit : eBay déclasse une annonce dont l'état ne correspond pas à sa catégorie.",
-      };
+      return this.manuel(
+        ctx,
+        "eBay exige l'état de l'article (neuf, très bon état, pour pièces…). Renseignez-le sur le produit : eBay déclasse une annonce dont l'état ne correspond pas à sa catégorie.",
+      );
     }
 
     if ((product.images?.length ?? 0) === 0) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "manual_required",
-        message:
-          "eBay exige au moins une photo en HTTPS. Sans elle, l'annonce se crée mais ne peut jamais être mise en vente.",
-      };
+      return this.manuel(
+        ctx,
+        "eBay exige au moins une photo en HTTPS. Sans elle, l'annonce se crée mais ne peut jamais être mise en vente.",
+      );
     }
+
+    /*
+     * Les variantes archivées sont écartées : la plateforme ne les renvoie
+     * plus, les republier ressusciterait un coloris retiré.
+     */
+    const variantes = (product.variants ?? [])
+      .filter((v) => v.status === "active")
+      .slice()
+      .sort((a, b) => a.position - b.position);
+
+    const commun = { categoryId, marketplaceId, conditionEbay };
+
+    /*
+     * Zéro ou une variante : rien à grouper. Un groupe d'un seul élément n'a
+     * pas de déclinaison à proposer, et eBay refuse un `variesBy` sans axe qui
+     * varie. On garde donc le chemin mono-SKU d'origine, à un détail près : si
+     * cette variante unique porte son propre SKU et son propre prix, ce sont
+     * les siens qui font foi, pas ceux du parent.
+     */
+    if (variantes.length < 2) {
+      return this.creerMonoSku(ctx, product, variantes[0], commun);
+    }
+
+    return this.creerGroupeVariantes(ctx, product, variantes, commun);
+  }
+
+  /** Le raccourci d'un produit sans déclinaison : un article, une offre. */
+  private async creerMonoSku(
+    ctx: MarketplaceContext,
+    product: Product,
+    solo: Variant | undefined,
+    commun: { categoryId: string; marketplaceId: string; conditionEbay: string },
+  ): Promise<TargetResult> {
+    const sku = solo?.sku?.trim() || product.sku;
+    const prix = solo?.price ?? product.price;
+    const stock = solo ? (quantiteVariante(solo) ?? product.stock) : product.stock;
 
     /*
      * VÉRIFIER AVANT D'ÉCRIRE — le défaut le plus grave de ce chemin.
@@ -510,38 +895,33 @@ export class EbayAdapter implements MarketplaceAdapter {
      * En cas de doute — réponse illisible, panne réseau — on refuse. L'état
      * inconnu ne justifie pas d'écrire par-dessus.
      */
-    const existe = await this.skuExiste(ctx, product.sku);
+    const existe = await this.skuExiste(ctx, sku);
     if (existe === true) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "manual_required",
-        message: `Le SKU « ${product.sku} » existe déjà chez eBay. Créer l'annonce écraserait ce qui est en ligne : rattachez-la par un import, ou changez de SKU.`,
-      };
+      return this.manuel(
+        ctx,
+        `Le SKU « ${sku} » existe déjà chez eBay. Créer l'annonce écraserait ce qui est en ligne : rattachez-la par un import, ou changez de SKU.`,
+      );
     }
     if (existe === null) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "failed",
-        message:
-          "Impossible de vérifier si ce SKU existe déjà chez eBay. Rien n'a été écrit — réessayez plus tard.",
-      };
+      return this.echec(
+        ctx,
+        "Impossible de vérifier si ce SKU existe déjà chez eBay. Rien n'a été écrit — réessayez plus tard.",
+      );
     }
 
     // 1. L'article d'inventaire : ce qu'on possède.
     await this.call(
       ctx,
-      `/sell/inventory/v1/inventory_item/${encodeURIComponent(product.sku)}`,
+      `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
       {
         method: "PUT",
         body: JSON.stringify({
           availability: {
-            shipToLocationAvailability: { quantity: product.stock },
+            shipToLocationAvailability: { quantity: stock },
           },
-          condition: conditionEbay,
+          condition: commun.conditionEbay,
           product: {
-            title: product.title.slice(0, 80), // eBay tronque à 80 caractères
+            title: product.title.slice(0, TITRE_MAX), // eBay tronque à 80 caractères
             description: product.description ?? product.title,
             imageUrls: product.images ?? [],
           },
@@ -555,25 +935,7 @@ export class EbayAdapter implements MarketplaceAdapter {
       "/sell/inventory/v1/offer",
       {
         method: "POST",
-        body: JSON.stringify({
-          sku: product.sku,
-          marketplaceId,
-          format: "FIXED_PRICE",
-          availableQuantity: product.stock,
-          categoryId,
-          merchantLocationKey: c["merchantLocationKey"],
-          pricingSummary: {
-            price: {
-              value: (product.price.amount / 100).toFixed(2),
-              currency: product.price.currency,
-            },
-          },
-          listingPolicies: {
-            fulfillmentPolicyId: c["fulfillmentPolicyId"],
-            paymentPolicyId: c["paymentPolicyId"],
-            returnPolicyId: c["returnPolicyId"],
-          },
-        }),
+        body: JSON.stringify(this.corpsOffre(ctx, { sku, prix, stock }, commun)),
       },
     );
 
@@ -584,12 +946,259 @@ export class EbayAdapter implements MarketplaceAdapter {
       accountId: ctx.account.id,
       marketplace: ctx.account.marketplace,
       status: "success",
-      remoteId: product.sku,
+      remoteId: sku,
       // L'identifiant d'offre REMONTE, au lieu de finir dans un texte que
       // personne ne relit. Sans lui, l'annonce créée n'accepterait plus
       // jamais ni changement de prix, ni activation, ni retrait.
-      marketplaceData: { offerId: offer.offerId, categoryId },
+      marketplaceData: { offerId: offer.offerId, categoryId: commun.categoryId },
       message: `Offre ${offer.offerId} créée en brouillon — à publier après relecture`,
+    };
+  }
+
+  /** Une annonce, plusieurs déclinaisons : articles, groupe, puis offres. */
+  private async creerGroupeVariantes(
+    ctx: MarketplaceContext,
+    product: Product,
+    variantes: Variant[],
+    commun: { categoryId: string; marketplaceId: string; conditionEbay: string },
+  ): Promise<TargetResult> {
+    const prep = preparerUnites(product, variantes);
+    if (!prep.ok) return this.manuel(ctx, prep.message);
+
+    /*
+     * TRONQUER SERAIT PIRE QUE REFUSER.
+     *
+     * Passé le plafond, on pourrait ne créer que les premières variantes. Mais
+     * `variantSKUs` est un remplacement complet, et l'orchestrateur considère
+     * qu'un produit déjà rattaché à ce compte n'a plus rien à créer : un
+     * nouvel essai ne compléterait donc RIEN. On se retrouverait avec une
+     * annonce à cinq coloris sur dix-sept, définitivement, sans que personne
+     * l'ait décidé. Refuser avant la première écriture laisse le choix à un
+     * humain — et ne consomme aucun quota.
+     */
+    if (prep.unites.length > EBAY_MAX_VARIANTES) {
+      return this.manuel(
+        ctx,
+        `Ce produit a ${prep.unites.length} déclinaisons actives ; une diffusion ne peut en créer que ${EBAY_MAX_VARIANTES} (40 sous-requêtes par invocation, 2 par appel, 3 appels par variante). Rien n'a été écrit : une annonce partielle ne se complète pas au second essai. Réduisez le nombre de variantes actives, ou attendez le passage aux appels groupés.`,
+      );
+    }
+
+    /*
+     * SONDER TOUTES LES VARIANTES, pas seulement le parent.
+     *
+     * Chaque `PUT inventory_item/{sku}` est un remplacement complet. Le
+     * garde-fou ne valait donc rien tant qu'il ne couvrait qu'un SKU : les
+     * seize autres pouvaient écraser seize articles existants.
+     */
+    for (const u of prep.unites) {
+      const existe = await this.skuExiste(ctx, u.sku);
+      if (existe === true) {
+        return this.manuel(
+          ctx,
+          `Le SKU « ${u.sku} » (${u.etiquette}) existe déjà chez eBay. Le créer écraserait ce qui est en ligne : rattachez l'annonce par un import, ou changez de SKU.`,
+        );
+      }
+      if (existe === null) {
+        return this.echec(
+          ctx,
+          `Impossible de vérifier si le SKU « ${u.sku} » existe déjà chez eBay. Rien n'a été écrit — réessayez plus tard.`,
+        );
+      }
+    }
+
+    // Le groupe aussi s'écrit par un PUT : même règle, même sonde.
+    const cle = cleGroupe(product.sku);
+    const groupe = await this.existe(
+      ctx,
+      `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(cle)}`,
+    );
+    if (groupe === true) {
+      return this.manuel(
+        ctx,
+        `Un groupe de variantes « ${cle} » existe déjà chez eBay. L'écrire remplacerait sa liste de déclinaisons : rattachez l'annonce par un import, ou changez le SKU parent.`,
+      );
+    }
+    if (groupe === null) {
+      return this.echec(
+        ctx,
+        `Impossible de vérifier si le groupe « ${cle} » existe déjà chez eBay. Rien n'a été écrit — réessayez plus tard.`,
+      );
+    }
+
+    // 1. Un article par variante, puis 2. le groupe qui les relie.
+    const communs = aspectsCommuns(product);
+    const ecrits: string[] = [];
+    try {
+      for (const u of prep.unites) {
+        await this.call(
+          ctx,
+          `/sell/inventory/v1/inventory_item/${encodeURIComponent(u.sku)}`,
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              availability: {
+                shipToLocationAvailability: { quantity: u.quantite },
+              },
+              condition: commun.conditionEbay,
+              product: {
+                /*
+                 * NI titre NI sous-titre sur un article de groupe : ils
+                 * écraseraient ceux du groupe, et l'annonce s'afficherait sous
+                 * le nom d'une seule déclinaison. Le titre, la description et
+                 * la galerie appartiennent au groupe.
+                 */
+                aspects: Object.fromEntries(
+                  Object.entries(u.aspects).map(([nom, valeur]) => [
+                    nom,
+                    [valeur],
+                  ]),
+                ),
+                ...(u.imageUrl ? { imageUrls: [u.imageUrl] } : {}),
+              },
+            }),
+          },
+        );
+        ecrits.push(u.sku);
+      }
+
+      await this.call(
+        ctx,
+        `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(cle)}`,
+        {
+          method: "PUT",
+          // La clé vit dans l'URI, PAS dans le corps : l'y mettre est ignoré
+          // en silence et le groupe se crée sous une autre clé.
+          body: JSON.stringify({
+            title: product.title.slice(0, TITRE_MAX),
+            description: product.description ?? product.title,
+            imageUrls: product.images ?? [],
+            // Remplacement COMPLET : la liste envoyée devient la liste du
+            // groupe. Un SKU omis est un SKU détaché.
+            variantSKUs: prep.unites.map((u) => u.sku),
+            ...(communs ? { aspects: communs } : {}),
+            variesBy: {
+              ...(prep.axeImage
+                ? { aspectsImageVariesBy: [prep.axeImage] }
+                : {}),
+              specifications: prep.specifications,
+            },
+          }),
+        },
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return this.echec(
+        ctx,
+        ecrits.length === 0
+          ? `eBay a refusé la création : ${detail}`
+          : `eBay a refusé la création après ${ecrits.length} article(s) : ${detail}. Les SKU ${ecrits.join(", ")} existent maintenant chez eBay SANS offre ni groupe — un nouvel essai les signalera comme existants ; supprimez-les d'abord depuis eBay.`,
+      );
+    }
+
+    // 3. Une offre par SKU. Elles partagent tout sauf le SKU, la quantité et
+    // le prix — c'est ce qu'eBay exige des offres d'un même groupe.
+    const offers: Record<string, string> = {};
+    const echecs: string[] = [];
+    for (const u of prep.unites) {
+      try {
+        const offre = await this.call<{ offerId?: string }>(
+          ctx,
+          "/sell/inventory/v1/offer",
+          {
+            method: "POST",
+            body: JSON.stringify(
+              this.corpsOffre(
+                ctx,
+                { sku: u.sku, prix: u.prix, stock: u.quantite },
+                commun,
+              ),
+            ),
+          },
+        );
+        if (offre?.offerId) offers[u.sku] = offre.offerId;
+        else echecs.push(`${u.sku} (aucun identifiant d'offre rendu)`);
+      } catch (err) {
+        echecs.push(
+          `${u.sku} (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+    }
+
+    const notes = [
+      prep.skusFabriques > 0
+        ? `${prep.skusFabriques} SKU dérivé(s) du SKU parent faute d'en porter un`
+        : "",
+      prep.quantitesInconnues
+        ? "stock par variante inconnu : quantités posées à 0, à corriger avant mise en vente"
+        : "",
+    ].filter(Boolean);
+
+    const resume = `Groupe ${cle} créé en brouillon — ${prep.unites.length} déclinaisons, à publier après relecture${notes.length > 0 ? ` · ${notes.join(" · ")}` : ""}`;
+
+    return {
+      accountId: ctx.account.id,
+      marketplace: ctx.account.marketplace,
+      // Le groupe et les articles existent : l'oublier localement rendrait
+      // l'annonce impilotable. `pending_remote` dit exactement cela — c'est
+      // chez eBay, ce n'est pas terminé.
+      status: echecs.length === 0 ? "success" : "pending_remote",
+      // L'identité stable du parent, celle qui sert aux mises à jour.
+      remoteId: cle,
+      marketplaceData: {
+        inventoryItemGroupKey: cle,
+        offers,
+        categoryId: commun.categoryId,
+      },
+      message:
+        echecs.length === 0
+          ? resume
+          : `${resume} · offre manquante pour ${echecs.length} déclinaison(s) : ${echecs.join(" ; ")}`,
+    };
+  }
+
+  /** Le corps d'une offre. Identique pour tout un groupe, hors SKU/prix/stock. */
+  private corpsOffre(
+    ctx: MarketplaceContext,
+    unite: { sku: string; prix: Money; stock: number },
+    commun: { categoryId: string; marketplaceId: string },
+  ): Record<string, unknown> {
+    const c = ctx.credentials ?? {};
+    return {
+      sku: unite.sku,
+      marketplaceId: commun.marketplaceId,
+      format: "FIXED_PRICE",
+      availableQuantity: unite.stock,
+      categoryId: commun.categoryId,
+      merchantLocationKey: c["merchantLocationKey"],
+      pricingSummary: {
+        price: {
+          value: (unite.prix.amount / 100).toFixed(2),
+          currency: unite.prix.currency,
+        },
+      },
+      listingPolicies: {
+        fulfillmentPolicyId: c["fulfillmentPolicyId"],
+        paymentPolicyId: c["paymentPolicyId"],
+        returnPolicyId: c["returnPolicyId"],
+      },
+    };
+  }
+
+  private manuel(ctx: MarketplaceContext, message: string): TargetResult {
+    return {
+      accountId: ctx.account.id,
+      marketplace: ctx.account.marketplace,
+      status: "manual_required",
+      message,
+    };
+  }
+
+  private echec(ctx: MarketplaceContext, message: string): TargetResult {
+    return {
+      accountId: ctx.account.id,
+      marketplace: ctx.account.marketplace,
+      status: "failed",
+      message,
     };
   }
 
@@ -709,16 +1318,28 @@ export class EbayAdapter implements MarketplaceAdapter {
     ctx: MarketplaceContext,
     sku: string,
   ): Promise<boolean | null> {
+    return this.existe(
+      ctx,
+      `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
+    );
+  }
+
+  /**
+   * Cet objet existe-t-il déjà ? Même règle pour un article et pour un groupe :
+   * les deux s'écrivent par un PUT qui remplace tout.
+   */
+  private async existe(
+    ctx: MarketplaceContext,
+    chemin: string,
+  ): Promise<boolean | null> {
     try {
-      await this.call(
-        ctx,
-        `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
-      );
+      await this.call(ctx, chemin);
       return true;
     } catch (err) {
       // Le transport lève sur tout code anormal. Seul un 404 signifie
-      // franchement « cet article n'existe pas » ; le reste est une
+      // franchement « cet objet n'existe pas » ; le reste est une
       // incertitude, et une incertitude ne doit pas autoriser une écriture.
+      if (err instanceof EbayHttpError) return err.status === 404 ? false : null;
       const m = err instanceof Error ? err.message : String(err);
       return /\b404\b/.test(m) ? false : null;
     }
@@ -730,6 +1351,28 @@ export class EbayAdapter implements MarketplaceAdapter {
     stock: number,
     _idempotencyKey?: string,
   ): Promise<TargetResult> {
+    /*
+     * UNE ANNONCE GROUPÉE NE SE MET PAS À JOUR PAR SON GROUPE.
+     *
+     * Quand l'annonce a été créée avec des déclinaisons, `remoteId` porte la
+     * clé du GROUPE d'articles d'inventaire — pas un SKU. La passer telle
+     * quelle à `bulk_update_price_quantity` produit un 400 chez eBay, et le
+     * stock ne se propage jamais. Pire : si la clé ressemblait par accident à
+     * un SKU existant, on écrirait sur le mauvais article.
+     *
+     * Tant que chaque déclinaison n'a pas sa propre ligne locale, on refuse
+     * en le disant. Un refus visible vaut mieux qu'une écriture au hasard.
+     */
+    if (listing.marketplaceData?.["inventoryItemGroupKey"]) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "unsupported",
+        message:
+          "Annonce à déclinaisons : la mise à jour coloris par coloris n'est pas encore branchée. Modifiez depuis eBay en attendant.",
+      };
+    }
+
     const sku = listing.remoteId;
     if (!sku) throw new Error("eBay : SKU manquant sur l'annonce");
 

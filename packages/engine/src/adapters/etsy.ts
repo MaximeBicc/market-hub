@@ -4,10 +4,12 @@ import type {
   FulfillmentInput,
   Listing,
   Money,
+  OptionAxis,
   Product,
   RemoteListing,
   RemoteSetting,
   TargetResult,
+  Variant,
 } from "../domain/types.js";
 import type {
   MarketplaceAdapter,
@@ -310,6 +312,23 @@ interface EtsyInventoryProduct {
   property_values?: Array<Record<string, unknown>>;
 }
 
+/**
+ * Une propriété de la taxonomie Etsy, telle que
+ * `/seller-taxonomy/nodes/{id}/properties` la rend.
+ *
+ * Tout est optionnel : la forme varie d'une catégorie à l'autre — certaines
+ * n'ont ni `possible_values`, ni `display_name` — et croire un champ toujours
+ * présent est la façon la plus rapide de faire tomber une publication sur un
+ * `undefined`.
+ */
+interface EtsyPropriete {
+  property_id?: number;
+  property_name?: string;
+  display_name?: string;
+  supports_variations?: boolean;
+  possible_values?: Array<{ value_id?: number; name?: string }>;
+}
+
 interface EtsyInventory {
   products?: EtsyInventoryProduct[];
   price_on_property?: number[];
@@ -351,6 +370,185 @@ function cleanProduct(
       is_enabled: o.is_enabled ?? true,
     })),
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Variations                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Etsy plafonne à DEUX propriétés de variation par annonce.
+ *
+ * Ce n'est pas contournable : ni en concaténant deux axes dans un seul, ce qui
+ * fabriquerait des valeurs que le vendeur n'a jamais écrites, ni en créant
+ * plusieurs annonces, ce qui multiplierait les frais d'insertion. Un produit à
+ * trois axes ne se publie donc pas ici — et on le DIT.
+ */
+const ETSY_MAX_AXES = 2;
+
+/**
+ * Les deux propriétés « libres » d'Etsy (Custom Property 1 et 2).
+ *
+ * Toute catégorie n'expose pas les axes du vendeur : « Coloris de la coque »
+ * n'existe dans aucune taxonomie. Etsy réserve pour cela deux propriétés à
+ * texte libre, et c'est la seule façon documentée de porter un axe que sa
+ * taxonomie ignore. On s'en sert en REPLI, jamais par défaut : une propriété
+ * curatée donne un filtre de recherche à l'acheteur, la libre n'en donne pas.
+ */
+const PROPRIETE_LIBRE_1 = 513;
+const PROPRIETE_LIBRE_2 = 514;
+
+/** Les marques diacritiques, à retirer après décomposition NFD. */
+const DIACRITIQUES = /[̀-ͯ]/g;
+
+/** Compare des libellés sans se faire piéger par la casse ou les accents. */
+function plier(v: string): string {
+  return v
+    .normalize("NFD")
+    .replace(DIACRITIQUES, "")
+    .trim()
+    .toLowerCase();
+}
+
+/** Un axe résolu contre la taxonomie : ce qu'Etsy attend réellement. */
+interface ColonneVariation {
+  /** Le nom envoyé à Etsy — celui de la propriété quand elle existe. */
+  nom: string;
+  propertyId: number;
+  /** Valeur pliée → identifiant curaté d'Etsy, quand il y en a un. */
+  valeurs: Map<string, number>;
+  /** Vrai quand la taxonomie n'a rien donné et qu'on part en valeur libre. */
+  libre: boolean;
+}
+
+/**
+ * Les axes du produit, ou leur reconstitution.
+ *
+ * `product.options` est la source normale. Mais un produit importé peut
+ * arriver avec ses variantes et sans ses axes — c'est le cas aujourd'hui pour
+ * tout produit lu depuis la base, dont le dépôt ne relit pas la colonne
+ * `options`. Plutôt que de publier alors dix-sept coloris comme un article nu,
+ * on relit les noms d'axes dans `optionKey` (« couleur=violet|taille=m »), qui
+ * les porte par construction.
+ *
+ * Ces noms-là sont NORMALISÉS — minuscules, accents pliés. C'est une
+ * dégradation, pas une invention : ils viennent des données du vendeur. Le
+ * repli est signalé à l'appelant pour qu'il puisse le lire.
+ */
+function axesDeVariation(
+  product: Product,
+  variantes: Variant[],
+): { axes: OptionAxis[]; reconstitues: boolean } {
+  const declares = (product.options ?? []).filter(
+    (a) => a.name.trim() !== "" && a.values.length > 0,
+  );
+  if (declares.length > 0) return { axes: declares, reconstitues: false };
+
+  let noms: string[] = [];
+  for (const v of variantes) {
+    const segments = v.optionKey.split("|").filter((s) => s !== "");
+    // La clé doit décrire EXACTEMENT les mêmes axes que les valeurs, sinon
+    // elle ne dit rien de fiable sur cette variante.
+    if (segments.length === 0 || segments.length !== v.optionValues.length) {
+      continue;
+    }
+    const candidats = segments.map((s) => (s.split("=")[0] ?? "").trim());
+    // Tout ou rien : un tableau à trous ferait publier un axe sans nom.
+    if (candidats.every((n) => n !== "")) {
+      noms = candidats;
+      break;
+    }
+  }
+  if (noms.length === 0) return { axes: [], reconstitues: true };
+
+  const valeurs = noms.map(() => new Set<string>());
+  for (const v of variantes) {
+    for (const [i, val] of v.optionValues.entries()) {
+      if (i < noms.length && val.trim() !== "") valeurs[i]?.add(val);
+    }
+  }
+  return {
+    axes: noms.map((name, i) => ({ name, values: [...(valeurs[i] ?? [])] })),
+    reconstitues: true,
+  };
+}
+
+/**
+ * Ce qui interdit de publier ces variations — ou `null` si tout va bien.
+ *
+ * Tous ces contrôles tournent AVANT la moindre écriture. C'est la seule place
+ * qui tienne : chez Etsy la création est facturée, et un brouillon posé puis
+ * abandonné parce qu'un axe de trop traîne n'est pas rattrapable — il faudrait
+ * aller le supprimer à la main, et l'annonce reste comptée.
+ */
+function refusDeVariation(
+  axes: OptionAxis[],
+  variantes: Variant[],
+): string | null {
+  if (axes.length === 0) {
+    return "Ces déclinaisons n'ont pas d'axes nommés (ni options du produit, ni clé d'options exploitable). Publier ainsi écraserait toutes les déclinaisons en un seul article : nommez les axes, ou publiez à la main sur Etsy.";
+  }
+
+  if (axes.length > ETSY_MAX_AXES) {
+    const retenus = axes.slice(0, ETSY_MAX_AXES).map((a) => a.name);
+    const abandonnes = axes.slice(ETSY_MAX_AXES).map((a) => a.name);
+    return `Etsy n'accepte que ${ETSY_MAX_AXES} axes de variation, ce produit en a ${axes.length}. Seraient retenus : ${retenus.join(" et ")} ; seraient abandonnés : ${abandonnes.join(", ")} — donc des déclinaisons vendues comme identiques. Ramenez le produit à deux axes, ou publiez-le à la main sur Etsy.`;
+  }
+
+  /*
+   * Une valeur par axe, exactement. Ni moins — Etsy refuse une combinaison
+   * incomplète — ni plus : les valeurs en trop seraient jetées, et une
+   * déclinaison partirait sous l'identité d'une autre.
+   */
+  const bancales = variantes.filter(
+    (v) =>
+      v.optionValues.length !== axes.length ||
+      v.optionValues.some((x) => x.trim() === ""),
+  );
+  if (bancales.length > 0) {
+    const noms = bancales
+      .slice(0, 5)
+      .map((v) => v.sku || v.optionKey || v.id)
+      .join(", ");
+    return `Ces déclinaisons ne portent pas exactement une valeur par axe (${axes.length} attendue(s) : ${axes.map((a) => a.name).join(", ")}) : ${noms}${bancales.length > 5 ? "…" : ""}. Etsy exige une combinaison complète par déclinaison ; corrigez-les avant de diffuser.`;
+  }
+
+  /*
+   * Les parenthèses sont REFUSÉES par Etsy dans une valeur de variation.
+   * On ne les retire pas nous-mêmes : « Violet (mat) » deviendrait
+   * « Violet mat » chez l'acheteur sans que personne l'ait décidé, et le
+   * libellé ne correspondrait plus à celui des autres plateformes.
+   */
+  const fautives = [
+    ...new Set(
+      variantes.flatMap((v) => v.optionValues.filter((x) => /[()]/.test(x))),
+    ),
+  ];
+  if (fautives.length > 0) {
+    return `Etsy interdit les parenthèses dans les valeurs de variation : ${fautives.map((x) => `« ${x} »`).join(", ")}. Renommez ces valeurs avant de diffuser — les réécrire d'office changerait ce que voit l'acheteur.`;
+  }
+
+  return null;
+}
+
+/**
+ * Le stock d'une déclinaison.
+ *
+ * Le modèle canonique ne le porte PAS : le stock vit par variante dans
+ * l'inventaire central, que l'adaptateur ne reçoit pas. On lit donc un indice
+ * s'il a été déposé dans `marketplaceData`, sinon on recopie le stock du
+ * parent — et l'appelant est averti dans le message, parce que recopier 12 sur
+ * dix-sept coloris annonce dix-sept fois douze pièces à la vente.
+ */
+function stockDeclare(v: Variant): number | null {
+  const brut = v.marketplaceData?.["stock"];
+  const n =
+    typeof brut === "number"
+      ? brut
+      : typeof brut === "string" && brut.trim() !== ""
+        ? Number(brut)
+        : Number.NaN;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -512,6 +710,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
     ctx: MarketplaceContext,
     remoteId?: string,
     message?: string,
+    marketplaceData?: Record<string, unknown>,
   ): TargetResult {
     return {
       accountId: ctx.account.id,
@@ -519,6 +718,17 @@ export class EtsyAdapter implements MarketplaceAdapter {
       status: "success",
       ...(remoteId ? { remoteId } : {}),
       ...(message ? { message } : {}),
+      ...(marketplaceData ? { marketplaceData } : {}),
+    };
+  }
+
+  /** Refus net, sans rien avoir écrit chez Etsy. */
+  private aLaMain(ctx: MarketplaceContext, message: string): TargetResult {
+    return {
+      accountId: ctx.account.id,
+      marketplace: ctx.account.marketplace,
+      status: "manual_required",
+      message,
     };
   }
 
@@ -581,6 +791,33 @@ export class EtsyAdapter implements MarketplaceAdapter {
       };
     }
 
+    /*
+     * ══ LES DÉCLINAISONS, DÉCIDÉES AVANT LA MOINDRE ÉCRITURE ══
+     *
+     * Etsy facture chaque mise en ligne et ne rembourse pas un brouillon
+     * abandonné. Tout ce qui peut interdire les variations — trois axes, une
+     * valeur entre parenthèses, une déclinaison sans valeur — est donc tranché
+     * ICI, avant que quoi que ce soit n'existe chez Etsy. Découvrir le
+     * problème après la création laisserait un brouillon orphelin que
+     * l'orchestrateur n'enregistre même pas sur un `manual_required` : le
+     * prochain essai en créerait un second.
+     */
+    const variantes = (product.variants ?? []).filter(
+      (v) => v.status === "active",
+    );
+    // Une variante unique sans valeur d'option EST le produit lui-même : c'est
+    // le cas courant, et il ne passe pas par l'inventaire.
+    const aDesDeclinaisons = variantes.some((v) => v.optionValues.length > 0);
+
+    const { axes, reconstitues } = aDesDeclinaisons
+      ? axesDeVariation(product, variantes)
+      : { axes: [] as OptionAxis[], reconstitues: false };
+
+    if (aDesDeclinaisons) {
+      const refus = refusDeVariation(axes, variantes);
+      if (refus) return this.aLaMain(ctx, refus);
+    }
+
     // `createDraftListing` n'accepte PAS de JSON : le corps doit être encodé
     // en formulaire. Envoyer du JSON renvoie une erreur de validation qui
     // désigne des champs pourtant présents.
@@ -605,6 +842,55 @@ export class EtsyAdapter implements MarketplaceAdapter {
         },
       },
     );
+
+    /*
+     * L'INVENTAIRE — le brouillon existe, on lui pose ses déclinaisons.
+     *
+     * Une annonce Etsy naît toujours avec UN produit d'inventaire. Les
+     * variations ne s'écrivent pas à la création : elles arrivent par un
+     * `PUT .../inventory` qui remplace ce produit unique par la liste complète.
+     *
+     * L'échec est NON BLOQUANT, comme pour les photos, et pour la même raison :
+     * le brouillon est déjà chez Etsy et facturé. Renvoyer un refus le rendrait
+     * invisible à l'orchestrateur — qui n'enregistre l'annonce que sur
+     * `success` ou `pending_remote` — et le prochain essai en créerait un
+     * second. On rend donc l'identifiant, et on DIT ce qui n'a pas été posé.
+     */
+    let produitsPoses = 1;
+    let noteVariations = "";
+
+    if (aDesDeclinaisons) {
+      const retenus = axes.slice(0, ETSY_MAX_AXES);
+      const { colonnes, avertissement } = await this.proprietesDeVariation(
+        ctx,
+        String(taxonomy),
+        retenus,
+      );
+      try {
+        produitsPoses = await this.poserVariations(
+          ctx,
+          created.listing_id,
+          colonnes,
+          variantes,
+          product.stock,
+          readiness,
+        );
+        noteVariations = ` · ${produitsPoses} déclinaison(s) posées sur ${colonnes
+          .map((col) => col.nom)
+          .join(" × ")}`;
+      } catch (err) {
+        produitsPoses = 1;
+        noteVariations = ` · VARIATIONS NON POSÉES (${err instanceof Error ? err.message : String(err)}) — le brouillon existe mais n'a qu'une seule déclinaison : complétez-le dans Etsy`;
+      }
+      if (avertissement) noteVariations += ` · ${avertissement}`;
+      if (reconstitues) {
+        noteVariations +=
+          " · noms d'axes repris des clés d'options, en minuscules : vérifiez-les avant publication";
+      }
+      if (variantes.every((v) => stockDeclare(v) === null)) {
+        noteVariations += ` · stock du parent (${Math.max(0, product.stock)}) recopié sur chaque déclinaison — à ajuster avant publication`;
+      }
+    }
 
     /*
      * LES PHOTOS — le seul cas des trois plateformes où il faut transporter
@@ -643,8 +929,173 @@ export class EtsyAdapter implements MarketplaceAdapter {
     return this.ok(
       ctx,
       String(created.listing_id),
-      `Créée en brouillon — à publier depuis Etsy après relecture${note}`,
+      `Créée en brouillon — à publier depuis Etsy après relecture${noteVariations}${note}`,
+      // Ce que la suite exige : l'identifiant d'annonce pour toute mise à jour,
+      // et le nombre de produits d'inventaire réellement écrits — sans lui,
+      // impossible de savoir si les déclinaisons sont passées.
+      { listingId: String(created.listing_id), products: produitsPoses },
     );
+  }
+
+  /**
+   * Résout les axes du produit contre la taxonomie de sa catégorie.
+   *
+   * Etsy ne veut pas d'un nom d'axe : il veut un `property_id` pris dans la
+   * catégorie choisie. « Couleur » n'est donc pas envoyable tel quel — il faut
+   * le retrouver dans la liste que la taxonomie expose pour cette catégorie.
+   *
+   * En cas d'échec — catégorie sans propriété correspondante, ou taxonomie qui
+   * ne répond pas — on retombe sur les deux propriétés libres d'Etsy. C'est
+   * fonctionnel mais dégradé : l'acheteur perd le filtre de recherche associé
+   * à la propriété curatée. Le repli est donc REMONTÉ dans le message, jamais
+   * silencieux.
+   */
+  private async proprietesDeVariation(
+    ctx: MarketplaceContext,
+    taxonomyId: string,
+    axes: OptionAxis[],
+  ): Promise<{ colonnes: ColonneVariation[]; avertissement?: string }> {
+    let catalogue: EtsyPropriete[] = [];
+    let echec = "";
+
+    try {
+      const d = await this.call<{ results?: EtsyPropriete[] }>(
+        ctx,
+        `/seller-taxonomy/nodes/${encodeURIComponent(taxonomyId)}/properties`,
+      );
+      catalogue = d?.results ?? [];
+    } catch (err) {
+      echec = err instanceof Error ? err.message : String(err);
+    }
+
+    const inconnus: string[] = [];
+    const colonnes: ColonneVariation[] = axes.map((axe, i) => {
+      const trouvee = catalogue.find(
+        (c) =>
+          typeof c.property_id === "number" &&
+          c.supports_variations !== false &&
+          (plier(c.property_name ?? "") === plier(axe.name) ||
+            plier(c.display_name ?? "") === plier(axe.name)),
+      );
+
+      if (!trouvee || typeof trouvee.property_id !== "number") {
+        inconnus.push(axe.name);
+        return {
+          nom: axe.name,
+          // Deux axes au maximum, donc deux propriétés libres : il n'y a pas
+          // de troisième cas à traiter.
+          propertyId: i === 0 ? PROPRIETE_LIBRE_1 : PROPRIETE_LIBRE_2,
+          valeurs: new Map<string, number>(),
+          libre: true,
+        };
+      }
+
+      const valeurs = new Map<string, number>();
+      for (const v of trouvee.possible_values ?? []) {
+        if (typeof v.value_id === "number" && v.name) {
+          valeurs.set(plier(v.name), v.value_id);
+        }
+      }
+      return {
+        nom: trouvee.display_name || trouvee.property_name || axe.name,
+        propertyId: trouvee.property_id,
+        valeurs,
+        libre: false,
+      };
+    });
+
+    const avertissement = echec
+      ? `taxonomie illisible (${echec}) : ${axes.map((a) => a.name).join(" et ")} partent en propriété libre, sans filtre de recherche`
+      : inconnus.length > 0
+        ? `${inconnus.join(" et ")} n'existe pas dans cette catégorie Etsy : parti en propriété libre, sans filtre de recherche`
+        : "";
+
+    return {
+      colonnes,
+      ...(avertissement ? { avertissement } : {}),
+    };
+  }
+
+  /**
+   * Écrit les déclinaisons dans l'inventaire du brouillon.
+   *
+   * QUATRE PIÈGES, tous vérifiés sur la spécification :
+   *
+   * 1. Le prix est un DÉCIMAL (`24.50`). La forme `{amount, divisor}` que la
+   *    LECTURE renvoie est refusée en écriture, avec un message qui ne le dit
+   *    pas.
+   * 2. `value_ids` et `values` sont appariés POSITION PAR POSITION. Une valeur
+   *    non curatée n'a pas d'identifiant : la convention d'Etsy veut alors
+   *    l'identifiant de la propriété elle-même en remplissage.
+   * 3. Les trois tableaux `*_on_property` déclarent sur quels axes le prix, le
+   *    stock et le SKU varient. Les omettre aplatit les variations.
+   * 4. Rien de ce que la lecture ajoute — `product_id`, `offering_id`,
+   *    `scale_name`, `is_deleted`, `value_pairs` — ne doit repartir. Ici on
+   *    construit à partir du modèle canonique, donc le problème ne se pose pas
+   *    en création ; il se poserait à la relecture.
+   */
+  private async poserVariations(
+    ctx: MarketplaceContext,
+    listingId: number,
+    colonnes: ColonneVariation[],
+    variantes: Variant[],
+    stockParent: number,
+    readiness: string,
+  ): Promise<number> {
+    const readinessId = Number(readiness);
+
+    const produits = variantes.map((v) => ({
+      sku: v.sku ?? "",
+      property_values: colonnes.map((col, i) => {
+        const brut = v.optionValues[i] ?? "";
+        const curatee = col.valeurs.get(plier(brut));
+        return {
+          property_id: col.propertyId,
+          property_name: col.nom,
+          value_ids: [curatee ?? col.propertyId],
+          values: [brut],
+          // Aucune échelle : les échelles servent aux tailles normalisées
+          // (« EU 38 »), et en inventer une changerait le sens de la valeur.
+          scale_id: null,
+        };
+      }),
+      offerings: [
+        {
+          price: Number((v.price.amount / 100).toFixed(2)),
+          quantity: stockDeclare(v) ?? Math.max(0, stockParent),
+          // `is_enabled` et non `state` : une offre désactivée disparaît de
+          // l'annonce sans être supprimée. Toutes les déclinaisons actives
+          // arrivent donc activées — l'annonce, elle, reste un brouillon.
+          is_enabled: true,
+          ...(Number.isFinite(readinessId) && readinessId > 0
+            ? { readiness_state_id: readinessId }
+            : {}),
+        },
+      ],
+    }));
+
+    const ids = colonnes.map((c) => c.propertyId);
+    // Le plus granulaire qui soit : Etsy exige que deux déclinaisons partageant
+    // la valeur d'une propriété PORTEUSE de prix aient le même prix. Déclarer
+    // les deux axes est donc la seule forme qui accepte un prix par
+    // combinaison.
+    const prixVarie = new Set(variantes.map((v) => v.price.amount)).size > 1;
+    const avecSku = variantes.some((v) => (v.sku ?? "") !== "");
+
+    await this.call(ctx, `/listings/${listingId}/inventory`, {
+      method: "PUT",
+      body: JSON.stringify({
+        products: produits,
+        price_on_property: prixVarie ? ids : [],
+        // Le stock est compté PAR déclinaison dans tout l'outil : le déclarer
+        // porté par les propriétés est ce qui permettra de le repousser
+        // coloris par coloris, même si les quantités sont égales aujourd'hui.
+        quantity_on_property: ids,
+        sku_on_property: avecSku ? ids : [],
+      }),
+    });
+
+    return produits.length;
   }
 
   /**
@@ -734,6 +1185,29 @@ export class EtsyAdapter implements MarketplaceAdapter {
     if (!id) throw new Error("Etsy : annonce sans identifiant distant");
 
     const inv = await this.call<EtsyInventory>(ctx, `/listings/${id}/inventory`);
+
+    /*
+     * NE PAS APPLIQUER UNE VALEUR À TOUTES LES DÉCLINAISONS.
+     *
+     * L'écriture d'inventaire d'Etsy est un remplacement COMPLET : on relit,
+     * on modifie, on réécrit le tout. Le code appliquait la nouvelle quantité
+     * à chaque offering. Inoffensif tant qu'une annonce n'avait qu'un produit
+     * d'inventaire ; dès qu'elle a dix-sept coloris, une vente de trois
+     * violets mettait les dix-sept à trois.
+     *
+     * Tant que l'identité de la déclinaison n'est pas transmise jusqu'ici, on
+     * refuse. Le stock faux se voit des jours plus tard, à la survente.
+     */
+    if ((inv.products ?? []).filter((p) => !p.is_deleted).length > 1) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "unsupported",
+        message:
+          "Annonce à déclinaisons : appliquer cette valeur écraserait tous les coloris. Modifiez depuis Etsy en attendant.",
+      };
+    }
+
     const products = (inv.products ?? [])
       .filter((p) => !p.is_deleted)
       .map((p) => cleanProduct(p, patch));

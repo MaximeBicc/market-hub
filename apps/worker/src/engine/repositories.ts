@@ -119,6 +119,16 @@ export class D1ProductRepository implements ProductRepository {
       stock: row.stock,
       images: parseJson<string[]>(row.images, []),
       tags: parseJson<string[]>(row.tags, []),
+      /*
+       * LES AXES DE VARIATION — colonne remplie par la synchronisation et que
+       * personne ne relisait.
+       *
+       * Sans eux, un produit à dix-sept coloris arrivait chez l'adaptateur
+       * avec ses variantes mais SANS ses axes. Shopify retombait alors sur son
+       * chemin historique, créait UN article à UNE variante, et renvoyait
+       * « succès ». Seize coloris disparaissaient sans que rien ne le signale.
+       */
+      options: parseJson<Product["options"]>(row.options, []),
       // Les déclarations obligatoires. `?? undefined` et non `?? "new"` : une
       // valeur absente doit rester absente, pour que l'adaptateur refuse au
       // lieu d'inventer.

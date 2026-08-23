@@ -59,6 +59,8 @@ export function createMarketplaceModule(d: ModuleDeps) {
     d.accounts,
     d.credentials,
     d.products,
+    d.variants,
+    d.inventory,
     d.listings,
     d.httpFor,
     d.onOutcome,
