@@ -6,6 +6,7 @@ import type {
   Money,
   Product,
   RemoteListing,
+  RemoteSetting,
   TargetResult,
 } from "../domain/types.js";
 import type {
@@ -590,6 +591,97 @@ export class EbayAdapter implements MarketplaceAdapter {
       marketplaceData: { offerId: offer.offerId, categoryId },
       message: `Offre ${offer.offerId} créée en brouillon — à publier après relecture`,
     };
+  }
+
+  /**
+   * Les réglages de compte sans lesquels eBay refuse de publier.
+   *
+   * Quatre lectures, chacune ISOLÉE : une politique de retour absente ne doit
+   * pas cacher que les trois autres sont là. Une liste vide n'est pas une
+   * erreur — c'est le cas normal tant que les règles de gestion ne sont pas
+   * activées, et le message le dit.
+   *
+   * Aucune écriture : ces objets engagent les conditions de vente du vendeur,
+   * l'outil les lit et n'en crée jamais.
+   */
+  async listSettings(ctx: MarketplaceContext): Promise<RemoteSetting[]> {
+    const marketplaceId = ctx.credentials?.["marketplaceId"] ?? "EBAY_FR";
+    const q = `?marketplace_id=${marketplaceId}`;
+
+    const lire = async <T>(
+      chemin: string,
+      extraire: (
+        d: T,
+      ) => Array<{ id: string; label: string; detail?: string | undefined }>,
+    ) => {
+      try {
+        return extraire(await this.call<T>(ctx, chemin));
+      } catch {
+        // Un refus se lit comme « rien à proposer » : le message d'aide
+        // couvre les deux cas, et un écran à moitié rempli vaut mieux qu'une
+        // page d'erreur.
+        return [];
+      }
+    };
+
+    type Pol = { name?: string; description?: string };
+    type Liste<K extends string> = Record<K, Array<Pol & Record<string, string>>>;
+
+    const [livraison, paiement, retour, lieux] = await Promise.all([
+      lire<Liste<"fulfillmentPolicies">>(
+        `/sell/account/v1/fulfillment_policy${q}`,
+        (d) =>
+          (d.fulfillmentPolicies ?? []).map((p) => ({
+            id: String(p["fulfillmentPolicyId"]),
+            label: p.name ?? String(p["fulfillmentPolicyId"]),
+            detail: p.description,
+          })),
+      ),
+      lire<Liste<"paymentPolicies">>(`/sell/account/v1/payment_policy${q}`, (d) =>
+        (d.paymentPolicies ?? []).map((p) => ({
+          id: String(p["paymentPolicyId"]),
+          label: p.name ?? String(p["paymentPolicyId"]),
+          detail: p.description,
+        })),
+      ),
+      lire<Liste<"returnPolicies">>(`/sell/account/v1/return_policy${q}`, (d) =>
+        (d.returnPolicies ?? []).map((p) => ({
+          id: String(p["returnPolicyId"]),
+          label: p.name ?? String(p["returnPolicyId"]),
+          detail: p.description,
+        })),
+      ),
+      lire<{
+        locations?: Array<{
+          merchantLocationKey?: string;
+          name?: string;
+          location?: { address?: { city?: string; country?: string } };
+        }>;
+      }>("/sell/inventory/v1/location", (d) =>
+        (d.locations ?? []).map((l) => ({
+          id: String(l.merchantLocationKey),
+          label: l.name ?? String(l.merchantLocationKey),
+          detail: [l.location?.address?.city, l.location?.address?.country]
+            .filter(Boolean)
+            .join(", "),
+        })),
+      ),
+    ]);
+
+    const AIDE =
+      "À créer dans Seller Hub → Paramètres du compte → Règles de gestion. Si la page propose une activation, eBay met jusqu'à 24 h à la traiter.";
+
+    return [
+      {
+        key: "merchantLocationKey",
+        label: "Adresse d'expédition",
+        aide: "À créer dans Seller Hub → Préférences d'expédition.",
+        options: lieux,
+      },
+      { key: "fulfillmentPolicyId", label: "Politique de livraison", aide: AIDE, options: livraison },
+      { key: "paymentPolicyId", label: "Politique de paiement", aide: AIDE, options: paiement },
+      { key: "returnPolicyId", label: "Politique de retour", aide: AIDE, options: retour },
+    ];
   }
 
   /**

@@ -4,6 +4,7 @@ import type {
   FulfillmentInput,
   Listing,
   RemoteListing,
+  RemoteSetting,
   MarketplaceAccount,
   MarketplaceId,
   Money,
@@ -109,6 +110,15 @@ export interface MarketplaceAdapter {
     input: FulfillmentInput,
     idempotencyKey: string,
   ): Promise<TargetResult>;
+
+  /**
+   * Lit les réglages du compte marchand dont la publication dépend.
+   *
+   * Optionnelle : Shopify n'en a aucun — c'est pour cela qu'il publie déjà.
+   * Là où elle existe, elle évite de faire recopier des identifiants
+   * numériques : le vendeur choisit « Colissimo 48 h » dans une liste.
+   */
+  listSettings?(ctx: MarketplaceContext): Promise<RemoteSetting[]>;
 
   /**
    * Lit une page du catalogue existant chez la plateforme.

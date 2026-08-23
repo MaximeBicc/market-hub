@@ -361,6 +361,31 @@ export interface FulfillmentInput {
 }
 
 /**
+ * Un réglage de compte que la plateforme impose, et les choix disponibles.
+ *
+ * POURQUOI CE TYPE EXISTE. Publier une annonce demande des objets qui vivent
+ * dans le compte marchand, pas dans l'outil : chez eBay une adresse
+ * d'expédition et trois politiques, chez Etsy un profil de livraison et un
+ * profil de préparation. L'outil ne peut pas les créer — ils engagent les
+ * conditions de vente du vendeur — mais rien ne l'oblige à faire recopier
+ * sept identifiants numériques à la main.
+ *
+ * Il va donc les LIRE. Le vendeur choisit dans une liste lisible
+ * — « Colissimo 48 h », « Retours sous 14 jours » — et l'identifiant se range
+ * tout seul. La saisie manuelle d'un identifiant est une source d'erreur qui
+ * ne se voit qu'à la première publication ratée, des jours plus tard.
+ */
+export interface RemoteSetting {
+  /** La clé d'identifiant à renseigner : « fulfillmentPolicyId ». */
+  key: string;
+  /** Ce que ça désigne, en français. */
+  label: string;
+  /** Ce qu'il faut faire quand la liste est vide. */
+  aide: string;
+  options: Array<{ id: string; label: string; detail?: string | undefined }>;
+}
+
+/**
  * Une annonce telle que la plateforme la décrit.
  *
  * Distincte de `Listing` : celui-ci est notre représentation interne, liée à un

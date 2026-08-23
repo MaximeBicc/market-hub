@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.js";
 import { Empty } from "../components/Empty.js";
 import { Icon } from "../components/Icon.js";
@@ -77,6 +77,8 @@ const A_VENIR = [
 export function Shops() {
   /** Boutique dont le nom est en cours d'édition, le cas échéant. */
   const [edite, setEdite] = useState<string | null>(null);
+  /** Boutique dont on déplie les réglages de compte. */
+  const [reglages, setReglages] = useState<string | null>(null);
   const qc = useQueryClient();
   const [importing, setImporting] = useState<string | null>(null);
   const { data, isLoading } = useQuery({
@@ -330,6 +332,12 @@ export function Shops() {
                     )}
                     <button
                       className="btn btn--small"
+                      onClick={() => setReglages(reglages === a.id ? null : a.id)}
+                    >
+                      Réglages
+                    </button>
+                    <button
+                      className="btn btn--small"
                       onClick={() => void tempsReel(a)}
                     >
                       Temps réel
@@ -346,6 +354,13 @@ export function Shops() {
             );
           })}
         </div>
+      )}
+
+      {reglages && (
+        <Reglages
+          accountId={reglages}
+          onFerme={() => setReglages(null)}
+        />
       )}
 
       <ConnectShopify onDone={() => qc.invalidateQueries({ queryKey: ["accounts"] })} />
@@ -1093,5 +1108,140 @@ function Catalogue() {
         ))}
       </div>
     </>
+  );
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Réglages du compte marchand                                         */
+/* ------------------------------------------------------------------ */
+
+interface Reglage {
+  key: string;
+  label: string;
+  aide: string;
+  options: Array<{ id: string; label: string; detail?: string }>;
+}
+
+/**
+ * Choisir ses politiques et profils dans une liste, au lieu de recopier des
+ * identifiants.
+ *
+ * eBay en demande quatre, Etsy deux — des nombres à rallonge sans
+ * signification. Une faute de frappe ne se voit qu'à la première publication
+ * ratée, des jours plus tard, avec un message qui ne dit pas laquelle des
+ * valeurs est fausse. La plateforme sait les lister : autant les lire.
+ *
+ * Une liste vide n'est pas une erreur — c'est le cas normal tant que l'objet
+ * n'existe pas côté marchand. D'où le texte d'aide, qui dit où aller le créer
+ * plutôt que de laisser un menu vide sans explication.
+ */
+function Reglages({
+  accountId,
+  onFerme,
+}: {
+  accountId: string;
+  onFerme: () => void;
+}) {
+  const qc = useQueryClient();
+  const [choix, setChoix] = useState<Record<string, string>>({});
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["reglages", accountId],
+    queryFn: () =>
+      api.get<{
+        reglages: Reglage[];
+        choisis?: Record<string, string>;
+        message?: string;
+      }>(`/engine/accounts/${accountId}/reglages`),
+    retry: false,
+  });
+
+  const enregistrer = useMutation({
+    mutationFn: (valeurs: Record<string, string>) =>
+      api.post(`/engine/accounts/${accountId}/reglages`, valeurs),
+    onSuccess: async () => {
+      toast("Réglages enregistrés");
+      await qc.invalidateQueries({ queryKey: ["catalogue"] });
+      await qc.invalidateQueries({ queryKey: ["reglages", accountId] });
+    },
+    onError: (e: unknown) => toast(e instanceof Error ? e.message : "Échec"),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="card" style={{ marginTop: 9 }}>
+        <p className="muted" style={{ margin: 0 }}>
+          Lecture de vos profils chez la plateforme…
+        </p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="banner banner--warn" style={{ marginTop: 9 }}>
+        <span className="banner__t">Lecture impossible</span>
+        <span className="banner__b">
+          {error instanceof Error ? error.message : "La plateforme n'a pas répondu."}
+        </span>
+      </div>
+    );
+  }
+
+  const valeurs = { ...(data?.choisis ?? {}), ...choix };
+
+  return (
+    <div className="card" style={{ marginTop: 9 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <span className="row__t">Réglages exigés pour publier</span>
+        <button className="btn btn--small btn--ghost" onClick={onFerme}>
+          Fermer
+        </button>
+      </div>
+
+      {data?.message && (
+        <p className="muted" style={{ marginTop: 10, lineHeight: 1.5 }}>
+          {data.message}
+        </p>
+      )}
+
+      {(data?.reglages ?? []).map((r) => (
+        <div className="field" key={r.key}>
+          <label htmlFor={`r-${r.key}`}>{r.label}</label>
+          {r.options.length === 0 ? (
+            <div className="row__s" style={{ whiteSpace: "normal", lineHeight: 1.45 }}>
+              Rien à proposer — {r.aide}
+            </div>
+          ) : (
+            <select
+              id={`r-${r.key}`}
+              className="input"
+              value={valeurs[r.key] ?? ""}
+              onChange={(e) => setChoix({ ...choix, [r.key]: e.target.value })}
+            >
+              <option value="">— à choisir —</option>
+              {r.options.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                  {o.detail ? ` — ${o.detail}` : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      ))}
+
+      {(data?.reglages ?? []).some((r) => r.options.length > 0) && (
+        <button
+          className="btn btn--primary btn--wide"
+          style={{ marginTop: 4 }}
+          disabled={enregistrer.isPending || Object.keys(choix).length === 0}
+          onClick={() => enregistrer.mutate(valeurs)}
+        >
+          Enregistrer
+        </button>
+      )}
+    </div>
   );
 }

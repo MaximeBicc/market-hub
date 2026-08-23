@@ -6,6 +6,7 @@ import type {
   Money,
   Product,
   RemoteListing,
+  RemoteSetting,
   TargetResult,
 } from "../domain/types.js";
 import type {
@@ -992,6 +993,85 @@ export class EtsyAdapter implements MarketplaceAdapter {
           ? String(consommes)
           : undefined,
     };
+  }
+
+  /**
+   * Les réglages de boutique sans lesquels Etsy refuse de publier.
+   *
+   * La catégorie n'y figure pas volontairement : elle se choisit PAR PRODUIT,
+   * dans la taxonomie d'Etsy, et proposer une valeur unique de boutique
+   * pousserait à ranger un porte-clés et une bougie au même endroit.
+   */
+  async listSettings(ctx: MarketplaceContext): Promise<RemoteSetting[]> {
+    const boutique = this.shopId(ctx);
+
+    const lire = async <T>(
+      chemin: string,
+      extraire: (
+        d: T,
+      ) => Array<{ id: string; label: string; detail?: string | undefined }>,
+    ) => {
+      try {
+        return extraire(await this.call<T>(ctx, chemin));
+      } catch {
+        return [];
+      }
+    };
+
+    const [livraison, preparation] = await Promise.all([
+      lire<{
+        results?: Array<{
+          shipping_profile_id?: number;
+          title?: string;
+          min_processing_days?: number;
+          max_processing_days?: number;
+          origin_country_iso?: string;
+        }>;
+      }>(`/shops/${boutique}/shipping-profiles`, (d) =>
+        (d.results ?? []).map((p) => ({
+          id: String(p.shipping_profile_id),
+          label: p.title ?? String(p.shipping_profile_id),
+          detail: [
+            p.origin_country_iso,
+            p.min_processing_days != null
+              ? `${p.min_processing_days}–${p.max_processing_days} j de préparation`
+              : undefined,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        })),
+      ),
+      lire<{
+        results?: Array<{
+          readiness_state_id?: number;
+          min_processing_time?: number;
+          max_processing_time?: number;
+        }>;
+      }>(`/shops/${boutique}/readiness-state-definitions`, (d) =>
+        (d.results ?? []).map((p) => ({
+          id: String(p.readiness_state_id),
+          label:
+            p.min_processing_time != null
+              ? `${p.min_processing_time} à ${p.max_processing_time} jours`
+              : String(p.readiness_state_id),
+        })),
+      ),
+    ]);
+
+    return [
+      {
+        key: "shippingProfileId",
+        label: "Profil de livraison",
+        aide: "À créer dans votre boutique Etsy → Paramètres → Expédition.",
+        options: livraison,
+      },
+      {
+        key: "readinessStateId",
+        label: "Délai de préparation",
+        aide: "À créer dans votre boutique Etsy → Paramètres → Délais de traitement.",
+        options: preparation,
+      },
+    ];
   }
 
   /* ---------------------------------------------------------------- */

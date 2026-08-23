@@ -1397,3 +1397,109 @@ accounts.post("/:id/temps-reel", async (c) => {
     );
   }
 });
+
+/**
+ * Lit chez la plateforme les réglages dont la publication dépend.
+ *
+ * POURQUOI PLUTÔT QUE DE LES FAIRE SAISIR. eBay demande quatre identifiants,
+ * Etsy deux — des nombres à rallonge, sans signification, à recopier sans se
+ * tromper. Une faute de frappe ne se voit qu'à la première publication ratée,
+ * des jours plus tard, avec un message qui ne dit pas laquelle des sept
+ * valeurs est fausse.
+ *
+ * La plateforme sait les lister. Le vendeur choisit « Colissimo 48 h » dans un
+ * menu, l'identifiant se range chiffré tout seul. Aucune écriture distante :
+ * ces objets engagent ses conditions de vente, l'outil les lit et n'en crée
+ * jamais.
+ */
+accounts.get("/:id/reglages", async (c) => {
+  const id = c.req.param("id");
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Boutique inconnue" }, 404);
+
+  const mod = buildEngine(c.env, { used: 0 });
+  const adapter = mod.registry.get(account.marketplace);
+
+  if (!adapter.listSettings) {
+    return c.json({
+      reglages: [],
+      // Shopify n'a aucun réglage de ce genre — c'est pour cela qu'il publie
+      // déjà. Le dire vaut mieux qu'un écran vide.
+      message: `${account.marketplace} n'exige aucun réglage de compte pour publier.`,
+    });
+  }
+
+  const credentials = { ...(await repos.credentials.get(id)) };
+  try {
+    const reglages = await adapter.listSettings({
+      account,
+      credentials,
+      http: mod.httpFor(account),
+      saveCredentials: async (patch) => {
+        Object.assign(credentials, patch);
+        await repos.credentials.put(id, credentials);
+      },
+    });
+
+    // Ce qui est DÉJÀ choisi, pour que l'écran présélectionne.
+    const choisis: Record<string, string> = {};
+    for (const r of reglages) {
+      const v = credentials[r.key];
+      if (v) choisis[r.key] = v;
+    }
+
+    return c.json({ reglages, choisis });
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Lecture impossible" },
+      400,
+    );
+  }
+});
+
+/**
+ * Enregistre les réglages choisis.
+ *
+ * Fusion, jamais remplacement : les jetons et le secret client doivent
+ * survivre à l'écriture d'un identifiant de politique.
+ */
+accounts.post("/:id/reglages", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<Record<string, string>>()
+    .catch(() => ({}) as Record<string, string>);
+
+  // Liste blanche : seules les clés que les adaptateurs consultent réellement.
+  // Sans elle, cette route deviendrait une écriture libre dans le coffre
+  // d'identifiants — jetons compris.
+  const AUTORISEES = new Set([
+    "merchantLocationKey",
+    "fulfillmentPolicyId",
+    "paymentPolicyId",
+    "returnPolicyId",
+    "defaultCategoryId",
+    "shippingProfileId",
+    "readinessStateId",
+    "taxonomyId",
+  ]);
+
+  const patch: Record<string, string> = {};
+  for (const [k, v] of Object.entries(body)) {
+    const propre = String(v ?? "").trim();
+    if (AUTORISEES.has(k) && propre) patch[k] = propre;
+  }
+  if (Object.keys(patch).length === 0) {
+    return c.json({ error: "Aucun réglage reconnu" }, 400);
+  }
+
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const current = { ...(await repos.credentials.get(id)) };
+  if (Object.keys(current).length === 0) {
+    return c.json({ error: "Boutique inconnue" }, 404);
+  }
+  Object.assign(current, patch);
+  await repos.credentials.put(id, current);
+
+  return c.json({ ok: true, enregistres: Object.keys(patch) });
+});
