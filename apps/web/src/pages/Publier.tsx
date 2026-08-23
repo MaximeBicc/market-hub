@@ -352,6 +352,8 @@ function FicheDiffusion({
           ))}
       </div>
 
+      <Variantes produitId={produit.id} />
+
       {/* ---- Photos -------------------------------------------------- */}
       <h2 className="sec">Photos <span>{photos.length}</span></h2>
       <div className="card">
@@ -663,5 +665,124 @@ function ChercheCategorie({
         </>
       )}
     </div>
+  );
+}
+
+
+interface VarianteVue {
+  id: string;
+  sku: string | null;
+  optionValues: string[];
+  priceAmount: number;
+  priceCurrency: string;
+  status: string;
+  onHand: number | null;
+}
+
+/**
+ * Ce qui va réellement partir, coloris par coloris.
+ *
+ * L'écran n'affichait que le stock du PARENT — un nombre qui n'existe pas
+ * pour un produit à dix-sept déclinaisons. Impossible de vérifier avant de
+ * publier, et impossible de repérer un coloris sans stock : il serait parti
+ * à zéro, invendable, sans que rien ne le signale.
+ *
+ * Rien ne se saisit ici. Le stock vient des plateformes, et le modifier à la
+ * main dans cet écran créerait une seconde source de vérité — exactement ce
+ * que le rapprochement de stock existe pour éviter.
+ */
+function Variantes({ produitId }: { produitId: string }) {
+  const { data } = useQuery({
+    queryKey: ["variantes", produitId],
+    queryFn: () =>
+      api.get<{
+        axes: Array<{ name: string; values: string[] }>;
+        variantes: VarianteVue[];
+      }>(`/products/${produitId}/variantes`),
+  });
+
+  const variantes = (data?.variantes ?? []).filter((v) => v.status === "active");
+  if (variantes.length === 0) return null;
+
+  const sansStock = variantes.filter((v) => v.onHand === null);
+  const aZero = variantes.filter((v) => v.onHand === 0);
+  const total = variantes.reduce((n, v) => n + (v.onHand ?? 0), 0);
+
+  return (
+    <>
+      <h2 className="sec">
+        Déclinaisons <span>{variantes.length}</span>
+      </h2>
+
+      {variantes.length === 1 && variantes[0]?.optionValues.length === 0 ? (
+        <div className="card">
+          <p className="muted" style={{ margin: 0 }}>
+            Ce produit n'a pas de déclinaison : une seule annonce, un seul
+            stock.
+          </p>
+        </div>
+      ) : (
+        <div className="card">
+          <p className="muted" style={{ margin: "0 0 10px", lineHeight: 1.5 }}>
+            <b>Une seule annonce</b> sera créée, avec un menu de choix. Chaque
+            ligne part avec son propre stock — rien à saisir, il vient de vos
+            boutiques.
+          </p>
+
+          <div className="rows">
+            {variantes.map((v) => (
+              <div className="row" key={v.id}>
+                <div className="row__main">
+                  <div className="row__t">
+                    {v.optionValues.join(" · ") || "sans déclinaison"}
+                  </div>
+                  <div className="row__s">
+                    {v.sku ?? "sans SKU"} · {money(v.priceAmount, v.priceCurrency)}
+                  </div>
+                </div>
+                <div className="row__end">
+                  {v.onHand === null ? (
+                    <span className="pill pill--warn">stock inconnu</span>
+                  ) : (
+                    <span className={v.onHand === 0 ? "pill pill--mute" : "amount"}>
+                      {v.onHand === 0 ? "épuisé" : `${v.onHand} en stock`}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <p className="muted" style={{ marginTop: 10, lineHeight: 1.5 }}>
+            Total : <b>{total}</b> unité{total > 1 ? "s" : ""} réparties sur{" "}
+            {variantes.length} déclinaisons.
+          </p>
+
+          {(sansStock.length > 0 || aZero.length > 0) && (
+            <div className="banner banner--warn" style={{ marginTop: 4 }}>
+              <span className="banner__t">À vérifier avant de diffuser</span>
+              <span className="banner__b">
+                {sansStock.length > 0 && (
+                  <>
+                    {sansStock.length} déclinaison
+                    {sansStock.length > 1 ? "s" : ""} sans stock connu — elle
+                    {sansStock.length > 1 ? "s partiront" : " partira"} à zéro,
+                    donc invendable{sansStock.length > 1 ? "s" : ""}.{" "}
+                  </>
+                )}
+                {aZero.length > 0 && (
+                  <>
+                    {aZero.length} déclinaison{aZero.length > 1 ? "s" : ""} à
+                    zéro : l'annonce sera créée, mais ce
+                    {aZero.length > 1 ? "s coloris ne seront" : " coloris ne sera"}{" "}
+                    pas achetable.
+                  </>
+                )}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }

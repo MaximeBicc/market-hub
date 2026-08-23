@@ -1686,3 +1686,54 @@ api.patch("/products/:id/diffusion", async (c) => {
       : {}),
   });
 });
+
+/**
+ * Les variantes d'un produit, avec le stock de chacune.
+ *
+ * POURQUOI UNE ROUTE À PART. L'écran de diffusion montrait le stock du
+ * PARENT — un nombre qui n'existe pas vraiment pour un produit à dix-sept
+ * coloris. On ne pouvait donc pas vérifier ce qui allait réellement partir,
+ * ni repérer un coloris sans stock avant de le publier à zéro.
+ *
+ * La liste complète n'est pas jointe à `GET /products` : elle coûterait une
+ * requête par produit sur un écran qui les affiche tous.
+ */
+api.get("/products/:id/variantes", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+
+  const lignes = await db
+    .select({
+      id: variant.id,
+      sku: variant.sku,
+      optionValues: variant.optionValues,
+      optionKey: variant.optionKey,
+      priceAmount: variant.priceAmount,
+      priceCurrency: variant.priceCurrency,
+      status: variant.status,
+      position: variant.position,
+      onHand: inventory.onHand,
+      reserved: inventory.reserved,
+    })
+    .from(variant)
+    .leftJoin(inventory, eq(inventory.variantId, variant.id))
+    .where(eq(variant.productId, id))
+    .orderBy(variant.position);
+
+  const [p] = await db
+    .select({ options: product.options, title: product.title })
+    .from(product)
+    .where(eq(product.id, id))
+    .limit(1);
+
+  return c.json({
+    axes: JSON.parse(p?.options ?? "[]"),
+    variantes: lignes.map((v) => ({
+      ...v,
+      optionValues: JSON.parse(v.optionValues || "[]") as string[],
+      // `null` et `0` ne veulent pas dire la même chose : l'un est « on ne
+      // sait pas », l'autre « épuisé ». L'écran doit pouvoir les distinguer.
+      onHand: v.onHand,
+    })),
+  });
+});
