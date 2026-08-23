@@ -329,30 +329,26 @@ function FicheDiffusion({
           </select>
         </div>
 
-        <div className="field">
-          <label htmlFor="cat">Catégorie eBay (identifiant numérique)</label>
-          <input
-            id="cat"
-            className="input"
-            value={ebayCategoryId}
-            onChange={(e) => setEbayCategoryId(e.target.value)}
-            placeholder="ex. 179697"
-          />
-        </div>
-
-        <div className="field">
-          <label htmlFor="tax">Catégorie Etsy (taxonomy id)</label>
-          <input
-            id="tax"
-            className="input"
-            value={etsyTaxonomyId}
-            onChange={(e) => setEtsyTaxonomyId(e.target.value)}
-            placeholder="ex. 1027"
-          />
-          <span className="muted">
-            Sans valeur ici, celle réglée sur la boutique est utilisée.
-          </span>
-        </div>
+        {/* Les deux référentiels n'ont aucune correspondance : chercher se
+            fait deux fois, chez chacun. */}
+        {boutiques
+          .filter((b) => b.plateforme === "ebay" || b.plateforme === "etsy")
+          .map((b) => (
+            <ChercheCategorie
+              key={b.id}
+              accountId={b.id}
+              titre={
+                b.plateforme === "ebay" ? "Catégorie eBay" : "Catégorie Etsy"
+              }
+              defaut={produit.title}
+              valeur={b.plateforme === "ebay" ? ebayCategoryId : etsyTaxonomyId}
+              onChoix={(v) =>
+                b.plateforme === "ebay"
+                  ? setEbayCategoryId(v)
+                  : setEtsyTaxonomyId(v)
+              }
+            />
+          ))}
       </div>
 
       {/* ---- Photos -------------------------------------------------- */}
@@ -507,5 +503,130 @@ function FicheDiffusion({
         </>
       )}
     </>
+  );
+}
+
+
+interface Categorie {
+  id: string;
+  label: string;
+  path?: string[];
+}
+
+/**
+ * Trouver une catégorie sans connaître son numéro.
+ *
+ * eBay et Etsy imposent chacun un identifiant tiré de leur propre
+ * référentiel — des dizaines de milliers d'entrées d'un côté, six mille de
+ * l'autre, sans aucune correspondance entre les deux. Les saisir à la main
+ * revient à recopier un nombre trouvé sur un forum, dont une erreur ne se
+ * voit qu'au refus de publication.
+ *
+ * La recherche part sur VALIDATION, jamais à la frappe : Etsy n'a pas de
+ * route de recherche, chaque appel télécharge son arbre entier — quelques
+ * mégaoctets. Un appel par lettre tapée serait insoutenable.
+ */
+function ChercheCategorie({
+  accountId,
+  titre,
+  defaut,
+  valeur,
+  onChoix,
+}: {
+  accountId: string;
+  titre: string;
+  defaut: string;
+  valeur: string;
+  onChoix: (id: string) => void;
+}) {
+  const [texte, setTexte] = useState(defaut.slice(0, 60));
+  const [resultats, setResultats] = useState<Categorie[] | null>(null);
+
+  const chercher = useMutation({
+    mutationFn: () =>
+      api.get<{ categories: Categorie[]; message?: string }>(
+        `/engine/accounts/${accountId}/categories?q=${encodeURIComponent(texte)}`,
+      ),
+    onSuccess: (r) => {
+      setResultats(r.categories);
+      if (r.categories.length === 0) {
+        toast(r.message ?? "Aucune catégorie ne correspond — essayez d'autres mots");
+      }
+    },
+    onError: (e: unknown) =>
+      toast(e instanceof Error ? e.message : "Recherche impossible"),
+  });
+
+  return (
+    <div className="field">
+      <label>{titre}</label>
+
+      {valeur && (
+        <div className="row__s" style={{ marginBottom: 6 }}>
+          Choisie : <b>{valeur}</b>{" "}
+          <button
+            className="btn btn--small btn--ghost"
+            onClick={() => {
+              onChoix("");
+              setResultats(null);
+            }}
+          >
+            changer
+          </button>
+        </div>
+      )}
+
+      {!valeur && (
+        <>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              className="input"
+              value={texte}
+              onChange={(e) => setTexte(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  chercher.mutate();
+                }
+              }}
+              placeholder="ex. range câble"
+            />
+            <button
+              className="btn btn--small"
+              disabled={texte.trim().length < 2 || chercher.isPending}
+              onClick={() => chercher.mutate()}
+            >
+              {chercher.isPending ? "…" : "Chercher"}
+            </button>
+          </div>
+
+          {resultats && resultats.length > 0 && (
+            <div className="rows" style={{ marginTop: 8 }}>
+              {resultats.map((c) => (
+                <button
+                  className="row"
+                  key={c.id}
+                  style={{ textAlign: "left", width: "100%", cursor: "pointer" }}
+                  onClick={() => {
+                    onChoix(c.id);
+                    setResultats(null);
+                  }}
+                >
+                  <div className="row__main">
+                    <div className="row__t">{c.label}</div>
+                    {c.path && c.path.length > 0 && (
+                      <div className="row__s">{c.path.join(" › ")}</div>
+                    )}
+                  </div>
+                  <div className="row__end">
+                    <span className="muted">{c.id}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }

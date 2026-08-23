@@ -7,6 +7,7 @@ import type {
   OptionAxis,
   Product,
   RemoteListing,
+  CategorySuggestion,
   RemoteSetting,
   TargetResult,
   Variant,
@@ -46,6 +47,32 @@ import type {
  *
  * DÉBIT : 10 requêtes/seconde, 10 000/jour sur fenêtre glissante.
  */
+
+/**
+ * Un nœud de la taxonomie vendeur d'Etsy.
+ *
+ * `children` est RÉCURSIF : la réponse ne contient que la vingtaine de racines
+ * au premier niveau, tout le reste est imbriqué. `count` ne compte donc que
+ * les racines — s'en servir pour dimensionner quoi que ce soit induit en
+ * erreur.
+ */
+interface NoeudTaxonomie {
+  id?: number;
+  name?: string;
+  children?: NoeudTaxonomie[];
+}
+
+/** Minuscules, accents pliés : « Câble » et « cable » doivent se trouver. */
+function normaliserTexte(v: string): string {
+  return v
+    .normalize("NFD")
+    // Les diacritiques décomposés par NFD. Écrit en points de code plutôt
+    // qu'en caractères littéraux : ceux-ci sont invisibles dans un éditeur et
+    // un copier-coller les perd sans que rien ne le signale.
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
 
 const API = "https://api.etsy.com/v3/application";
 const TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token";
@@ -399,7 +426,7 @@ const PROPRIETE_LIBRE_1 = 513;
 const PROPRIETE_LIBRE_2 = 514;
 
 /** Les marques diacritiques, à retirer après décomposition NFD. */
-const DIACRITIQUES = /[̀-ͯ]/g;
+const DIACRITIQUES = /[\u0300-\u036f]/g;
 
 /** Compare des libellés sans se faire piéger par la casse ou les accents. */
 function plier(v: string): string {
@@ -1565,6 +1592,66 @@ export class EtsyAdapter implements MarketplaceAdapter {
         options: preparation,
       },
     ];
+  }
+
+  /**
+   * Cherche une catégorie Etsy depuis du texte libre.
+   *
+   * ETSY N'A AUCUNE RECHERCHE. Sa seule route de taxonomie renvoie l'ARBRE
+   * ENTIER — environ six mille catégories, deux à trois mégaoctets — sans
+   * pagination ni filtre. Le tri se fait donc ici.
+   *
+   * Conséquence pratique : chaque recherche coûte le téléchargement complet.
+   * C'est pour cela que l'écran cherche sur validation, jamais à la frappe :
+   * un arbre de trois mégaoctets par lettre tapée serait insoutenable.
+   *
+   * Seules les FEUILLES sont proposées. Etsy refuse une catégorie
+   * intermédiaire, et en proposer une donnerait un refus incompréhensible au
+   * moment de publier.
+   */
+  async searchCategories(
+    ctx: MarketplaceContext,
+    query: string,
+  ): Promise<CategorySuggestion[]> {
+    const racines = await this.call<{ results?: NoeudTaxonomie[] }>(
+      ctx,
+      "/seller-taxonomy/nodes",
+    );
+
+    const mots = normaliserTexte(query)
+      .split(/\s+/)
+      .filter((m) => m.length > 1);
+    if (mots.length === 0) return [];
+
+    const trouves: CategorySuggestion[] = [];
+
+    const parcourir = (noeud: NoeudTaxonomie, chemin: string[]) => {
+      const ici = [...chemin, noeud.name ?? ""];
+      const enfants = noeud.children ?? [];
+
+      if (enfants.length === 0 && noeud.id != null) {
+        // On cherche dans le CHEMIN COMPLET, pas seulement dans le nom de la
+        // feuille : « câble » vit sous « Fournitures », et une feuille nommée
+        // « Organisateurs » seule serait introuvable.
+        const cible = normaliserTexte(ici.join(" "));
+        if (mots.every((m) => cible.includes(m))) {
+          trouves.push({
+            id: String(noeud.id),
+            label: noeud.name ?? String(noeud.id),
+            path: ici.slice(0, -1),
+          });
+        }
+      }
+      for (const e of enfants) parcourir(e, ici);
+    };
+
+    for (const r of racines.results ?? []) parcourir(r, []);
+
+    // Les plus courtes d'abord : un chemin court est une catégorie plus
+    // générale, donc plus souvent la bonne quand on hésite.
+    return trouves
+      .sort((a, b) => (a.path?.length ?? 0) - (b.path?.length ?? 0))
+      .slice(0, 12);
   }
 
   /* ---------------------------------------------------------------- */

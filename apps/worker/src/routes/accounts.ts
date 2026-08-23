@@ -1575,3 +1575,55 @@ accounts.post("/:id/ebay/adresse", async (c) => {
   await repos.credentials.put(id, credentials);
   return c.json({ ok: true, merchantLocationKey: cle });
 });
+
+/**
+ * Cherche une catégorie chez la plateforme, depuis du texte libre.
+ *
+ * Remplace la saisie d'un identifiant numérique qu'il faudrait sinon aller
+ * déterrer dans un référentiel de plusieurs dizaines de milliers d'entrées —
+ * et dont une faute de frappe ne se voit qu'au refus de publication.
+ *
+ * Lecture pure : rien n'est écrit, ni chez la plateforme ni en base.
+ */
+accounts.get("/:id/categories", async (c) => {
+  const id = c.req.param("id");
+  const q = (c.req.query("q") ?? "").trim();
+  if (q.length < 2) {
+    return c.json({ error: "Tapez au moins deux caractères." }, 400);
+  }
+
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Boutique inconnue" }, 404);
+
+  const mod = buildEngine(c.env, { used: 0 });
+  const adapter = mod.registry.get(account.marketplace);
+  if (!adapter.searchCategories) {
+    return c.json({
+      categories: [],
+      message: `${account.marketplace} n'impose pas de catégorie.`,
+    });
+  }
+
+  const credentials = { ...(await repos.credentials.get(id)) };
+  try {
+    const categories = await adapter.searchCategories(
+      {
+        account,
+        credentials,
+        http: mod.httpFor(account),
+        saveCredentials: async (patch) => {
+          Object.assign(credentials, patch);
+          await repos.credentials.put(id, credentials);
+        },
+      },
+      q,
+    );
+    return c.json({ categories });
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Recherche impossible" },
+      400,
+    );
+  }
+});

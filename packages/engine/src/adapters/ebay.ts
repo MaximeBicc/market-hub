@@ -7,6 +7,7 @@ import type {
   OptionAxis,
   Product,
   RemoteListing,
+  CategorySuggestion,
   RemoteSetting,
   TargetResult,
   Variant,
@@ -1200,6 +1201,132 @@ export class EbayAdapter implements MarketplaceAdapter {
       status: "failed",
       message,
     };
+  }
+
+  /**
+   * Un JETON APPLICATIF, distinct de celui du vendeur.
+   *
+   * L'API de taxonomie n'est pas une API vendeur : elle ne lit rien du compte,
+   * elle interroge le référentiel public des catégories. eBay l'a donc placée
+   * derrière une portée applicative — `api_scope` — qu'un jeton obtenu par
+   * rafraîchissement ne porte PAS. Réutiliser le jeton du vendeur donne un
+   * refus qui ressemble à une session expirée, et envoie chercher au mauvais
+   * endroit.
+   *
+   * Il s'obtient par `client_credentials`, sans consentement, et vit deux
+   * heures. Mémorisé comme les autres pour ne pas le redemander à chaque
+   * frappe.
+   */
+  private async jetonApplicatif(ctx: MarketplaceContext): Promise<string> {
+    const c = ctx.credentials ?? {};
+    const now = Math.floor(Date.now() / 1000);
+    const cache = c["appToken"];
+    if (cache && Number(c["appTokenExpiresAt"] ?? 0) > now + 120) return cache;
+
+    const clientId = c["clientId"] ?? "";
+    const clientSecret = c["clientSecret"] ?? "";
+    if (!clientId || !clientSecret) {
+      throw new Error("eBay : identifiants applicatifs manquants");
+    }
+
+    const res = await fetch(`${hosts(c["environment"]).api}/identity/v1/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${basic(clientId, clientSecret)}`,
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        scope: "https://api.ebay.com/oauth/api_scope",
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`eBay a refusé le jeton applicatif (${res.status})`);
+    }
+    const j = (await res.json()) as { access_token?: string; expires_in?: number };
+    if (!j.access_token) throw new Error("eBay : jeton applicatif absent");
+
+    await ctx.saveCredentials?.({
+      appToken: j.access_token,
+      appTokenExpiresAt: String(now + (j.expires_in ?? 7200)),
+    });
+    return j.access_token;
+  }
+
+  /**
+   * Cherche une catégorie eBay depuis du texte libre.
+   *
+   * eBay renvoie ses suggestions triées par pertinence, et toutes sont des
+   * catégories FEUILLES — c'est ce qu'exige la publication, une catégorie
+   * intermédiaire est refusée. Les ancêtres servent à lever le doute entre
+   * deux libellés identiques dans des rayons différents.
+   *
+   * Deux limites documentées : la réponse est un 204 SANS CORPS quand rien ne
+   * correspond, et l'appel ne fonctionne PAS en bac à sable — il y répond 200
+   * avec des libellés au hasard, ce qui est pire qu'une erreur.
+   */
+  async searchCategories(
+    ctx: MarketplaceContext,
+    query: string,
+  ): Promise<CategorySuggestion[]> {
+    const c = ctx.credentials ?? {};
+    if (c["environment"] === "sandbox") {
+      throw new Error(
+        "La recherche de catégorie ne fonctionne pas dans le bac à sable eBay : il répond au hasard. Saisissez l'identifiant à la main, ou utilisez le compte de production.",
+      );
+    }
+
+    const jeton = await this.jetonApplicatif(ctx);
+    const api = hosts(c["environment"]).api;
+    const marketplaceId = c["marketplaceId"] ?? "EBAY_FR";
+    const http = ctx.http ?? fetch;
+
+    const appel = async <T>(chemin: string): Promise<T | null> => {
+      const res = await http(`${api}${chemin}`, {
+        headers: {
+          Authorization: `Bearer ${jeton}`,
+          "Accept-Language": "fr-FR",
+        },
+      });
+      // 204 : rien ne correspond. Ce n'est pas une erreur.
+      if (res.status === 204) return null;
+      return (await res.json()) as T;
+    };
+
+    // L'arbre de la place de marché. Mémorisé : il ne change que rarement, et
+    // le redemander à chaque recherche coûterait un appel pour rien.
+    let tree = c["categoryTreeId"];
+    if (!tree) {
+      const d = await appel<{ categoryTreeId?: string }>(
+        `/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${marketplaceId}`,
+      );
+      tree = d?.categoryTreeId;
+      if (!tree) throw new Error("eBay : arbre de catégories introuvable");
+      await ctx.saveCredentials?.({ categoryTreeId: tree });
+    }
+
+    const d = await appel<{
+      categorySuggestions?: Array<{
+        category?: { categoryId?: string; categoryName?: string };
+        categoryTreeNodeAncestors?: Array<{ categoryName?: string }>;
+      }>;
+    }>(
+      `/commerce/taxonomy/v1/category_tree/${tree}/get_category_suggestions?q=${encodeURIComponent(query)}`,
+    );
+
+    return (d?.categorySuggestions ?? [])
+      .filter((x) => x.category?.categoryId)
+      .slice(0, 12)
+      .map((x) => ({
+        id: String(x.category!.categoryId),
+        label: x.category!.categoryName ?? String(x.category!.categoryId),
+        // Les ancêtres arrivent du plus proche au plus lointain : on retourne
+        // pour lire « Maison > Rangement > Câbles », comme chez eBay.
+        path: (x.categoryTreeNodeAncestors ?? [])
+          .map((a) => a.categoryName ?? "")
+          .filter(Boolean)
+          .reverse(),
+      }));
   }
 
   /**

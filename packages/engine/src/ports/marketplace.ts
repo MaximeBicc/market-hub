@@ -4,6 +4,7 @@ import type {
   FulfillmentInput,
   Listing,
   RemoteListing,
+  CategorySuggestion,
   RemoteSetting,
   MarketplaceAccount,
   MarketplaceId,
@@ -119,6 +120,20 @@ export interface MarketplaceAdapter {
    * numériques : le vendeur choisit « Colissimo 48 h » dans une liste.
    */
   listSettings?(ctx: MarketplaceContext): Promise<RemoteSetting[]>;
+
+  /**
+   * Cherche une catégorie à partir d'un texte libre.
+   *
+   * Optionnelle : Shopify n'a pas de catégorie imposée. Là où elle existe,
+   * elle remplace la saisie d'un identifiant numérique à rallonge, qu'il
+   * faudrait sinon aller déterrer dans un référentiel de plusieurs dizaines
+   * de milliers d'entrées — et dont une faute de frappe ne se voit qu'au
+   * refus de publication, des jours plus tard.
+   */
+  searchCategories?(
+    ctx: MarketplaceContext,
+    query: string,
+  ): Promise<CategorySuggestion[]>;
 
   /**
    * Lit une page du catalogue existant chez la plateforme.

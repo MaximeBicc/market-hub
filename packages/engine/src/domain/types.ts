@@ -386,6 +386,21 @@ export interface RemoteSetting {
 }
 
 /**
+ * Une catégorie proposée par la plateforme, pour un texte donné.
+ *
+ * Les deux référentiels n'ont rien en commun — eBay a plusieurs dizaines de
+ * milliers de catégories, Etsy environ six mille, et aucune correspondance
+ * officielle n'existe entre les deux. Chercher « range câble » doit donc être
+ * fait DEUX fois, chez chacun, et c'est ce que ce type normalise.
+ */
+export interface CategorySuggestion {
+  id: string;
+  label: string;
+  /** Le chemin complet, du plus général au plus précis. Sert à lever le doute. */
+  path?: string[] | undefined;
+}
+
+/**
  * Une annonce telle que la plateforme la décrit.
  *
  * Distincte de `Listing` : celui-ci est notre représentation interne, liée à un
