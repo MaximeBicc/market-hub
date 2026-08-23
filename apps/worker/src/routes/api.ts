@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { and, desc, eq, gte, gt, sql, lte } from "drizzle-orm";
+import { and, desc, eq, gte, gt, sql, lte, inArray } from "drizzle-orm";
 import type { QueueTask } from "@hub/core";
 import {
   consumable,
@@ -1879,6 +1879,40 @@ api.put("/products/:id/declinaisons", async (c) => {
   );
   if (new Set(cles).size !== cles.length) {
     return c.json({ error: "Deux déclinaisons portent le même nom" }, 400);
+  }
+
+  /*
+   * LES SKU AUSSI DOIVENT ÊTRE UNIQUES.
+   *
+   * `variant.sku` porte un index unique en base. Deux lignes au même SKU
+   * feraient échouer l'écriture à mi-parcours : les premières déclinaisons
+   * enregistrées, les suivantes non, et une erreur 500 sans nom pour
+   * l'expliquer. Le dire avant d'écrire coûte une boucle.
+   *
+   * Le SKU du produit compte parmi les pris : la variante par défaut le porte
+   * déjà, et l'archiver ne le libère pas — l'index ignore le statut.
+   */
+  const skus = lignes.map((l) => l.sku).filter((v): v is string => Boolean(v));
+  const doublon = skus.find((v, i) => skus.indexOf(v) !== i);
+  if (doublon) {
+    return c.json(
+      { error: `Deux déclinaisons portent le SKU « ${doublon} »` },
+      400,
+    );
+  }
+
+  const prisAilleurs = skus.length
+    ? await db
+        .select({ sku: variant.sku, productId: variant.productId })
+        .from(variant)
+        .where(inArray(variant.sku, skus))
+    : [];
+  const vole = prisAilleurs.find((v) => v.productId !== id);
+  if (vole) {
+    return c.json(
+      { error: `Le SKU « ${vole.sku} » appartient déjà à un autre produit` },
+      409,
+    );
   }
 
   const now = Math.floor(Date.now() / 1000);
