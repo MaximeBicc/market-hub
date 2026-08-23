@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { and, eq, sql } from "drizzle-orm";
 import type { SyncTask } from "@hub/core";
 import { reconcileStock } from "@hub/engine";
+import { recalculerStockProduit } from "../lib/stock-produit.js";
 import {
   eventLog,
   listing,
@@ -197,6 +198,8 @@ async function syncCatalogue(
   let pages = 0;
   /** Écarts résorbés en recopiant la plateforme vers le stock central. */
   const adoptions: string[] = [];
+  /** Les produits dont une variante a bougé, à résumer en fin de passage. */
+  const touches = new Set<string>();
   /** Écarts à résorber dans l'autre sens : le central a bougé, pas la plateforme. */
   const aPousser: Array<{
     productId: string;
@@ -382,6 +385,8 @@ async function syncCatalogue(
         .limit(1);
 
       let variantId = varianteExistante[0]?.id ?? null;
+      touches.add(productId);
+
       if (!variantId) {
         variantId = randomId();
         await db
@@ -551,6 +556,17 @@ async function syncCatalogue(
 
     cursor = page.cursor;
     if (!cursor) break;
+  }
+
+  /*
+   * Le résumé de chaque produit touché.
+   *
+   * Sans cette passe, `product.stock` reste sur la valeur écrite à la
+   * création — zéro pour un produit né d'un groupe — et tous les écrans qui
+   * l'affichent mentent, alors que le stock par variante est juste.
+   */
+  for (const productId of touches) {
+    await recalculerStockProduit(db, productId);
   }
 
   if (adoptions.length > 0) {

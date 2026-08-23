@@ -41,6 +41,8 @@ export function Inventory() {
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<"products" | "consumables" | "channels">("products");
   const [search, setSearch] = useState("");
+  /** Produit dont les déclinaisons sont dépliées, le cas échéant. */
+  const [deplie, setDeplie] = useState<string | null>(null);
   const [onlyLowStock, setOnlyLowStock] = useState(false);
 
   const [selectedProduct, setSelectedProduct] = useState<ProductItem | null | "new">(null);
@@ -320,8 +322,8 @@ export function Inventory() {
                 const defaultConsumable = consumables.find((c) => c.id === p.defaultConsumableId);
 
                 return (
+                  <div key={p.id}>
                   <div
-                    key={p.id}
                     className={`product-inventory-card ${
                       isOut ? "row--out" : isLow ? "row--low" : ""
                     }`}
@@ -336,6 +338,24 @@ export function Inventory() {
                     {/* Colonne 2 : Infos principales */}
                     <div className="product-card-main">
                       <div className="product-card-title-row">
+                        {/* La flèche n'apparaît que s'il y a des déclinaisons.
+                            Un chevron devant un produit qui n'en a pas serait
+                            une promesse vide. */}
+                        {(p.variantCount ?? 0) > 1 && (
+                          <button
+                            type="button"
+                            className="chevron-variantes"
+                            aria-expanded={deplie === p.id}
+                            title={
+                              deplie === p.id
+                                ? "Masquer les déclinaisons"
+                                : `Voir les ${p.variantCount} déclinaisons`
+                            }
+                            onClick={() => setDeplie(deplie === p.id ? null : p.id)}
+                          >
+                            <Icon name={deplie === p.id ? "chevronLeft" : "chevronRight"} />
+                          </button>
+                        )}
                         <span className="product-card-title">{p.title}</span>
                         <code className="product-card-sku">{p.sku}</code>
                         {isOut && <span className="pill pill--stop">Rupture</span>}
@@ -377,6 +397,11 @@ export function Inventory() {
                             </span>
                           );
                         })()}
+                        {(p.variantCount ?? 0) > 1 && (
+                          <span className="meta-tag">
+                            🎚️ <b>{p.variantCount}</b> déclinaisons
+                          </span>
+                        )}
                         <span className="meta-tag">
                           💰 Vente : <b>{money(p.priceAmount, p.priceCurrency)}</b>
                           {p.costPrice && (
@@ -455,6 +480,9 @@ export function Inventory() {
                         <Icon name="box" /> Tester commande
                       </button>
                     </div>
+                  </div>
+
+                  {deplie === p.id && <DeclinaisonsProduit produitId={p.id} />}
                   </div>
                 );
               })}
@@ -729,5 +757,74 @@ export function Inventory() {
         />
       )}
     </>
+  );
+}
+
+
+interface DeclinaisonLigne {
+  id: string;
+  sku: string | null;
+  optionValues: string[];
+  priceAmount: number;
+  priceCurrency: string;
+  status: string;
+  onHand: number | null;
+  reserved: number | null;
+}
+
+/**
+ * Les déclinaisons d'un produit, dépliées sous sa ligne.
+ *
+ * La liste du stock affichait un seul nombre par produit — la somme. Pour un
+ * support téléphone en dix-sept coloris, ce nombre ne dit pas lequel est
+ * épuisé : on voit « 95 en stock » et on découvre à la vente que le violet
+ * était à zéro depuis trois semaines.
+ *
+ * Chargées à l'ouverture seulement : les précharger pour tous les produits de
+ * la liste coûterait une requête par ligne sur un écran qui les montre tous.
+ */
+function DeclinaisonsProduit({ produitId }: { produitId: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["variantes", produitId],
+    queryFn: () =>
+      api.get<{ variantes: DeclinaisonLigne[] }>(
+        `/products/${produitId}/variantes`,
+      ),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="declinaisons">
+        <span className="muted">Lecture des déclinaisons…</span>
+      </div>
+    );
+  }
+
+  const lignes = (data?.variantes ?? []).filter((v) => v.status === "active");
+  if (lignes.length === 0) return null;
+
+  return (
+    <div className="declinaisons">
+      {lignes.map((v) => (
+        <div className="declinaisons__ligne" key={v.id}>
+          <span className="declinaisons__nom">
+            {v.optionValues.join(" · ") || "sans déclinaison"}
+          </span>
+          <span className="muted">{v.sku ?? "sans SKU"}</span>
+          <span className="muted">{money(v.priceAmount, v.priceCurrency)}</span>
+          <span
+            className={
+              v.onHand === null || v.onHand === 0 ? "pill pill--stop" : "amount"
+            }
+          >
+            {v.onHand === null
+              ? "inconnu"
+              : v.onHand === 0
+                ? "épuisé"
+                : `${v.onHand}`}
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }

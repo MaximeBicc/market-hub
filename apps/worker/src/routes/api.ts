@@ -19,6 +19,7 @@ import {
 import type { Env } from "../env.js";
 import { randomId } from "../lib/crypto.js";
 import { varianteUnique } from "../lib/variantes.js";
+import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
 import { sendPushToUser } from "../lib/push.js";
 import { buildEngine } from "../engine/module.js";
@@ -1790,5 +1791,10 @@ api.patch("/products/:id/stock-variantes", async (c) => {
   if (faits.length === 0) {
     return c.json({ error: "Aucun stock valide à enregistrer" }, 400);
   }
+
+  // Le résumé au niveau du produit suit, sinon les écrans qui l'affichent
+  // continueraient de montrer l'ancienne valeur.
+  await recalculerStockProduit(db, id);
+
   return c.json({ ok: true, enregistres: faits.length, refuses: refuses.length });
 });

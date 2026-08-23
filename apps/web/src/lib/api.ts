@@ -151,6 +151,8 @@ export interface ProductItem {
   priceAmount: number; // centimes
   priceCurrency: string;
   stock: number;
+  /** Nombre de déclinaisons actives — 1 pour un produit sans coloris. */
+  variantCount?: number;
   minAlert: number;
   location?: string | null;
   weightGrams?: number | null;

@@ -2132,3 +2132,43 @@ h2.sec:first-child {
   text-align: right;
   padding: 4px 8px;
 }
+
+/* La flèche qui déplie les déclinaisons d'un produit. Discrète : elle ne doit
+   pas concurrencer le titre, seulement signaler qu'il y a plus à voir. */
+.chevron-variantes {
+  background: none;
+  border: 0;
+  padding: 0 2px 0 0;
+  cursor: pointer;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+}
+.chevron-variantes svg {
+  width: 15px;
+  height: 15px;
+}
+.chevron-variantes:hover {
+  color: var(--accent);
+}
+
+/* Les déclinaisons dépliées, en retrait sous la ligne du produit. */
+.declinaisons {
+  padding: 6px 14px 10px 52px;
+  background: var(--surface-2, transparent);
+}
+.declinaisons__ligne {
+  display: grid;
+  grid-template-columns: 1fr auto auto 64px;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: 13px;
+}
+.declinaisons__ligne:last-child {
+  border-bottom: 0;
+}
+.declinaisons__nom {
+  font-weight: 500;
+}
