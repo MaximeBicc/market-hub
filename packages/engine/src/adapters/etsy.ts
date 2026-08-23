@@ -1497,20 +1497,17 @@ export class EtsyAdapter implements MarketplaceAdapter {
         results?: Array<{
           shipping_profile_id?: number;
           title?: string;
-          min_processing_days?: number;
-          max_processing_days?: number;
           origin_country_iso?: string;
+          origin_postal_code?: string;
         }>;
       }>(`/shops/${boutique}/shipping-profiles`, (d) =>
         (d.results ?? []).map((p) => ({
           id: String(p.shipping_profile_id),
-          label: p.title ?? String(p.shipping_profile_id),
-          detail: [
-            p.origin_country_iso,
-            p.min_processing_days != null
-              ? `${p.min_processing_days}–${p.max_processing_days} j de préparation`
-              : undefined,
-          ]
+          label: p.title ?? `Profil ${p.shipping_profile_id}`,
+          // Un profil de livraison ne porte PAS de délai de préparation —
+          // celui-ci vit dans le profil de traitement, séparé. On montre donc
+          // l'origine de l'envoi, qui est ce qui distingue deux profils.
+          detail: [p.origin_country_iso, p.origin_postal_code]
             .filter(Boolean)
             .join(" · "),
         })),
@@ -1518,16 +1515,28 @@ export class EtsyAdapter implements MarketplaceAdapter {
       lire<{
         results?: Array<{
           readiness_state_id?: number;
-          min_processing_time?: number;
-          max_processing_time?: number;
+          min_processing_days?: number;
+          max_processing_days?: number;
+          /** Libellé déjà traduit par Etsy : « Réalisé sur commande (1-2 jours) ». */
+          processing_days_display_label?: string;
         }>;
       }>(`/shops/${boutique}/readiness-state-definitions`, (d) =>
         (d.results ?? []).map((p) => ({
           id: String(p.readiness_state_id),
+          /*
+           * ETSY FOURNIT DÉJÀ LE LIBELLÉ, TRADUIT.
+           *
+           * Cette ligne cherchait `min_processing_time`, qui n'existe pas —
+           * le champ s'appelle `min_processing_days`. Le repli affichait donc
+           * l'identifiant brut, « 1510416135313 », dans un menu censé aider à
+           * choisir. Un identifiant à quatorze chiffres dans une liste de
+           * choix, c'est un formulaire qu'on remplit au hasard.
+           */
           label:
-            p.min_processing_time != null
-              ? `${p.min_processing_time} à ${p.max_processing_time} jours`
-              : String(p.readiness_state_id),
+            p.processing_days_display_label ??
+            (p.min_processing_days != null
+              ? `${p.min_processing_days} à ${p.max_processing_days} jours de préparation`
+              : `Profil ${p.readiness_state_id}`),
         })),
       ),
     ]);
