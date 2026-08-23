@@ -1,4 +1,4 @@
-import type { InventoryItem, ProductId } from "../domain/types.js";
+import type { InventoryItem, VariantId } from "../domain/types.js";
 import type { InventoryRepository } from "../ports/repositories.js";
 
 /**
@@ -13,10 +13,10 @@ import type { InventoryRepository } from "../ports/repositories.js";
 export class InventoryService {
   constructor(private readonly repo: InventoryRepository) {}
 
-  async ensure(productId: ProductId, onHand: number): Promise<InventoryItem> {
-    const existing = await this.repo.get(productId);
+  async ensure(variantId: VariantId, onHand: number): Promise<InventoryItem> {
+    const existing = await this.repo.get(variantId);
     if (existing) return existing;
-    const item: InventoryItem = { productId, onHand, reserved: 0, version: 1 };
+    const item: InventoryItem = { variantId, onHand, reserved: 0, version: 1 };
     await this.repo.put(item);
     return item;
   }
@@ -27,12 +27,12 @@ export class InventoryService {
    * d'un problème qu'il vaut mieux faire remonter que masquer par une boucle.
    */
   async applyDelta(
-    productId: ProductId,
+    variantId: VariantId,
     deltaOnHand: number,
   ): Promise<InventoryItem> {
     for (let attempt = 0; attempt < 8; attempt++) {
-      const cur = await this.repo.get(productId);
-      if (!cur) throw new Error(`Aucun stock pour le produit ${productId}`);
+      const cur = await this.repo.get(variantId);
+      if (!cur) throw new Error(`Aucun stock pour le produit ${variantId}`);
       const next: InventoryItem = {
         ...cur,
         onHand: cur.onHand + deltaOnHand,
@@ -40,7 +40,7 @@ export class InventoryService {
       };
       if (await this.repo.compareAndSet(next, cur.version)) return next;
     }
-    throw new Error(`Contention persistante sur le stock de ${productId}`);
+    throw new Error(`Contention persistante sur le stock de ${variantId}`);
   }
 
   /**
@@ -54,10 +54,10 @@ export class InventoryService {
    * Le verrou optimiste est conservé : entre la vérification et l'écriture,
    * une vente peut arriver, et c'est elle qui doit gagner.
    */
-  async adopt(productId: ProductId, onHand: number): Promise<InventoryItem> {
+  async adopt(variantId: VariantId, onHand: number): Promise<InventoryItem> {
     for (let attempt = 0; attempt < 8; attempt++) {
-      const cur = await this.repo.get(productId);
-      if (!cur) throw new Error(`Aucun stock pour le produit ${productId}`);
+      const cur = await this.repo.get(variantId);
+      if (!cur) throw new Error(`Aucun stock pour le produit ${variantId}`);
       if (cur.onHand === onHand) return cur;
       const next: InventoryItem = {
         ...cur,
@@ -66,14 +66,14 @@ export class InventoryService {
       };
       if (await this.repo.compareAndSet(next, cur.version)) return next;
     }
-    throw new Error(`Contention persistante sur le stock de ${productId}`);
+    throw new Error(`Contention persistante sur le stock de ${variantId}`);
   }
 
   /** Réserve une quantité vendue mais pas encore expédiée. */
-  async reserve(productId: ProductId, quantity: number): Promise<InventoryItem> {
+  async reserve(variantId: VariantId, quantity: number): Promise<InventoryItem> {
     for (let attempt = 0; attempt < 8; attempt++) {
-      const cur = await this.repo.get(productId);
-      if (!cur) throw new Error(`Aucun stock pour le produit ${productId}`);
+      const cur = await this.repo.get(variantId);
+      if (!cur) throw new Error(`Aucun stock pour le produit ${variantId}`);
       const next: InventoryItem = {
         ...cur,
         reserved: Math.max(0, cur.reserved + quantity),
@@ -81,7 +81,7 @@ export class InventoryService {
       };
       if (await this.repo.compareAndSet(next, cur.version)) return next;
     }
-    throw new Error(`Contention persistante sur le stock de ${productId}`);
+    throw new Error(`Contention persistante sur le stock de ${variantId}`);
   }
 
   /** Ce qui est réellement vendable : le physique moins ce qui est déjà vendu. */

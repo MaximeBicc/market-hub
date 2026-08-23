@@ -25,6 +25,7 @@ import {
   orderLine,
   product,
   shop,
+  variant,
 } from "../db/schema.js";
 import { randomId } from "../lib/crypto.js";
 
@@ -292,11 +293,30 @@ export class D1Catalogue implements Catalogue {
       .limit(1);
     if (!row) return undefined;
 
-    const [stock] = await this.db
-      .select()
+    /*
+     * Le stock est désormais compté PAR VARIANTE : un produit à dix-sept
+     * coloris a dix-sept lignes. On somme ici, parce que le panel raisonne au
+     * niveau du produit — mais la somme est une VUE, jamais une source : elle
+     * ne se réécrit pas.
+     */
+    const lignes = await this.db
+      .select({
+        onHand: inventory.onHand,
+        reserved: inventory.reserved,
+        version: inventory.version,
+      })
       .from(inventory)
-      .where(eq(inventory.productId, productId))
-      .limit(1);
+      .innerJoin(variant, eq(variant.id, inventory.variantId))
+      .where(eq(variant.productId, productId));
+
+    const stock = lignes.length
+      ? {
+          onHand: lignes.reduce((n, l) => n + l.onHand, 0),
+          reserved: lignes.reduce((n, l) => n + l.reserved, 0),
+          version: Math.max(...lignes.map((l) => l.version)),
+          updatedAt: 0,
+        }
+      : undefined;
 
     return this.withListings(row, stock);
   }
@@ -351,8 +371,32 @@ export class D1Catalogue implements Catalogue {
 
   async portfolio(): Promise<ProductFacts[]> {
     const rows = await this.db.select().from(product).limit(500);
-    const stocks = await this.db.select().from(inventory);
-    const byProduct = new Map(stocks.map((s) => [s.productId, s]));
+    // Somme par produit : voir la note ci-dessus, le stock vit sur la variante.
+    const stocks = await this.db
+      .select({
+        productId: variant.productId,
+        onHand: inventory.onHand,
+        reserved: inventory.reserved,
+        version: inventory.version,
+      })
+      .from(inventory)
+      .innerJoin(variant, eq(variant.id, inventory.variantId));
+
+    const byProduct = new Map<string, { onHand: number; reserved: number; version: number; updatedAt: number }>();
+    for (const s of stocks) {
+      const cur = byProduct.get(s.productId) ?? {
+        onHand: 0,
+        reserved: 0,
+        version: 0,
+        updatedAt: 0,
+      };
+      byProduct.set(s.productId, {
+        onHand: cur.onHand + s.onHand,
+        reserved: cur.reserved + s.reserved,
+        version: Math.max(cur.version, s.version),
+        updatedAt: 0,
+      });
+    }
 
     return Promise.all(rows.map((r) => this.withListings(r, byProduct.get(r.id))));
   }
@@ -360,7 +404,15 @@ export class D1Catalogue implements Catalogue {
   /** Assemble un produit avec ses annonces et son stock vivant. */
   private async withListings(
     row: typeof product.$inferSelect,
-    stock: typeof inventory.$inferSelect | undefined,
+    /*
+     * Une VUE agrégée, plus une ligne de table : depuis que le stock est
+     * compté par variante, un produit à dix-sept coloris a dix-sept lignes.
+     * Le panel raisonne au niveau du produit, donc on lui présente la somme —
+     * en lecture seule, elle ne se réécrit pas.
+     */
+    stock:
+      | { onHand: number; reserved: number; version: number; updatedAt: number }
+      | undefined,
   ): Promise<ProductFacts> {
     const listings = await this.db
       .select({

@@ -14,9 +14,11 @@ import {
   pushSubscription,
   shop,
   syncJob,
+  variant,
 } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { randomId } from "../lib/crypto.js";
+import { varianteUnique } from "../lib/variantes.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
 import { sendPushToUser } from "../lib/push.js";
 import { buildEngine } from "../engine/module.js";
@@ -447,7 +449,10 @@ api.post("/orders/:id/fulfill", async (c) => {
             .where(eq(product.id, prod.id));
 
           // Décrémente le stock central `inventory`
-          const [inv] = await db.select().from(inventory).where(eq(inventory.productId, prod.id)).limit(1);
+          const varId = await varianteUnique(db, prod.id);
+          const [inv] = varId
+            ? await db.select().from(inventory).where(eq(inventory.variantId, varId)).limit(1)
+            : [];
           if (inv) {
             await db
               .update(inventory)
@@ -457,7 +462,7 @@ api.post("/orders/:id/fulfill", async (c) => {
                 version: inv.version + 1,
                 updatedAt: now,
               })
-              .where(eq(inventory.productId, prod.id));
+              .where(eq(inventory.variantId, varId!));
           }
         }
 
@@ -510,7 +515,7 @@ api.post("/orders/:id/fulfill", async (c) => {
           onHand: sql`max(0, ${inventory.onHand} - 1)`,
           updatedAt: now,
         })
-        .where(eq(inventory.productId, giftProd.id));
+        .where(eq(inventory.variantId, (await varianteUnique(db, giftProd.id))!));
 
       if (giftProd.sku) {
         await db
@@ -883,10 +888,29 @@ api.post("/orders/sample", async (c) => {
 
     for (const p of defaults) {
       await db.insert(product).values(p).onConflictDoNothing();
+      // Tout produit a AU MOINS une variante : c'est elle qui porte le stock.
+      // Un produit sans déclinaison en a une seule, à `optionKey` vide.
+      const varId = `var_${p.id}`;
+      await db
+        .insert(variant)
+        .values({
+          id: varId,
+          productId: p.id,
+          sku: p.sku,
+          optionKey: "",
+          optionValues: "[]",
+          priceAmount: p.priceAmount,
+          priceCurrency: p.priceCurrency ?? "EUR",
+          position: 0,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoNothing();
       await db
         .insert(inventory)
         .values({
-          productId: p.id,
+          variantId: varId,
           onHand: p.stock,
           reserved: 0,
           version: 1,
@@ -1261,18 +1285,60 @@ api.post("/products", async (c) => {
     });
   }
 
+  /*
+   * LA VARIANTE PAR DÉFAUT.
+   *
+   * Un produit saisi à la main n'a pas de déclinaison — mais il a quand même
+   * une variante, parce que c'est elle qui porte le stock. Sans ce niveau,
+   * « stock 12 » n'aurait nulle part où aller.
+   *
+   * `optionKey` vide identifie précisément cette variante-là : on la retrouve
+   * d'un enregistrement à l'autre sans dépendre du SKU, que Shopify n'impose
+   * pas et que la moitié du catalogue n'a pas.
+   */
+  const dejaLa = await db
+    .select({ id: variant.id })
+    .from(variant)
+    .where(and(eq(variant.productId, id), eq(variant.optionKey, "")))
+    .limit(1);
+
+  const variantId = dejaLa[0]?.id ?? `var_${randomId()}`;
+  await db
+    .insert(variant)
+    .values({
+      id: variantId,
+      productId: id,
+      sku,
+      optionKey: "",
+      optionValues: "[]",
+      priceAmount: Math.max(0, Math.round(body.priceAmount ?? 0)),
+      priceCurrency: body.priceCurrency ?? "EUR",
+      position: 0,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [variant.productId, variant.optionKey],
+      set: {
+        sku,
+        priceAmount: Math.max(0, Math.round(body.priceAmount ?? 0)),
+        updatedAt: now,
+      },
+    });
+
   // Maintenir la table de stock central `inventory` synchronisée
   await db
     .insert(inventory)
     .values({
-      productId: id,
+      variantId,
       onHand: stock,
       reserved: 0,
       version: 1,
       updatedAt: now,
     })
     .onConflictDoUpdate({
-      target: inventory.productId,
+      target: inventory.variantId,
       set: {
         onHand: stock,
         updatedAt: now,
@@ -1313,7 +1379,7 @@ api.post("/products/:id/stock", async (c) => {
   await db
     .update(inventory)
     .set({ onHand: newStock, updatedAt: now })
-    .where(eq(inventory.productId, id));
+    .where(eq(inventory.variantId, (await varianteUnique(db, id)) ?? ""));
 
   // Met à jour les listings synchronisés avec ce SKU
   if (existing.sku) {
@@ -1332,7 +1398,9 @@ api.delete("/products/:id", async (c) => {
   const id = c.req.param("id");
 
   await db.update(listing).set({ productId: null }).where(eq(listing.productId, id));
-  await db.delete(inventory).where(eq(inventory.productId, id));
+  await db.delete(inventory).where(
+    eq(inventory.variantId, (await varianteUnique(db, id)) ?? ""),
+  );
   await db.delete(product).where(eq(product.id, id));
 
   return c.json({ ok: true, id });

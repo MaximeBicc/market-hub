@@ -6,6 +6,8 @@ import type {
   MarketplaceAccount,
   Product,
   ProductId,
+  Variant,
+  VariantId,
 } from "../domain/types.js";
 import type {
   AccountRepository,
@@ -13,6 +15,7 @@ import type {
   InventoryRepository,
   ListingRepository,
   ProductRepository,
+  VariantRepository,
   SalesEventRepository,
 } from "../ports/repositories.js";
 
@@ -73,21 +76,47 @@ export class MemoryListingRepository implements ListingRepository {
   }
 }
 
+export class MemoryVariantRepository implements VariantRepository {
+  readonly items = new Map<VariantId, Variant>();
+  async get(id: VariantId) {
+    const v = this.items.get(id);
+    return v ? { ...v } : undefined;
+  }
+  async findBySku(sku: string) {
+    for (const v of this.items.values()) if (v.sku === sku) return { ...v };
+    return undefined;
+  }
+  async findByOptionKey(productId: ProductId, optionKey: string) {
+    for (const v of this.items.values()) {
+      if (v.productId === productId && v.optionKey === optionKey) return { ...v };
+    }
+    return undefined;
+  }
+  async listByProduct(productId: ProductId) {
+    return [...this.items.values()]
+      .filter((v) => v.productId === productId)
+      .map((v) => ({ ...v }));
+  }
+  async put(v: Variant) {
+    this.items.set(v.id, { ...v });
+  }
+}
+
 export class MemoryInventoryRepository implements InventoryRepository {
-  readonly items = new Map<ProductId, InventoryItem>();
-  async get(productId: ProductId) {
-    const v = this.items.get(productId);
+  readonly items = new Map<VariantId, InventoryItem>();
+  async get(variantId: VariantId) {
+    const v = this.items.get(variantId);
     return v ? { ...v } : undefined;
   }
   /** Reproduit fidèlement le verrouillage optimiste de la base réelle. */
   async compareAndSet(next: InventoryItem, expectedVersion: number) {
-    const cur = this.items.get(next.productId);
+    const cur = this.items.get(next.variantId);
     if (!cur || cur.version !== expectedVersion) return false;
-    this.items.set(next.productId, { ...next });
+    this.items.set(next.variantId, { ...next });
     return true;
   }
   async put(item: InventoryItem) {
-    this.items.set(item.productId, { ...item });
+    this.items.set(item.variantId, { ...item });
   }
 }
 
@@ -120,6 +149,7 @@ export function memoryRepositories() {
     accounts: new MemoryAccountRepository(),
     products: new MemoryProductRepository(),
     listings: new MemoryListingRepository(),
+    variants: new MemoryVariantRepository(),
     inventory: new MemoryInventoryRepository(),
     salesEvents: new MemorySalesEventRepository(),
     credentials: new MemoryCredentialRepository(),

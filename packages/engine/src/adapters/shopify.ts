@@ -732,6 +732,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
           title: string;
           price: string;
           inventoryQuantity: number | null;
+          selectedOptions: Array<{ name: string; value: string }>;
           inventoryItem: { id: string } | null;
           product: {
             id: string;
@@ -749,6 +750,10 @@ export class ShopifyAdapter implements MarketplaceAdapter {
           pageInfo { hasNextPage endCursor }
           nodes {
             id sku title price inventoryQuantity
+            # Les déclinaisons de CETTE unité : « Couleur = Violet ». Sans
+            # elles, dix-sept coloris arrivaient comme dix-sept annonces sans
+            # lien, dont aucune ne portait de SKU.
+            selectedOptions { name value }
             inventoryItem { id }
             product {
               id title status onlineStoreUrl
@@ -765,9 +770,19 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     const items: RemoteListing[] = d.productVariants.nodes.map((v) => {
       const qty = v.inventoryQuantity ?? 0;
       const active = v.product?.status === "ACTIVE";
+      // « Default Title » est le libellé que Shopify donne à la variante unique
+      // d'un produit sans déclinaison : ce n'est pas une vraie option.
+      const declinaisons = (v.selectedOptions ?? []).filter(
+        (o) => o.value && o.value !== "Default Title",
+      );
+
       return {
         remoteId: v.id,
         sku: v.sku || null,
+        // Le PARENT. C'est lui qui recolle les variantes entre elles.
+        groupRemoteId: v.product?.id,
+        groupTitle: v.product?.title,
+        optionValues: declinaisons,
         // « Default Title » est le libellé d'une variante unique : l'afficher
         // ferait apparaître « Sac — Default Title » dans toute l'interface.
         title:

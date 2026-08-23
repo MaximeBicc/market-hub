@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { desc, eq } from "drizzle-orm";
 import type { CanonicalOrderEvent } from "@hub/engine";
 import { COMMANDES, etatCommande } from "@hub/engine";
-import { commandLog, inventory, product, shop } from "../db/schema.js";
+import { commandLog, inventory, product, shop, variant } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
 import { buildEngine } from "../engine/module.js";
@@ -272,7 +272,8 @@ engine.get("/inventory", async (c) => {
   const db = drizzle(c.env.DB);
   const rows = await db
     .select({
-      productId: inventory.productId,
+      variantId: inventory.variantId,
+      productId: variant.productId,
       sku: product.sku,
       title: product.title,
       onHand: inventory.onHand,
@@ -281,7 +282,11 @@ engine.get("/inventory", async (c) => {
       updatedAt: inventory.updatedAt,
     })
     .from(inventory)
-    .innerJoin(product, eq(product.id, inventory.productId));
+    // Deux jointures désormais : le stock pend à la variante, la variante au
+    // produit. C'est le prix — modeste — d'un stock qui sait distinguer le
+    // coloris violet du noir.
+    .innerJoin(variant, eq(variant.id, inventory.variantId))
+    .innerJoin(product, eq(product.id, variant.productId));
 
   return c.json({
     items: rows.map((r) => ({

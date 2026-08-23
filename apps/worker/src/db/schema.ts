@@ -137,6 +137,9 @@ export const product = sqliteTable(
     condition: text("condition"),
     whoMade: text("who_made"),
     whenMade: text("when_made"),
+    /** Les axes de variation : [{name, values[]}]. Vide = pas de déclinaison. */
+    options: text("options").notNull().default("[]"),
+    variantCount: integer("variant_count").notNull().default(1),
     /** Format d'emballage / consommable recommandé par défaut. */
     defaultConsumableId: text("default_consumable_id"),
     /** Couleur(s) du produit (ex. « Noir », « Doré », « Bleu nuit / Argent »). */
@@ -168,6 +171,12 @@ export const listing = sqliteTable(
     status: text("status").notNull(),
     url: text("url"),
     imageUrl: text("image_url"),
+    /** L'unité vendable visée. Null tant que le rapprochement n'a pas eu lieu. */
+    variantId: text("variant_id").references(() => variant.id),
+    /** Le parent chez la plateforme. */
+    groupId: text("group_id").references(() => listingGroup.id),
+    /** Ce que la plateforme dit des déclinaisons de cette unité. JSON. */
+    optionValues: text("option_values"),
     /** Champs propres à la plateforme (offerId eBay, variantId Shopify...). JSON. */
     marketplaceData: text("marketplace_data"),
     /**
@@ -182,6 +191,8 @@ export const listing = sqliteTable(
     uniqueIndex("listing_shop_ext_idx").on(t.shopId, t.externalId),
     index("listing_sku_idx").on(t.sku),
     index("listing_product_idx").on(t.productId),
+    index("listing_variant_idx").on(t.variantId),
+    index("listing_group_idx").on(t.groupId),
   ],
 );
 
@@ -367,8 +378,77 @@ export const alertRule = sqliteTable("alert_rule", {
  * `version` porte le verrouillage optimiste — deux ventes simultanées sur
  * deux plateformes ne doivent pas se perdre l'une l'autre.
  */
+/**
+ * Une unité réellement vendable : un coloris, une taille.
+ *
+ * Le SKU est NULLABLE, et c'est le fait central : la majorité des variantes
+ * lues chez Shopify n'en ont pas, et Shopify n'en impose pas. `optionKey` —
+ * « couleur=violet », normalisé — sert alors d'identité de repli, sans quoi
+ * une variante serait recréée à chaque passage de synchronisation.
+ */
+export const variant = sqliteTable(
+  "variant",
+  {
+    id: text("id").primaryKey(),
+    productId: text("product_id").notNull().references(() => product.id),
+    sku: text("sku"),
+    optionKey: text("option_key").notNull().default(""),
+    optionValues: text("option_values").notNull().default("[]"), // JSON: string[]
+    priceAmount: integer("price_amount").notNull().default(0),
+    priceCurrency: text("price_currency").notNull().default("EUR"),
+    barcode: text("barcode"),
+    weightGrams: integer("weight_grams"),
+    imageUrl: text("image_url"),
+    position: integer("position").notNull().default(0),
+    /** `archived` : la plateforme ne la renvoie plus. Son stock cesse de compter. */
+    status: text("status").notNull().default("active"),
+    marketplaceData: text("marketplace_data").notNull().default("{}"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("variant_product_optkey_idx").on(t.productId, t.optionKey),
+    index("variant_product_idx").on(t.productId),
+  ],
+);
+
+/**
+ * L'objet PARENT chez la plateforme : produit Shopify, inventory_item_group
+ * eBay, annonce Etsy. Il existe parce que le statut, l'URL et la catégorie y
+ * vivent — pas sur la variante. Chez Etsy c'est structurant : une annonce a UN
+ * état, et « désactiver le coloris violet » n'existe pas.
+ */
+export const listingGroup = sqliteTable(
+  "listing_group",
+  {
+    id: text("id").primaryKey(),
+    shopId: text("shop_id").notNull().references(() => shop.id),
+    productId: text("product_id").references(() => product.id),
+    remoteGroupId: text("remote_group_id").notNull(),
+    title: text("title").notNull(),
+    status: text("status").notNull(),
+    url: text("url"),
+    imageUrl: text("image_url"),
+    publishedAxes: text("published_axes").notNull().default("[]"),
+    marketplaceData: text("marketplace_data").notNull().default("{}"),
+    syncedAt: integer("synced_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("listing_group_shop_remote_idx").on(t.shopId, t.remoteGroupId),
+    index("listing_group_product_idx").on(t.productId),
+  ],
+);
+
+/**
+ * Stock central, compté PAR VARIANTE.
+ *
+ * Deux coloris du même produit ont des quantités indépendantes, et refléter ce
+ * nombre est tout l'objet de l'outil. Une somme au niveau du produit ne se
+ * repousserait pas : « mettre le stock à 12 » n'a aucun sens pour un parent à
+ * dix-sept coloris.
+ */
 export const inventory = sqliteTable("inventory", {
-  productId: text("product_id").primaryKey().references(() => product.id),
+  variantId: text("variant_id").primaryKey().references(() => variant.id),
   onHand: integer("on_hand").notNull().default(0),
   reserved: integer("reserved").notNull().default(0),
   version: integer("version").notNull().default(1),

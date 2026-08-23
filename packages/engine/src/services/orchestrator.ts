@@ -6,6 +6,7 @@ import type {
   Money,
   ProductId,
   TargetResult,
+  VariantId,
 } from "../domain/types.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 import type {
@@ -308,6 +309,12 @@ export class MarketplaceOrchestrator {
 
   async setStock(input: {
     productId: ProductId;
+    /**
+     * L'unité visée. Sans elle, on écrirait le stock d'un coloris sur
+     * l'annonce d'un autre — seize fois faux sur un produit à dix-sept
+     * déclinaisons.
+     */
+    variantId?: VariantId | undefined;
     accountIds: AccountId[];
     stock: number;
     idempotencyKey: string;

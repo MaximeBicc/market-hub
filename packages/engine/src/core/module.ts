@@ -14,6 +14,7 @@ import type {
   ListingRepository,
   ProductRepository,
   SalesEventRepository,
+  VariantRepository,
 } from "../ports/repositories.js";
 
 export interface ModuleDeps {
@@ -21,6 +22,7 @@ export interface ModuleDeps {
   credentials: CredentialRepository;
   products: ProductRepository;
   listings: ListingRepository;
+  variants: VariantRepository;
   inventory: InventoryRepository;
   salesEvents: SalesEventRepository;
   adapters: MarketplaceAdapter[];
@@ -66,18 +68,28 @@ export function createMarketplaceModule(d: ModuleDeps) {
     d.salesEvents,
     d.products,
     d.listings,
+    d.variants,
     inventoryService,
-    async (productId, stock, sourceAccountId, eventId) => {
+    async (productId, variantId, stock, sourceAccountId, eventId) => {
+      /*
+       * La propagation vise un CANAL ET UNE UNITÉ.
+       *
+       * Filtrer sur le seul produit enverrait le stock du coloris violet à
+       * l'annonce du coloris noir : sur un support téléphone à dix-sept
+       * déclinaisons, seize écritures fausses par vente. On ne retient donc
+       * que les annonces qui portent EXACTEMENT cette variante.
+       */
       const listings = await d.listings.listByProduct(productId);
-      const targets = listings
-        .filter((x) => x.accountId !== sourceAccountId)
-        .map((x) => x.accountId);
-      if (targets.length === 0) return;
+      const cibles = listings.filter(
+        (x) => x.accountId !== sourceAccountId && x.variantId === variantId,
+      );
+      if (cibles.length === 0) return;
       await orchestrator.setStock({
         productId,
-        accountIds: targets,
+        variantId,
+        accountIds: cibles.map((x) => x.accountId),
         stock,
-        idempotencyKey: `sale:${eventId}`,
+        idempotencyKey: `sale:${eventId}:${variantId}`,
       });
     },
   );

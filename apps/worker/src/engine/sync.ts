@@ -2,7 +2,15 @@ import { drizzle } from "drizzle-orm/d1";
 import { and, eq, sql } from "drizzle-orm";
 import type { SyncTask } from "@hub/core";
 import { reconcileStock } from "@hub/engine";
-import { eventLog, listing, product, salesEvent, syncJob } from "../db/schema.js";
+import {
+  eventLog,
+  listing,
+  listingGroup,
+  product,
+  salesEvent,
+  syncJob,
+  variant,
+} from "../db/schema.js";
 import type { Env } from "../env.js";
 import { contentHash, randomId } from "../lib/crypto.js";
 import { buildEngine } from "./module.js";
@@ -23,6 +31,71 @@ import { d1Repositories } from "./repositories.js";
  *   orders                → relève les ventes et les fait entrer par
  *                           salesSync, qui décrémente et propage.
  */
+
+/**
+ * Normalise un libellé d'option pour en faire une clé stable.
+ *
+ * « Rose Pâle », « rose pale » et « ROSE PÂLE » doivent désigner la même
+ * variante : sans pliage des accents et de la casse, un changement cosmétique
+ * chez la plateforme créerait une variante fantôme, avec son propre stock.
+ */
+function normaliser(v: string): string {
+  return v
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+}
+
+/**
+ * Reconstitue les axes du produit à partir de ce que ses variantes portent.
+ *
+ * On n'écrit que si l'ensemble a CHANGÉ : ces axes servent à l'affichage et à
+ * la publication, et les réécrire à chaque passage brûlerait le quota
+ * d'écritures de D1 pour rien.
+ */
+async function majAxes(
+  db: ReturnType<typeof drizzle>,
+  productId: string,
+  valeurs: Array<{ name: string; value: string }>,
+  now: number,
+): Promise<void> {
+  const rows = await db
+    .select({ options: product.options })
+    .from(product)
+    .where(eq(product.id, productId))
+    .limit(1);
+
+  const actuels = JSON.parse(rows[0]?.options ?? "[]") as Array<{
+    name: string;
+    values: string[];
+  }>;
+  const par = new Map(actuels.map((a) => [a.name, new Set(a.values)]));
+
+  let change = false;
+  for (const v of valeurs) {
+    const ens = par.get(v.name);
+    if (!ens) {
+      par.set(v.name, new Set([v.value]));
+      change = true;
+    } else if (!ens.has(v.value)) {
+      ens.add(v.value);
+      change = true;
+    }
+  }
+  if (!change) return;
+
+  await db
+    .update(product)
+    .set({
+      options: JSON.stringify(
+        [...par].map(([name, values]) => ({ name, values: [...values] })),
+      ),
+      updatedAt: now,
+    })
+    .where(eq(product.id, productId));
+}
 
 /** Marge de tolérance avant de considérer une divergence comme réelle. */
 const MAX_PAGES_PER_RUN = 4;
@@ -125,7 +198,12 @@ async function syncCatalogue(
   /** Écarts résorbés en recopiant la plateforme vers le stock central. */
   const adoptions: string[] = [];
   /** Écarts à résorber dans l'autre sens : le central a bougé, pas la plateforme. */
-  const aPousser: Array<{ productId: string; stock: number; quoi: string }> = [];
+  const aPousser: Array<{
+    productId: string;
+    variantId: string;
+    stock: number;
+    quoi: string;
+  }> = [];
 
   while (pages < MAX_PAGES_PER_RUN) {
     const page = await adapter.fetchListings(ctx, cursor);
@@ -154,7 +232,42 @@ async function syncCatalogue(
       });
       const prev = known.get(item.remoteId);
 
-      let productId = prev?.productId ?? null;
+      /*
+       * ══ DU PLAT AU GROUPÉ ══
+       *
+       * Une plateforme n'envoie pas des produits, elle envoie des unités
+       * vendables. Dix-sept coloris d'un support téléphone arrivent comme
+       * dix-sept lignes — et vingt-six d'entre elles n'avaient aucun SKU,
+       * parce que Shopify n'en impose pas. L'ancien code ne savait rapprocher
+       * que par SKU : ces vingt-six lignes restaient donc sans produit maître,
+       * et une vente sur l'une d'elles ne décrémentait RIEN.
+       *
+       * On remonte maintenant la chaîne dans l'autre sens :
+       *   le groupe distant  →  le produit maître  →  la variante
+       *
+       * `groupRemoteId` est fourni par l'adaptateur. Une annonce sans parent
+       * est son propre groupe : le cas dégénéré est le cas général, il n'y a
+       * donc qu'un seul chemin de code.
+       */
+      const cleGroupe = item.groupRemoteId ?? item.remoteId;
+
+      const groupeExistant = await db
+        .select({ id: listingGroup.id, productId: listingGroup.productId })
+        .from(listingGroup)
+        .where(
+          and(
+            eq(listingGroup.shopId, task.shopId),
+            eq(listingGroup.remoteGroupId, cleGroupe),
+          ),
+        )
+        .limit(1);
+
+      let groupId = groupeExistant[0]?.id ?? null;
+      let productId = groupeExistant[0]?.productId ?? prev?.productId ?? null;
+
+      // Un SKU connu rattache au produit existant : c'est la voie la plus sûre
+      // quand elle est disponible, parce qu'elle survit à un changement de
+      // structure chez la plateforme.
       if (!productId && item.sku) {
         const p = await db
           .select({ id: product.id })
@@ -162,26 +275,144 @@ async function syncCatalogue(
           .where(eq(product.sku, item.sku))
           .limit(1);
         productId = p[0]?.id ?? null;
+      }
 
-        if (!productId) {
-          productId = randomId();
-          await db.insert(product).values({
-            id: productId,
+      if (!productId) {
+        /*
+         * Créer le produit maître. Le titre du PARENT, jamais celui de la
+         * variante : « Support téléphone », pas « Support téléphone — Violet ».
+         *
+         * Le SKU du parent est de repli quand la plateforme n'en donne pas —
+         * il n'est plus la clé de rapprochement, ce sont les variantes qui
+         * portent les vrais SKU, mais la colonne reste NOT NULL UNIQUE.
+         */
+        productId = randomId();
+        await db.insert(product).values({
+          id: productId,
+          sku: item.sku ?? `auto:${cleGroupe.slice(-40)}`,
+          title: item.groupTitle ?? item.title,
+          description: null,
+          priceAmount: item.price.amount,
+          priceCurrency: item.price.currency,
+          stock: 0,
+          images: JSON.stringify(item.imageUrl ? [item.imageUrl] : []),
+          tags: "[]",
+          marketplaceData: "{}",
+          options: "[]",
+          variantCount: 0,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
+      /*
+       * ADOPTER UN GROUPE ORPHELIN.
+       *
+       * La migration a reconstitué les groupes depuis ce que Shopify avait
+       * déjà écrit, mais elle a refusé d'inventer un produit maître là où il
+       * n'y en avait pas — quatre groupes sur six sont donc nés sans.
+       *
+       * Sans cette mise à jour, le groupe resterait orphelin à vie : chaque
+       * passage retrouverait `productId` à null, ne trouverait aucun SKU,
+       * créerait un nouveau produit maître… et recommencerait deux minutes
+       * plus tard. Six produits fantômes par quart d'heure.
+       */
+      if (groupId && !groupeExistant[0]?.productId) {
+        await db
+          .update(listingGroup)
+          .set({ productId, syncedAt: now })
+          .where(eq(listingGroup.id, groupId));
+      }
+
+      if (!groupId) {
+        groupId = randomId();
+        await db
+          .insert(listingGroup)
+          .values({
+            id: groupId,
+            shopId: task.shopId,
+            productId,
+            remoteGroupId: cleGroupe,
+            title: item.groupTitle ?? item.title,
+            status: item.status,
+            url: item.url ?? null,
+            imageUrl: item.imageUrl ?? null,
+            publishedAxes: JSON.stringify(
+              (item.optionValues ?? []).map((o) => o.name),
+            ),
+            marketplaceData: "{}",
+            syncedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [listingGroup.shopId, listingGroup.remoteGroupId],
+            set: { productId, syncedAt: now },
+          });
+      }
+
+      /*
+       * LA VARIANTE. Deux identités possibles, dans cet ordre :
+       *
+       *   1. le SKU, quand il existe — stable, porté par les lignes de commande
+       *   2. la clé d'options — « couleur=violet », normalisée
+       *
+       * Sans la seconde, une variante sans SKU serait recréée à chaque passage
+       * de synchronisation, et son stock repartirait de zéro toutes les deux
+       * minutes.
+       */
+      const optionKey = (item.optionValues ?? [])
+        .map(
+          (o) =>
+            `${normaliser(o.name)}=${normaliser(o.value)}`,
+        )
+        .join("|");
+
+      const varianteExistante = await db
+        .select({ id: variant.id })
+        .from(variant)
+        .where(
+          item.sku
+            ? and(eq(variant.productId, productId), eq(variant.sku, item.sku))
+            : and(
+                eq(variant.productId, productId),
+                eq(variant.optionKey, optionKey),
+              ),
+        )
+        .limit(1);
+
+      let variantId = varianteExistante[0]?.id ?? null;
+      if (!variantId) {
+        variantId = randomId();
+        await db
+          .insert(variant)
+          .values({
+            id: variantId,
+            productId,
             sku: item.sku,
-            title: item.title,
-            description: null,
+            optionKey,
+            optionValues: JSON.stringify(
+              (item.optionValues ?? []).map((o) => o.value),
+            ),
             priceAmount: item.price.amount,
             priceCurrency: item.price.currency,
-            stock: item.stock,
-            images: JSON.stringify(item.imageUrl ? [item.imageUrl] : []),
-            tags: "[]",
+            imageUrl: item.imageUrl ?? null,
+            position: 0,
+            status: "active",
             marketplaceData: "{}",
             createdAt: now,
             updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [variant.productId, variant.optionKey],
+            set: { sku: item.sku, priceAmount: item.price.amount, updatedAt: now },
           });
-          // Produit inconnu : sa valeur distante initialise le stock central.
-          await mod.inventoryService.ensure(productId, item.stock);
-        }
+
+        // Variante inconnue : sa valeur distante initialise le stock central.
+        await mod.inventoryService.ensure(variantId, item.stock);
+      }
+
+      // Les axes du produit, reconstitués depuis ce que les variantes portent.
+      if ((item.optionValues ?? []).length > 0) {
+        await majAxes(db, productId, item.optionValues ?? [], now);
       }
 
       /*
@@ -210,8 +441,8 @@ async function syncCatalogue(
       let versionCentrale = 0;
       let rapprochement = false;
 
-      if (productId) {
-        const central = await repos.inventory.get(productId);
+      if (variantId) {
+        const central = await repos.inventory.get(variantId);
         if (central) {
           versionCentrale = central.version;
           const prevData = JSON.parse(prev?.marketplaceData ?? "{}") as Record<
@@ -230,12 +461,13 @@ async function syncCatalogue(
           if (decision.action === "push") {
             aPousser.push({
               productId,
+              variantId,
               stock: decision.stock,
               quoi: `${item.sku ?? item.remoteId} → ${decision.stock}`,
             });
           } else if (decision.action === "adopt") {
             const apres = await mod.inventoryService.adopt(
-              productId,
+              variantId,
               decision.stock,
             );
             versionCentrale = apres.version;
@@ -259,6 +491,9 @@ async function syncCatalogue(
             id: randomId(),
             shopId: task.shopId,
             productId,
+            variantId,
+            groupId,
+            optionValues: JSON.stringify(item.optionValues ?? []),
             externalId: item.remoteId,
             sku: item.sku,
             title: item.title,
@@ -281,6 +516,9 @@ async function syncCatalogue(
             target: [listing.shopId, listing.externalId],
             set: {
               productId,
+              variantId,
+              groupId,
+              optionValues: JSON.stringify(item.optionValues ?? []),
               sku: item.sku,
               title: item.title,
               priceAmount: item.price.amount,

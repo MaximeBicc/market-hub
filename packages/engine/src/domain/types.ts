@@ -21,7 +21,9 @@ export type MarketplaceId = (typeof MARKETPLACES)[number] | (string & {});
 
 export type AccountId = string;
 export type ProductId = string;
+export type VariantId = string;
 export type ListingId = string;
+export type ListingGroupId = string;
 
 /** Montants en entiers (centimes) : jamais de flottant pour de l'argent. */
 export type Money = { amount: number; currency: string };
@@ -91,8 +93,72 @@ export type WhenMade =
   | "1700s"
   | "before_1700";
 
+/**
+ * Un AXE de variation : « Couleur », avec ses valeurs.
+ *
+ * Le nom est libre de notre côté, parce qu'aucune plateforme n'impose le même
+ * vocabulaire et qu'imposer le nôtre reviendrait à choisir à la place du
+ * vendeur. Le prix de cette liberté se paie à la publication : eBay exige que
+ * le nom de l'aspect corresponde EXACTEMENT entre le groupe et chaque article,
+ * Etsy veut un identifiant de propriété tiré de sa taxonomie.
+ *
+ * Limites réelles à respecter : Shopify accepte 3 axes, Etsy 2.
+ */
+export interface OptionAxis {
+  name: string;
+  /** Dans l'ordre d'affichage. Aucune valeur vide, aucun doublon. */
+  values: string[];
+}
+
+/**
+ * L'UNITÉ RÉELLEMENT VENDABLE.
+ *
+ * Tout produit en a au moins une : un produit sans déclinaison a une variante
+ * unique, aux `optionValues` vides. Pas de « variante optionnelle » — c'est ce
+ * qui évite d'avoir deux chemins de code, celui qu'on teste et celui qui casse.
+ */
+export interface Variant {
+  id: VariantId;
+  productId: ProductId;
+
+  /**
+   * NULLABLE, et c'est le fait central de tout ce modèle : vingt-six des
+   * vingt-huit variantes lues chez Shopify n'en ont pas. Shopify ne l'exige
+   * pas, et n'impose même pas qu'il soit unique entre deux variantes.
+   */
+  sku?: string | undefined;
+
+  /** Une valeur par axe du produit, DANS LE MÊME ORDRE. */
+  optionValues: string[];
+
+  /**
+   * Identité de repli quand le SKU manque : « couleur=violet ».
+   * Normalisée — minuscules, accents pliés — et unique par produit. C'est elle
+   * qui permet de retrouver une variante d'un passage de synchronisation à
+   * l'autre sans dépendre d'un SKU que la plateforme n'impose pas.
+   */
+  optionKey: string;
+
+  price: Money;
+  imageUrl?: string | undefined;
+  position: number;
+
+  /**
+   * `archived` : la plateforme ne renvoie plus cette variante. On ne supprime
+   * pas la ligne — son historique de ventes y pend — mais son stock cesse
+   * d'être compté. Sans cet état, un coloris retiré reste comptabilisé ici
+   * pour toujours.
+   */
+  status: "active" | "archived";
+  marketplaceData?: Record<string, unknown> | undefined;
+}
+
 export interface Product {
   id: ProductId;
+  /**
+   * Code du PARENT. N'est plus la clé de rapprochement : un produit à
+   * dix-sept coloris n'a pas « un » SKU, ce sont ses variantes qui en portent.
+   */
   sku: string;
   title: string;
   description?: string | undefined;
@@ -100,6 +166,11 @@ export interface Product {
   stock: number;
   images?: string[] | undefined;
   tags?: string[] | undefined;
+
+  /** Les axes de variation. Tableau VIDE = produit sans déclinaison. */
+  options?: OptionAxis[] | undefined;
+  /** Les unités vendables. Chargées à la demande, pas toujours présentes. */
+  variants?: Variant[] | undefined;
 
   /*
    * ══ DÉCLARATIONS OBLIGATOIRES ══
@@ -134,6 +205,8 @@ export interface Product {
 export interface Listing {
   id: ListingId;
   productId: ProductId;
+  /** L'unité vendable visée. Absente tant que le rapprochement n'a pas eu lieu. */
+  variantId?: VariantId | undefined;
   accountId: AccountId;
   remoteId?: string | undefined;
   status: "draft" | "active" | "inactive" | "sold" | "error";
@@ -150,8 +223,16 @@ export interface Listing {
  * disponible. `version` permet un verrouillage optimiste — deux ventes
  * simultanées sur deux plateformes ne doivent pas se perdre l'une l'autre.
  */
+/**
+ * Stock central, compté PAR VARIANTE.
+ *
+ * Il n'y a pas d'alternative défendable : deux coloris du même produit ont des
+ * quantités indépendantes, et tout l'objet de l'outil est de refléter ce
+ * nombre. Une somme au niveau du produit ne se repousserait pas — « mettre le
+ * stock à 12 » n'a aucun sens pour un parent à dix-sept coloris.
+ */
 export interface InventoryItem {
-  productId: ProductId;
+  variantId: VariantId;
   onHand: number;
   reserved: number;
   version: number;
@@ -159,6 +240,8 @@ export interface InventoryItem {
 
 export interface CanonicalOrderLine {
   productId?: ProductId | undefined;
+  /** L'unité réellement vendue, quand on a su la retrouver. */
+  variantId?: VariantId | undefined;
   sku?: string | undefined;
   quantity: number;
   remoteListingId?: string | undefined;
@@ -297,6 +380,24 @@ export interface RemoteListing {
   status: Listing["status"];
   url?: string | undefined;
   imageUrl?: string | undefined;
+
+  /*
+   * ══ CE QUI RATTACHE UNE ANNONCE À SON PARENT ══
+   *
+   * Sans ces deux champs, dix-sept coloris d'un même support téléphone
+   * arrivaient comme dix-sept annonces sans lien, et vingt-six d'entre elles
+   * sans aucun produit maître — parce que le rapprochement se faisait par SKU
+   * et que Shopify n'en impose pas. Une vente sur l'une d'elles ne
+   * décrémentait alors rien du tout.
+   */
+
+  /** Identifiant du PARENT chez la plateforme. Null = annonce sans parent. */
+  groupRemoteId?: string | undefined;
+  /** Titre du parent, sans le suffixe de déclinaison. */
+  groupTitle?: string | undefined;
+  /** Les valeurs de cette unité : `[{ name: "Couleur", value: "Violet" }]`. */
+  optionValues?: Array<{ name: string; value: string }> | undefined;
+
   /** Identifiants propres à la plateforme, mémorisés pour éviter des relectures. */
   marketplaceData?: Record<string, unknown> | undefined;
 }

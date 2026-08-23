@@ -48,8 +48,27 @@ async function setup() {
     stock: 5,
   });
 
+  /*
+   * TOUT PRODUIT A AU MOINS UNE VARIANTE.
+   *
+   * C'est elle qui porte le stock depuis que le modèle sait qu'un article
+   * existe en plusieurs coloris. Un produit sans déclinaison en a une seule,
+   * à `optionKey` vide — pas de « variante optionnelle », donc pas deux
+   * chemins de code dont un seul serait testé.
+   */
+  await repos.variants.put({
+    id: "v1",
+    productId: "p1",
+    sku: "SAC-01",
+    optionValues: [],
+    optionKey: "",
+    price: EUR(14900),
+    position: 0,
+    status: "active",
+  });
+
   const module = createMarketplaceModule({ ...repos, adapters: [mock, vinted] });
-  await module.inventoryService.ensure("p1", 5);
+  await module.inventoryService.ensure("v1", 5);
 
   return { repos, mock, vinted, module };
 }
@@ -154,7 +173,7 @@ describe("ventes entrantes", () => {
 
     expect(r.duplicate).toBe(false);
     expect(r.changed).toEqual(["p1"]);
-    expect((await repos.inventory.get("p1"))?.onHand).toBe(3);
+    expect((await repos.inventory.get("v1"))?.onHand).toBe(3);
   });
 
   it("ignore un événement déjà traité", async () => {
@@ -164,7 +183,7 @@ describe("ventes entrantes", () => {
 
     expect(second.duplicate).toBe(true);
     // Le stock ne doit pas bouger une seconde fois.
-    expect((await repos.inventory.get("p1"))?.onHand).toBe(3);
+    expect((await repos.inventory.get("v1"))?.onHand).toBe(3);
   });
 
   it("propage le nouveau stock aux AUTRES comptes, pas à la source", async () => {
@@ -173,6 +192,7 @@ describe("ventes entrantes", () => {
     await repos.listings.put({
       id: "l1",
       productId: "p1",
+      variantId: "v1",
       accountId: "a1",
       remoteId: "r1",
       status: "active",
@@ -182,6 +202,7 @@ describe("ventes entrantes", () => {
     await repos.listings.put({
       id: "l2",
       productId: "p1",
+      variantId: "v1",
       accountId: "a2",
       remoteId: "r2",
       status: "active",
@@ -203,7 +224,7 @@ describe("ventes entrantes", () => {
     await module.salesSync.ingest(
       sale({ eventId: "evt-2", kind: "cancelled" }),
     );
-    expect((await repos.inventory.get("p1"))?.onHand).toBe(5);
+    expect((await repos.inventory.get("v1"))?.onHand).toBe(5);
   });
 
   it("compte les lignes non rattachées au lieu de les perdre", async () => {
@@ -220,6 +241,7 @@ describe("ventes entrantes", () => {
     await repos.listings.put({
       id: "l1",
       productId: "p1",
+      variantId: "v1",
       accountId: "a1",
       remoteId: "remote-42",
       status: "active",
@@ -242,16 +264,16 @@ describe("stock central", () => {
     // doit garantir que les DEUX sont comptées. Sans lui, l'une écrase l'autre
     // et l'on vend un article que l'on n'a plus.
     await Promise.all([
-      module.inventoryService.applyDelta("p1", -1),
-      module.inventoryService.applyDelta("p1", -1),
+      module.inventoryService.applyDelta("v1", -1),
+      module.inventoryService.applyDelta("v1", -1),
     ]);
 
-    expect((await repos.inventory.get("p1"))?.onHand).toBe(3);
+    expect((await repos.inventory.get("v1"))?.onHand).toBe(3);
   });
 
   it("distingue le physique du disponible", async () => {
     const { module } = await setup();
-    const item = await module.inventoryService.reserve("p1", 2);
+    const item = await module.inventoryService.reserve("v1", 2);
     expect(item.onHand).toBe(5);
     expect(module.inventoryService.available(item)).toBe(3);
   });

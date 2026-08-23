@@ -1,13 +1,20 @@
-import type { CanonicalOrderEvent, ProductId } from "../domain/types.js";
+import type {
+  CanonicalOrderEvent,
+  ProductId,
+  VariantId,
+} from "../domain/types.js";
 import type {
   ListingRepository,
   ProductRepository,
   SalesEventRepository,
+  VariantRepository,
 } from "../ports/repositories.js";
 import type { InventoryService } from "./inventory-service.js";
 
 export type StockPropagation = (
   productId: ProductId,
+  /** L'unité vendue. La propagation vise un coloris, pas « le produit ». */
+  variantId: VariantId,
   stock: number,
   sourceAccountId: string,
   eventId: string,
@@ -34,6 +41,7 @@ export class SalesSyncService {
     private readonly events: SalesEventRepository,
     private readonly products: ProductRepository,
     private readonly listings: ListingRepository,
+    private readonly variants: VariantRepository,
     private readonly inventory: InventoryService,
     private readonly propagate: StockPropagation,
   ) {}
@@ -51,21 +59,39 @@ export class SalesSyncService {
     let unmatched = 0;
 
     for (const line of event.lines) {
-      // Trois façons de retrouver le produit, de la plus fiable à la moins :
-      // identifiant direct, puis SKU, puis correspondance par annonce distante.
-      let productId = line.productId;
-      if (!productId && line.sku) {
-        productId = (await this.products.findBySku(line.sku))?.id;
+      /*
+       * CE QU'ON CHERCHE, C'EST LA VARIANTE — l'unité réellement vendue.
+       *
+       * Chercher le produit ne suffit plus : un support téléphone existe en
+       * dix-sept coloris, et décrémenter « le produit » reviendrait à choisir
+       * un coloris au hasard. Trois voies, de la plus fiable à la moins :
+       *
+       *   1. l'identifiant direct, quand la plateforme le donne
+       *   2. le SKU — porté par la ligne de commande, mais absent chez Shopify
+       *      sur la majorité des variantes
+       *   3. l'annonce distante, qui connaît sa variante depuis le groupement
+       *
+       * La troisième voie est celle qui a débloqué les vingt-six variantes
+       * sans SKU : leur vente ne décrémentait rien du tout.
+       */
+      let variantId = line.variantId;
+      if (!variantId && line.sku) {
+        variantId = (await this.variants.findBySku(line.sku))?.id;
       }
-      if (!productId && line.remoteListingId) {
-        productId = (
+      if (!variantId && line.remoteListingId) {
+        variantId = (
           await this.listings.findByRemoteId(
             event.accountId,
             line.remoteListingId,
           )
-        )?.productId;
+        )?.variantId;
       }
-      if (!productId) {
+
+      const productId =
+        line.productId ??
+        (variantId ? (await this.variants.get(variantId))?.productId : undefined);
+
+      if (!variantId || !productId) {
         // Vente d'un article inconnu du catalogue : on ne devine pas. Le
         // compteur remonte à l'appelant, qui peut le signaler plutôt que de
         // laisser la ligne disparaître en silence.
@@ -82,9 +108,10 @@ export class SalesSyncService {
             : 0;
       if (delta === 0) continue;
 
-      const next = await this.inventory.applyDelta(productId, delta);
+      const next = await this.inventory.applyDelta(variantId, delta);
       await this.propagate(
         productId,
+        variantId,
         this.inventory.available(next),
         event.accountId,
         event.eventId,

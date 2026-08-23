@@ -12,7 +12,10 @@ import type {
   MarketplaceAccount,
   Product,
   ProductId,
+  Variant,
+  VariantId,
   ProductRepository,
+  VariantRepository,
   SalesEventRepository,
 } from "@hub/engine";
 import {
@@ -22,6 +25,7 @@ import {
   product,
   salesEvent,
   shop,
+  variant,
 } from "../db/schema.js";
 import { contentHash, randomId } from "../lib/crypto.js";
 import { decryptJson, encryptJson } from "../lib/crypto.js";
@@ -271,19 +275,109 @@ export class D1ListingRepository implements ListingRepository {
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * Les variantes.
+ *
+ * `findByOptionKey` est ce qui permet de retrouver une variante SANS SKU d'un
+ * passage de synchronisation à l'autre : Shopify n'impose pas de SKU, et la
+ * majorité du catalogue n'en a pas. Sans cette clé dérivée des déclinaisons,
+ * chaque passage recréerait la variante et son stock repartirait de zéro.
+ */
+export class D1VariantRepository implements VariantRepository {
+  constructor(private readonly db: DB) {}
+
+  private map(r: typeof variant.$inferSelect): Variant {
+    return {
+      id: r.id,
+      productId: r.productId,
+      sku: r.sku ?? undefined,
+      optionValues: parseJson<string[]>(r.optionValues, []),
+      optionKey: r.optionKey,
+      price: { amount: r.priceAmount, currency: r.priceCurrency },
+      imageUrl: r.imageUrl ?? undefined,
+      position: r.position,
+      status: r.status === "archived" ? "archived" : "active",
+      marketplaceData: parseJson<Record<string, unknown>>(r.marketplaceData, {}),
+    };
+  }
+
+  async get(id: VariantId) {
+    const rows = await this.db.select().from(variant).where(eq(variant.id, id)).limit(1);
+    return rows[0] ? this.map(rows[0]) : undefined;
+  }
+
+  async findBySku(sku: string) {
+    const rows = await this.db
+      .select()
+      .from(variant)
+      .where(eq(variant.sku, sku))
+      .limit(1);
+    return rows[0] ? this.map(rows[0]) : undefined;
+  }
+
+  async findByOptionKey(productId: ProductId, optionKey: string) {
+    const rows = await this.db
+      .select()
+      .from(variant)
+      .where(and(eq(variant.productId, productId), eq(variant.optionKey, optionKey)))
+      .limit(1);
+    return rows[0] ? this.map(rows[0]) : undefined;
+  }
+
+  async listByProduct(productId: ProductId) {
+    const rows = await this.db
+      .select()
+      .from(variant)
+      .where(eq(variant.productId, productId))
+      .orderBy(variant.position);
+    return rows.map((r) => this.map(r));
+  }
+
+  async put(v: Variant) {
+    const now = Math.floor(Date.now() / 1000);
+    await this.db
+      .insert(variant)
+      .values({
+        id: v.id,
+        productId: v.productId,
+        sku: v.sku ?? null,
+        optionKey: v.optionKey,
+        optionValues: JSON.stringify(v.optionValues),
+        priceAmount: v.price.amount,
+        priceCurrency: v.price.currency,
+        imageUrl: v.imageUrl ?? null,
+        position: v.position,
+        status: v.status,
+        marketplaceData: JSON.stringify(v.marketplaceData ?? {}),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: variant.id,
+        set: {
+          sku: v.sku ?? null,
+          optionValues: JSON.stringify(v.optionValues),
+          priceAmount: v.price.amount,
+          status: v.status,
+          updatedAt: now,
+        },
+      });
+  }
+}
+
 export class D1InventoryRepository implements InventoryRepository {
   constructor(private readonly db: DB) {}
 
-  async get(productId: ProductId) {
+  async get(variantId: VariantId) {
     const rows = await this.db
       .select()
       .from(inventory)
-      .where(eq(inventory.productId, productId))
+      .where(eq(inventory.variantId, variantId))
       .limit(1);
     const r = rows[0];
     return r
       ? {
-          productId: r.productId,
+          variantId: r.variantId,
           onHand: r.onHand,
           reserved: r.reserved,
           version: r.version,
@@ -317,7 +411,7 @@ export class D1InventoryRepository implements InventoryRepository {
       })
       .where(
         and(
-          eq(inventory.productId, next.productId),
+          eq(inventory.variantId, next.variantId),
           eq(inventory.version, expectedVersion),
         ),
       )
@@ -330,14 +424,14 @@ export class D1InventoryRepository implements InventoryRepository {
     await this.db
       .insert(inventory)
       .values({
-        productId: item.productId,
+        variantId: item.variantId,
         onHand: item.onHand,
         reserved: item.reserved,
         version: item.version,
         updatedAt: Math.floor(Date.now() / 1000),
       })
       .onConflictDoUpdate({
-        target: inventory.productId,
+        target: inventory.variantId,
         set: {
           onHand: item.onHand,
           reserved: item.reserved,
@@ -495,6 +589,7 @@ export function d1Repositories(db: D1Database, masterKey: string) {
     accounts: new D1AccountRepository(d),
     products: new D1ProductRepository(d),
     listings: new D1ListingRepository(d),
+    variants: new D1VariantRepository(d),
     inventory: new D1InventoryRepository(d),
     salesEvents: new D1SalesEventRepository(d),
     credentials: new D1CredentialRepository(d, masterKey),

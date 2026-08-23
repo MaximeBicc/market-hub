@@ -6,6 +6,8 @@ import type {
   MarketplaceAccount,
   Product,
   ProductId,
+  Variant,
+  VariantId,
 } from "../domain/types.js";
 
 /**
@@ -41,8 +43,26 @@ export interface ListingRepository {
   listByProduct(productId: ProductId): Promise<Listing[]>;
 }
 
+/**
+ * Les variantes d'un produit.
+ *
+ * `findByOptionKey` existe parce que le SKU manque sur la majorité des
+ * variantes lues chez Shopify : sans clé de repli dérivée des déclinaisons,
+ * une variante serait recréée à chaque passage de synchronisation.
+ */
+export interface VariantRepository {
+  get(id: VariantId): Promise<Variant | undefined>;
+  findBySku(sku: string): Promise<Variant | undefined>;
+  findByOptionKey(
+    productId: ProductId,
+    optionKey: string,
+  ): Promise<Variant | undefined>;
+  listByProduct(productId: ProductId): Promise<Variant[]>;
+  put(variant: Variant): Promise<void>;
+}
+
 export interface InventoryRepository {
-  get(productId: ProductId): Promise<InventoryItem | undefined>;
+  get(variantId: VariantId): Promise<InventoryItem | undefined>;
   /** Écrit seulement si la version en base est encore `expectedVersion`. */
   compareAndSet(next: InventoryItem, expectedVersion: number): Promise<boolean>;
   put(item: InventoryItem): Promise<void>;

@@ -168,12 +168,15 @@ ai.get("/products", async (c) => {
       title: product.title,
       costPrice: product.costPrice,
       referencePrice: product.priceAmount,
-      onHand: inventory.onHand,
-      reserved: inventory.reserved,
+      // Le stock vit sur la VARIANTE depuis la migration 0009 : un produit à
+      // dix-sept coloris a dix-sept lignes. On somme, en lecture seule.
+      onHand: sql<number>`(SELECT coalesce(sum(i.on_hand),0) FROM inventory i
+      JOIN variant v ON v.id = i.variant_id WHERE v.product_id = ${product.id})`,
+      reserved: sql<number>`(SELECT coalesce(sum(i.reserved),0) FROM inventory i
+      JOIN variant v ON v.id = i.variant_id WHERE v.product_id = ${product.id})`,
       canaux: sql<number>`(SELECT count(*) FROM ${listing} WHERE ${listing.productId} = ${product.id})`,
     })
     .from(product)
-    .leftJoin(inventory, eq(inventory.productId, product.id))
     .orderBy(product.title)
     .limit(300);
 
