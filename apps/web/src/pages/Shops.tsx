@@ -1212,6 +1212,13 @@ function Reglages({
           {r.options.length === 0 ? (
             <div className="row__s" style={{ whiteSpace: "normal", lineHeight: 1.45 }}>
               Rien à proposer — {r.aide}
+              {/* L'adresse d'expédition d'eBay est le seul objet qui n'existe
+                  nulle part dans son interface : elle ne se crée que par
+                  l'API. Sans ce bouton, un vendeur qui ne code pas ne peut
+                  tout simplement pas publier. */}
+              {r.key === "merchantLocationKey" && (
+                <CreerAdresse accountId={accountId} />
+              )}
             </div>
           ) : (
             <select
@@ -1242,6 +1249,99 @@ function Reglages({
           Enregistrer
         </button>
       )}
+    </div>
+  );
+}
+
+
+/**
+ * Crée l'adresse d'expédition d'eBay.
+ *
+ * C'est la seule écriture que l'outil se permette dans un compte marchand, et
+ * elle est derrière un geste explicite. L'objet est technique — l'entrepôt
+ * d'où part le colis — et n'engage ni prix, ni délai, ni condition de retour.
+ * eBay n'exige qu'un pays et un code postal.
+ */
+function CreerAdresse({ accountId }: { accountId: string }) {
+  const qc = useQueryClient();
+  const [ouvert, setOuvert] = useState(false);
+  const [nom, setNom] = useState("Entrepôt principal");
+  const [codePostal, setCodePostal] = useState("");
+  const [ville, setVille] = useState("");
+
+  const creer = useMutation({
+    mutationFn: () =>
+      api.post(`/engine/accounts/${accountId}/ebay/adresse`, {
+        nom,
+        pays: "FR",
+        codePostal,
+        ville,
+      }),
+    onSuccess: async () => {
+      toast("Adresse d'expédition créée");
+      await qc.invalidateQueries({ queryKey: ["reglages", accountId] });
+      await qc.invalidateQueries({ queryKey: ["catalogue"] });
+      setOuvert(false);
+    },
+    onError: (e: unknown) =>
+      toast(e instanceof Error ? e.message : "Création impossible"),
+  });
+
+  if (!ouvert) {
+    return (
+      <button
+        className="btn btn--small"
+        style={{ marginTop: 8 }}
+        onClick={() => setOuvert(true)}
+      >
+        Créer l'adresse
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="field">
+        <label htmlFor="adr-nom">Nom de l'entrepôt</label>
+        <input
+          id="adr-nom"
+          className="input"
+          value={nom}
+          onChange={(e) => setNom(e.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="adr-cp">Code postal</label>
+        <input
+          id="adr-cp"
+          className="input"
+          value={codePostal}
+          onChange={(e) => setCodePostal(e.target.value)}
+          placeholder="83500"
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="adr-ville">Ville</label>
+        <input
+          id="adr-ville"
+          className="input"
+          value={ville}
+          onChange={(e) => setVille(e.target.value)}
+          placeholder="La Seyne-sur-Mer"
+        />
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          className="btn btn--primary btn--small"
+          disabled={!codePostal || creer.isPending}
+          onClick={() => creer.mutate()}
+        >
+          Créer chez eBay
+        </button>
+        <button className="btn btn--small btn--ghost" onClick={() => setOuvert(false)}>
+          Annuler
+        </button>
+      </div>
     </div>
   );
 }

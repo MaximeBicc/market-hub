@@ -20,6 +20,8 @@ import { authenticate } from "../lib/session.js";
 import { contentHash, randomId } from "../lib/crypto.js";
 import { buildEngine } from "../engine/module.js";
 import {
+  ebayCreerAdresse,
+  type EbayAdapter,
   shopifyEnsureWebhooks,
   type ShopifyAdapter,
   ebayConsentUrl,
@@ -1502,4 +1504,74 @@ accounts.post("/:id/reglages", async (c) => {
   await repos.credentials.put(id, current);
 
   return c.json({ ok: true, enregistres: Object.keys(patch) });
+});
+
+/**
+ * Crée l'adresse d'expédition qu'eBay exige pour publier.
+ *
+ * ÉCRITURE DISTANTE, derrière un geste explicite. C'est la seule que cet outil
+ * se permette sur un compte marchand, et elle est nécessaire : les trois
+ * politiques se créent dans Seller Hub, mais l'« adresse d'expédition » d'eBay
+ * n'apparaît nulle part dans son interface — c'est un objet d'API, et sans lui
+ * la publication est impossible. Un vendeur qui ne code pas est bloqué.
+ *
+ * L'objet est purement technique : l'entrepôt d'où part le colis. Il n'engage
+ * ni prix, ni délai, ni condition de retour.
+ */
+accounts.post("/:id/ebay/adresse", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{ nom?: string; pays?: string; codePostal?: string; ville?: string }>()
+    .catch(() => ({}) as Record<string, string>);
+
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Boutique inconnue" }, 404);
+  if (account.marketplace !== "ebay") {
+    return c.json({ error: "Cette adresse ne concerne qu'eBay." }, 400);
+  }
+
+  const pays = (body.pays ?? "FR").trim();
+  const codePostal = (body.codePostal ?? "").trim();
+  if (!codePostal) {
+    return c.json({ error: "Le code postal est requis par eBay." }, 400);
+  }
+
+  // Identifiant stable et lisible : eBay l'exige immuable, et le retrouver
+  // dans ses journaux vaut mieux qu'une suite aléatoire.
+  const cle = "markethub-1";
+  const credentials = { ...(await repos.credentials.get(id)) };
+  const mod = buildEngine(c.env, { used: 0 });
+  const adaptateur = mod.registry.get("ebay") as EbayAdapter;
+
+  const ctx = {
+    account,
+    credentials,
+    http: mod.httpFor(account),
+    saveCredentials: async (patch: Record<string, string>) => {
+      Object.assign(credentials, patch);
+      await repos.credentials.put(id, credentials);
+    },
+  };
+
+  try {
+    await ebayCreerAdresse(adaptateur, ctx, {
+      cle,
+      nom: (body.nom ?? "Entrepôt principal").trim(),
+      pays,
+      codePostal,
+      ...(body.ville?.trim() ? { ville: body.ville.trim() } : {}),
+    });
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    // eBay renvoie une erreur quand la clé existe déjà : ce n'est pas un échec,
+    // l'état voulu est atteint. Le message le dit plutôt que d'alarmer.
+    if (!/already exists|25801|25802/i.test(m)) {
+      return c.json({ error: m }, 400);
+    }
+  }
+
+  Object.assign(credentials, { merchantLocationKey: cle });
+  await repos.credentials.put(id, credentials);
+  return c.json({ ok: true, merchantLocationKey: cle });
 });

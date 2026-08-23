@@ -594,6 +594,21 @@ export class EbayAdapter implements MarketplaceAdapter {
   }
 
   /**
+   * Accès brut à l'API eBay, pour ce qui sort du contrat commun.
+   *
+   * Exposé plutôt que dupliqué : l'obtention du jeton, son renouvellement, le
+   * choix de l'hôte selon l'environnement et la lecture des erreurs d'eBay
+   * vivent à un seul endroit.
+   */
+  async rawCall<T>(
+    ctx: MarketplaceContext,
+    path: string,
+    init: RequestInit = {},
+  ): Promise<T> {
+    return this.call<T>(ctx, path, init);
+  }
+
+  /**
    * Les réglages de compte sans lesquels eBay refuse de publier.
    *
    * Quatre lectures, chacune ISOLÉE : une politique de retour absente ne doit
@@ -917,4 +932,52 @@ export class EbayAdapter implements MarketplaceAdapter {
         d.total !== undefined && consumed < d.total ? String(consumed) : undefined,
     };
   }
+}
+
+/**
+ * Crée l'adresse d'expédition qu'eBay exige pour publier.
+ *
+ * POURQUOI CE N'EST PAS UN RÉGLAGE COMME LES AUTRES. Les trois politiques —
+ * livraison, paiement, retour — se créent dans Seller Hub, parce qu'elles
+ * engagent les conditions de vente. L'« adresse d'expédition » d'eBay, elle,
+ * n'apparaît nulle part dans son interface : c'est un objet purement
+ * technique, l'entrepôt d'où part le colis, et il ne se crée QUE par l'API.
+ * Un vendeur qui ne code pas ne peut littéralement pas publier.
+ *
+ * C'est la seule écriture de compte que cet outil se permette, et elle reste
+ * derrière un geste explicite : elle ne s'exécute jamais toute seule.
+ *
+ * eBay demande au minimum un pays et un code postal. Le type par défaut est
+ * WAREHOUSE, ce qui convient : ce n'est pas une boutique physique.
+ */
+export async function ebayCreerAdresse(
+  adapter: EbayAdapter,
+  ctx: MarketplaceContext,
+  args: { cle: string; nom: string; pays: string; codePostal: string; ville?: string },
+): Promise<void> {
+  const cle = args.cle.trim().slice(0, 36);
+  if (!/^[A-Za-z0-9_-]+$/.test(cle)) {
+    throw new Error(
+      "L'identifiant d'adresse ne doit contenir que lettres, chiffres, tiret ou souligné.",
+    );
+  }
+  if (!args.pays || !args.codePostal) {
+    throw new Error("eBay exige au minimum un pays et un code postal.");
+  }
+
+  await adapter.rawCall(ctx, `/sell/inventory/v1/location/${encodeURIComponent(cle)}`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: args.nom.slice(0, 1000) || cle,
+      merchantLocationStatus: "ENABLED",
+      locationTypes: ["WAREHOUSE"],
+      location: {
+        address: {
+          country: args.pays.toUpperCase().slice(0, 2),
+          postalCode: args.codePostal,
+          ...(args.ville ? { city: args.ville } : {}),
+        },
+      },
+    }),
+  });
 }

@@ -93,7 +93,14 @@ function egalesEnTempsConstant(a: string, b: string): boolean {
  */
 type LectureSeule = Pick<
   MarketplaceAdapter,
-  "id" | "capabilities" | "testConnection" | "fetchListings" | "pollOrderEvents"
+  | "id"
+  | "capabilities"
+  | "testConnection"
+  | "fetchListings"
+  | "pollOrderEvents"
+  // Lecture pure elle aussi : elle liste les politiques et profils du compte
+  // marchand, et n'en crée jamais.
+  | "listSettings"
 >;
 
 /**
@@ -278,6 +285,35 @@ diagnostic.get("/", async (c) => {
       }
     }
 
+    /* -- Réglages de compte : ce que la plateforme propose vraiment -- */
+    /*
+     * Distinguer deux situations que « bloquée » confond : la plateforme n'a
+     * RIEN à proposer — l'objet n'existe pas encore côté marchand — ou elle en
+     * propose et personne ne les a choisis dans l'outil. Sans ce détail, on ne
+     * sait pas s'il faut aller créer une politique ou juste cliquer.
+     */
+    let reglages: Record<string, unknown>;
+    if (!lecture.listSettings) {
+      reglages = { ok: true, exige: false };
+    } else {
+      try {
+        const liste = await lecture.listSettings(ctx);
+        reglages = {
+          ok: true,
+          exige: true,
+          details: liste.map((r) => ({
+            cle: r.key,
+            libelle: r.label,
+            proposes: r.options.length,
+            exemples: r.options.slice(0, 3).map((o) => o.label),
+            choisi: Boolean(credentials[r.key]),
+          })),
+        };
+      } catch (err) {
+        reglages = { ok: false, erreur: erreurLisible(err) };
+      }
+    }
+
     /* -- Jetons : présence et échéance, jamais la valeur -- */
     const c2 = credentials ?? {};
     const accesDans = restant(c2["accessTokenExpiresAt"], maintenant);
@@ -336,6 +372,7 @@ diagnostic.get("/", async (c) => {
       },
       capacites,
       lecture: { connexion, catalogue, ventes },
+      reglages,
       jetons: {
         accesExpireDansSec: accesDans,
         rafraichissementExpireDansJours:
