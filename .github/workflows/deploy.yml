@@ -85,15 +85,20 @@ jobs:
           echo "Attente de la propagation…"
           sleep 5
 
+          # Le point de santé interroge la base : « db » est faux si D1 est
+          # injoignable, et la route répond alors 503.
           HEALTH=$(curl -sf --retry 3 --retry-delay 5 "$URL/api/health")
           echo "  /api/health      → $HEALTH"
           echo "$HEALTH" | grep -q '"ok":true' || { echo "::error::Le point de santé ne répond pas correctement"; exit 1; }
+          echo "$HEALTH" | grep -q '"db":true' || { echo "::error::La base de données ne répond pas"; exit 1; }
 
-          # Cette route interroge réellement la base : elle échoue si D1 est
-          # inaccessible ou si le schéma n'a pas été appliqué.
+          # La route d'état d'authentification prouve que le routeur et la
+          # session fonctionnent. Elle cherchait « initialized », un champ
+          # disparu avec l'authentification par clé d'accès : le déploiement
+          # réussissait et cette vérification échouait, à chaque poussée.
           STATE=$(curl -sf --retry 3 --retry-delay 5 "$URL/api/auth/state")
           echo "  /api/auth/state  → $STATE"
-          echo "$STATE" | grep -q 'initialized' || { echo "::error::La base ne répond pas"; exit 1; }
+          echo "$STATE" | grep -q '"authenticated"' || { echo "::error::La route d'authentification ne répond pas"; exit 1; }
 
           CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL/")
           echo "  /                → HTTP $CODE"

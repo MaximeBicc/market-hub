@@ -63,7 +63,28 @@ app.use(
  * inaccessible sans session, donc inutilisable pour vérifier qu'un
  * déploiement répond. Il ne divulgue rien d'autre que le nom de l'app.
  */
-app.get("/api/health", (c) => c.json({ ok: true, app: c.env.APP_NAME }));
+app.get("/api/health", async (c) => {
+  /*
+   * La base est INTERROGÉE, pas supposée.
+   *
+   * Ce point ne faisait que renvoyer le nom de l'application : il répondait
+   * « ok » avec une base injoignable ou un schéma non migré. Or c'est
+   * exactement ce que le déploiement automatique vérifie après chaque mise en
+   * ligne — une vérification qui ne vérifie rien laisse passer la seule panne
+   * qu'elle existe pour attraper.
+   *
+   * Une requête triviale suffit : ce qu'on veut savoir, c'est si la liaison
+   * répond, pas ce qu'elle contient.
+   */
+  let db = false;
+  try {
+    await c.env.DB.prepare("SELECT 1").first();
+    db = true;
+  } catch {
+    db = false;
+  }
+  return c.json({ ok: true, app: c.env.APP_NAME, db }, db ? 200 : 503);
+});
 
 app.route("/api/auth", auth);
 app.route("/api/oauth", oauth);
