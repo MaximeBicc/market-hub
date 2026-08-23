@@ -337,6 +337,7 @@ function FicheDiffusion({
             <ChercheCategorie
               key={b.id}
               accountId={b.id}
+              plateforme={b.plateforme}
               titre={
                 b.plateforme === "ebay" ? "Catégorie eBay" : "Catégorie Etsy"
               }
@@ -526,20 +527,38 @@ interface Categorie {
  * route de recherche, chaque appel télécharge son arbre entier — quelques
  * mégaoctets. Un appel par lettre tapée serait insoutenable.
  */
+/**
+ * Les premiers mots significatifs d'un titre.
+ *
+ * Le champ était pré-rempli avec le titre ENTIER — « Clip magnétique range
+ * câble / Organisateur de câbles », sept mots. Une recherche de catégorie
+ * porte sur un type d'objet, pas sur un intitulé commercial : plus on ajoute
+ * de mots, moins on trouve.
+ */
+function motsCles(titre: string): string {
+  return titre
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((m) => m.length > 2)
+    .slice(0, 3)
+    .join(" ");
+}
+
 function ChercheCategorie({
   accountId,
+  plateforme,
   titre,
   defaut,
   valeur,
   onChoix,
 }: {
   accountId: string;
+  plateforme: string;
   titre: string;
   defaut: string;
   valeur: string;
   onChoix: (id: string) => void;
 }) {
-  const [texte, setTexte] = useState(defaut.slice(0, 60));
+  const [texte, setTexte] = useState(motsCles(defaut));
   const [resultats, setResultats] = useState<Categorie[] | null>(null);
 
   const chercher = useMutation({
@@ -599,6 +618,22 @@ function ChercheCategorie({
               {chercher.isPending ? "…" : "Chercher"}
             </button>
           </div>
+
+          {/* Etsy ne sert son référentiel que dans une langue, et sa route
+              n'accepte aucun paramètre de langue. Le dire évite de chercher
+              « range câble » indéfiniment sans comprendre. */}
+          {plateforme === "etsy" && (
+            <span className="muted">
+              Le référentiel d'Etsy est <b>en anglais</b> : cherchez « cable
+              organizer » plutôt que « range câble ».
+            </span>
+          )}
+          {plateforme === "ebay" && (
+            <span className="muted">
+              eBay suggère depuis votre texte, en français. Deux ou trois mots
+              suffisent.
+            </span>
+          )}
 
           {resultats && resultats.length > 0 && (
             <div className="rows" style={{ marginTop: 8 }}>

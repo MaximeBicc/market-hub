@@ -924,3 +924,80 @@ describe("vocabulaire imposé par Etsy", () => {
     }
   });
 });
+
+describe("recherche de catégorie", () => {
+  /** Un fragment d'arbre, dans la forme imbriquée que renvoie Etsy. */
+  const ARBRE = {
+    count: 2,
+    results: [
+      {
+        id: 1,
+        name: "Craft Supplies & Tools",
+        children: [
+          {
+            id: 10,
+            name: "Storage & Organization",
+            children: [
+              { id: 100, name: "Cable Organizers", children: [] },
+              { id: 101, name: "Desk Organizers", children: [] },
+            ],
+          },
+        ],
+      },
+      {
+        id: 2,
+        name: "Home & Living",
+        children: [{ id: 200, name: "Storage Baskets", children: [] }],
+      },
+    ],
+  };
+
+  it("trouve une feuille et rend son chemin", async () => {
+    const { http } = fakeHttp([{ body: ARBRE }]);
+    const r = await adapter.searchCategories(ctxWith(http), "cable organizer");
+
+    expect(r[0]?.id).toBe("100");
+    expect(r[0]?.label).toBe("Cable Organizers");
+    expect(r[0]?.path).toEqual(["Craft Supplies & Tools", "Storage & Organization"]);
+  });
+
+  it("ne propose JAMAIS une catégorie intermédiaire", async () => {
+    // Etsy refuse une annonce rangée dans un nœud qui a des enfants. En
+    // proposer un donnerait un refus incompréhensible au moment de publier.
+    const { http } = fakeHttp([{ body: ARBRE }]);
+    const r = await adapter.searchCategories(ctxWith(http), "storage");
+    expect(r.map((c) => c.id)).not.toContain("10");
+  });
+
+  it("classe au lieu d'exiger tous les mots", async () => {
+    /*
+     * LE DÉFAUT QUE CE TEST VERROUILLE.
+     *
+     * La première version exigeait que tous les mots soient présents. Le champ
+     * étant pré-rempli avec le titre du produit, la recherche portait sur sept
+     * mots et ne trouvait jamais rien — un écran vide, sans explication.
+     */
+    const { http } = fakeHttp([{ body: ARBRE }]);
+    const r = await adapter.searchCategories(
+      ctxWith(http),
+      "clip magnetique range cable organizer inexistant",
+    );
+
+    expect(r.length).toBeGreaterThan(0);
+    // « Cable » et « Organizers » sont dans le NOM de la feuille : elle passe
+    // devant celles qui ne matchent que par leur chemin.
+    expect(r[0]?.id).toBe("100");
+  });
+
+  it("plie les accents", async () => {
+    const { http } = fakeHttp([{ body: ARBRE }]);
+    const r = await adapter.searchCategories(ctxWith(http), "câble");
+    expect(r[0]?.id).toBe("100");
+  });
+
+  it("ignore les mots trop courants", async () => {
+    // Sans cette précaution, « and » remonterait la moitié du référentiel.
+    const { http } = fakeHttp([{ body: ARBRE }]);
+    expect(await adapter.searchCategories(ctxWith(http), "and the")).toEqual([]);
+  });
+});

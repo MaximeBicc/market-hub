@@ -62,6 +62,14 @@ interface NoeudTaxonomie {
   children?: NoeudTaxonomie[];
 }
 
+/*
+ * Mots trop courants pour distinguer quoi que ce soit. Sans eux, « de » ou
+ * « and » remonteraient la moitié du référentiel.
+ */
+const MOTS_VIDES = new Set([
+  "les", "des", "une", "pour", "avec", "sur", "and", "the", "for", "with",
+]);
+
 /** Minuscules, accents pliés : « Câble » et « cable » doivent se trouver. */
 function normaliserTexte(v: string): string {
   return v
@@ -1618,24 +1626,44 @@ export class EtsyAdapter implements MarketplaceAdapter {
       "/seller-taxonomy/nodes",
     );
 
+    /*
+     * UN CLASSEMENT, PAS UN FILTRE BINAIRE.
+     *
+     * La première version exigeait que TOUS les mots soient présents. Comme le
+     * champ est pré-rempli avec le titre du produit — sept mots pour « Clip
+     * magnétique range câble / Organisateur de câbles » — aucune catégorie ne
+     * pouvait satisfaire la condition, et l'écran restait vide sans rien
+     * expliquer. Un « et » sur du texte libre ne trouve jamais rien.
+     *
+     * On compte donc les mots qui correspondent, et on classe. Un mot trouvé
+     * dans le NOM de la feuille pèse plus qu'un mot trouvé dans son chemin :
+     * « Cable » dans « Cable Organizers » vaut mieux que « Cable » aperçu
+     * trois niveaux plus haut.
+     */
     const mots = normaliserTexte(query)
-      .split(/\s+/)
-      .filter((m) => m.length > 1);
+      .split(/[^a-z0-9]+/)
+      .filter((m) => m.length > 2 && !MOTS_VIDES.has(m));
     if (mots.length === 0) return [];
 
-    const trouves: CategorySuggestion[] = [];
+    const trouves: Array<CategorySuggestion & { score: number }> = [];
 
     const parcourir = (noeud: NoeudTaxonomie, chemin: string[]) => {
       const ici = [...chemin, noeud.name ?? ""];
       const enfants = noeud.children ?? [];
 
       if (enfants.length === 0 && noeud.id != null) {
-        // On cherche dans le CHEMIN COMPLET, pas seulement dans le nom de la
-        // feuille : « câble » vit sous « Fournitures », et une feuille nommée
-        // « Organisateurs » seule serait introuvable.
-        const cible = normaliserTexte(ici.join(" "));
-        if (mots.every((m) => cible.includes(m))) {
+        const nom = normaliserTexte(noeud.name ?? "");
+        const complet = normaliserTexte(ici.join(" "));
+
+        let score = 0;
+        for (const m of mots) {
+          if (nom.includes(m)) score += 3;
+          else if (complet.includes(m)) score += 1;
+        }
+
+        if (score > 0) {
           trouves.push({
+            score,
             id: String(noeud.id),
             label: noeud.name ?? String(noeud.id),
             path: ici.slice(0, -1),
@@ -1647,11 +1675,13 @@ export class EtsyAdapter implements MarketplaceAdapter {
 
     for (const r of racines.results ?? []) parcourir(r, []);
 
-    // Les plus courtes d'abord : un chemin court est une catégorie plus
-    // générale, donc plus souvent la bonne quand on hésite.
     return trouves
-      .sort((a, b) => (a.path?.length ?? 0) - (b.path?.length ?? 0))
-      .slice(0, 12);
+      .sort(
+        (a, b) =>
+          b.score - a.score || (a.path?.length ?? 0) - (b.path?.length ?? 0),
+      )
+      .slice(0, 12)
+      .map(({ score: _score, ...c }) => c);
   }
 
   /* ---------------------------------------------------------------- */
