@@ -122,8 +122,8 @@ const PRECONDITIONS: Partial<Record<MarketplaceId, Precondition[]>> = {
   etsy: [
     {
       capacite: "listingCreate",
-      cles: ["shippingProfileId", "readinessStateId", "taxonomyId"],
-      ou: "Etsy impose sur tout objet physique un profil de livraison, un délai de préparation et une catégorie. Les deux premiers se créent dans la boutique ; la catégorie se choisit dans la taxonomie Etsy.",
+      cles: ["shippingProfileId", "readinessStateId"],
+      ou: "Etsy impose un profil de livraison et un délai de préparation, tous deux à créer dans les réglages de la boutique. La catégorie, elle, se choisit produit par produit dans l'onglet Publier — un porte-clés et une bougie ne vont pas au même endroit.",
     },
   ],
 };

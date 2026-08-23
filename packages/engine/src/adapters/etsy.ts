@@ -569,9 +569,19 @@ export class EtsyAdapter implements MarketplaceAdapter {
    */
   capabilities(ctx: MarketplaceContext): CapabilitySet {
     const c = ctx.credentials ?? {};
-    const publiable = Boolean(
-      c["shippingProfileId"] && c["readinessStateId"] && c["taxonomyId"],
-    );
+    /*
+     * LA TAXONOMIE N'EST PAS UN RÉGLAGE DE BOUTIQUE.
+     *
+     * Elle figurait dans cette condition, et c'était une incohérence : la
+     * catégorie se choisit PAR PRODUIT — un porte-clés et une bougie ne vont
+     * pas au même endroit — et `createListing` la lit d'abord sur le produit.
+     * Un catalogue où chaque produit porte la sienne restait donc bloqué à la
+     * porte, alors que l'adaptateur aurait su créer l'annonce.
+     *
+     * Ce qui manque vraiment se dit à la création, produit par produit, avec
+     * un message qui le nomme.
+     */
+    const publiable = Boolean(c["shippingProfileId"] && c["readinessStateId"]);
     return {
       listingCreate: publiable,
       listingUpdate: true,
