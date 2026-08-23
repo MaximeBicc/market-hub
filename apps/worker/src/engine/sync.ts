@@ -214,6 +214,8 @@ async function syncCatalogue(
         externalId: listing.externalId,
         contentHash: listing.contentHash,
         productId: listing.productId,
+        variantId: listing.variantId,
+        groupId: listing.groupId,
         quantity: listing.quantity,
         marketplaceData: listing.marketplaceData,
       })
@@ -479,10 +481,18 @@ async function syncCatalogue(
         }
       }
 
-      // Sortie anticipée, maintenant qu'elle ne peut plus masquer un écart :
-      // ni l'annonce ni le stock central n'ont bougé, il n'y a rien à écrire.
-      // C'est ce qui garde la consommation sous les 100 000 écritures/jour de D1.
-      if (prev?.contentHash === hash && !rapprochement) continue;
+      /*
+       * Sortie anticipée — mais seulement si TOUT est déjà en place.
+       *
+       * Le rattachement à la variante et au groupe fait partie de « en
+       * place ». Sans cette condition, une annonce dont le prix et le stock
+       * n'ont pas bougé était sautée avant d'avoir reçu sa variante : le
+       * modèle se remplissait, les annonces restaient orphelines, et une
+       * vente continuait à ne rien décrémenter. Exactement le défaut que
+       * cette refonte devait corriger.
+       */
+      const rattachee = Boolean(prev?.variantId && prev?.groupId);
+      if (prev?.contentHash === hash && !rapprochement && rattachee) continue;
 
       writes.push(
         db
