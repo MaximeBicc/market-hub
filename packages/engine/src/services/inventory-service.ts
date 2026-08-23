@@ -69,6 +69,24 @@ export class InventoryService {
     throw new Error(`Contention persistante sur le stock de ${variantId}`);
   }
 
+  /**
+   * Fixe le stock parce qu'un humain l'a décidé.
+   *
+   * Mécaniquement identique à `adopt`, sémantiquement l'inverse : `adopt`
+   * recopie ce qu'une plateforme AFFICHE, `set` impose ce qu'une personne
+   * SAIT. La version est incrémentée dans les deux cas, et c'est ce qui
+   * compte pour la suite : au prochain rapprochement, le stock central aura
+   * bougé, donc il sera poussé vers les plateformes au lieu d'être écrasé
+   * par ce qu'elles affichent encore.
+   *
+   * Deux noms pour un même corps, donc — parce qu'un lecteur qui tombe sur
+   * `adopt` dans un formulaire de saisie se demande à juste titre ce qu'on
+   * adopte.
+   */
+  async set(variantId: VariantId, onHand: number): Promise<InventoryItem> {
+    return this.adopt(variantId, Math.max(0, Math.floor(onHand)));
+  }
+
   /** Réserve une quantité vendue mais pas encore expédiée. */
   async reserve(variantId: VariantId, quantity: number): Promise<InventoryItem> {
     for (let attempt = 0; attempt < 8; attempt++) {

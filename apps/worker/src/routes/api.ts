@@ -1737,3 +1737,58 @@ api.get("/products/:id/variantes", async (c) => {
     })),
   });
 });
+
+/**
+ * Fixe le stock de plusieurs déclinaisons d'un coup.
+ *
+ * EN LOT, et non une requête par coloris : un support téléphone en a
+ * dix-sept, et dix-sept allers-retours pour un seul geste de saisie
+ * consommeraient le budget de sous-requêtes d'un trait.
+ *
+ * Ce qui est écrit ici est le stock CENTRAL. Il ne s'agit pas d'une quantité
+ * de publication à part : la version est incrémentée, donc le rapprochement
+ * poussera cette valeur vers les plateformes au lieu de la voir écrasée. Une
+ * seule source de vérité, celle-ci.
+ */
+api.patch("/products/:id/stock-variantes", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<Record<string, number>>()
+    .catch(() => ({}) as Record<string, number>);
+
+  // Les variantes de CE produit, et elles seules : sans ce filtre, la route
+  // permettrait d'écrire le stock de n'importe quel article du catalogue.
+  const siennes = new Set(
+    (
+      await db
+        .select({ id: variant.id })
+        .from(variant)
+        .where(eq(variant.productId, id))
+    ).map((v) => v.id),
+  );
+
+  const mod = buildEngine(c.env, { used: 0 });
+  const faits: string[] = [];
+  const refuses: string[] = [];
+
+  for (const [variantId, valeur] of Object.entries(body)) {
+    if (!siennes.has(variantId)) {
+      refuses.push(variantId);
+      continue;
+    }
+    const n = Number(valeur);
+    if (!Number.isFinite(n) || n < 0) {
+      refuses.push(variantId);
+      continue;
+    }
+    await mod.inventoryService.ensure(variantId, 0);
+    await mod.inventoryService.set(variantId, n);
+    faits.push(variantId);
+  }
+
+  if (faits.length === 0) {
+    return c.json({ error: "Aucun stock valide à enregistrer" }, 400);
+  }
+  return c.json({ ok: true, enregistres: faits.length, refuses: refuses.length });
+});

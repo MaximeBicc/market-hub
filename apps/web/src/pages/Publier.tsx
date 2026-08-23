@@ -148,10 +148,9 @@ export function Publier() {
         <h1>Publier</h1>
       </div>
 
-      <p className="muted" style={{ margin: "0 0 14px", lineHeight: 1.55 }}>
-        Un produit, une fiche, plusieurs boutiques. Tout ce qui part d'ici est
-        créé <b>en brouillon</b> : la mise en vente reste un geste que vous
-        faites vous-même chez la plateforme.
+      <p className="muted" style={{ margin: "0 0 12px" }}>
+        Une fiche, plusieurs boutiques. Tout part en <b>brouillon</b> — la mise
+        en vente reste votre geste.
       </p>
 
       {liste.length === 0 && (
@@ -267,19 +266,21 @@ function FicheDiffusion({
 
       {/* ---- Déclarations ------------------------------------------- */}
       <div className="card">
-        <div className="banner banner--warn" style={{ marginTop: 0 }}>
-          <span className="banner__t">Pourquoi ces trois questions</span>
-          <span className="banner__b">
-            Elles étaient répondues d'office par le code : « neuf », « fait
-            main par moi », « à la commande ». Sur de la revente c'est une
-            fausse déclaration, et Etsy suspend des boutiques pour ce motif.
-            Tant qu'elles sont vides, la diffusion est refusée au lieu
-            d'inventer une réponse.
-          </span>
-        </div>
+        <details style={{ marginBottom: 10 }}>
+          <summary className="muted" style={{ cursor: "pointer" }}>
+            Pourquoi ces trois questions sont obligatoires
+          </summary>
+          <p className="row__s" style={{ whiteSpace: "normal", lineHeight: 1.45 }}>
+            Elles étaient répondues d'office par le code : « neuf », « fait main
+            par moi », « à la commande ». Sur de la revente, c'est une fausse
+            déclaration — et Etsy suspend des boutiques pour ce motif. Vides,
+            la diffusion est refusée plutôt qu'inventée.
+          </p>
+        </details>
 
+        <div className="grille-decl">
         <div className="field">
-          <label htmlFor="cond">État de l'article — exigé par eBay</label>
+          <label htmlFor="cond">État — eBay</label>
           <select
             id="cond"
             className="input"
@@ -296,7 +297,7 @@ function FicheDiffusion({
         </div>
 
         <div className="field">
-          <label htmlFor="qui">Qui l'a fabriqué — exigé par Etsy</label>
+          <label htmlFor="qui">Fabriqué par — Etsy</label>
           <select
             id="qui"
             className="input"
@@ -313,7 +314,7 @@ function FicheDiffusion({
         </div>
 
         <div className="field">
-          <label htmlFor="quand">Quand — exigé par Etsy</label>
+          <label htmlFor="quand">Quand — Etsy</label>
           <select
             id="quand"
             className="input"
@@ -327,6 +328,7 @@ function FicheDiffusion({
               </option>
             ))}
           </select>
+        </div>
         </div>
 
         {/* Les deux référentiels n'ont aucune correspondance : chercher se
@@ -357,10 +359,9 @@ function FicheDiffusion({
       {/* ---- Photos -------------------------------------------------- */}
       <h2 className="sec">Photos <span>{photos.length}</span></h2>
       <div className="card">
-        <p className="muted" style={{ margin: "0 0 10px", lineHeight: 1.5 }}>
-          Des adresses en <b>HTTPS</b> uniquement — eBay refuse tout le reste,
-          et une annonce sans photo ne peut jamais être mise en vente chez Etsy.
-          Les plateformes téléchargent l'image et en gardent leur propre copie.
+        <p className="muted" style={{ margin: "0 0 8px" }}>
+          Adresses en <b>HTTPS</b> uniquement. Les plateformes téléchargent
+          l'image et en gardent leur copie.
         </p>
 
         {photos.length > 0 && (
@@ -498,10 +499,9 @@ function FicheDiffusion({
               );
             })}
           </div>
-          <p className="muted" style={{ marginTop: 10, lineHeight: 1.55 }}>
-            Rien n'est en vente. Chaque brouillon est à relire puis à publier
-            depuis la plateforme. Vous pouvez relancer sans risque : une
-            boutique où l'annonce existe déjà est laissée telle quelle.
+          <p className="muted" style={{ marginTop: 8 }}>
+            Rien n'est en vente. Relancer est sans risque : une annonce déjà
+            créée n'est pas recréée.
           </p>
         </>
       )}
@@ -680,33 +680,60 @@ interface VarianteVue {
 }
 
 /**
- * Ce qui va réellement partir, coloris par coloris.
+ * Le stock de chaque déclinaison, visible ET modifiable.
  *
  * L'écran n'affichait que le stock du PARENT — un nombre qui n'existe pas
- * pour un produit à dix-sept déclinaisons. Impossible de vérifier avant de
- * publier, et impossible de repérer un coloris sans stock : il serait parti
- * à zéro, invendable, sans que rien ne le signale.
+ * pour un produit à dix-sept coloris. Impossible de vérifier avant de
+ * publier, impossible de repérer une déclinaison qui partirait à zéro.
  *
- * Rien ne se saisit ici. Le stock vient des plateformes, et le modifier à la
- * main dans cet écran créerait une seconde source de vérité — exactement ce
- * que le rapprochement de stock existe pour éviter.
+ * Ce qui est édité ici est le stock CENTRAL, pas une quantité de publication
+ * à part. La nuance est tout : une seconde valeur, propre à l'annonce,
+ * divergerait dès la première vente et personne ne saurait laquelle croire.
+ * Écrire ici incrémente la version, donc le rapprochement POUSSERA cette
+ * valeur vers les plateformes au lieu de se la faire écraser.
  */
 function Variantes({ produitId }: { produitId: string }) {
+  const qc = useQueryClient();
+  const [saisie, setSaisie] = useState<Record<string, string>>({});
+
   const { data } = useQuery({
     queryKey: ["variantes", produitId],
     queryFn: () =>
-      api.get<{
-        axes: Array<{ name: string; values: string[] }>;
-        variantes: VarianteVue[];
-      }>(`/products/${produitId}/variantes`),
+      api.get<{ variantes: VarianteVue[] }>(`/products/${produitId}/variantes`),
+  });
+
+  const enregistrer = useMutation({
+    mutationFn: (valeurs: Record<string, number>) =>
+      api.patch<{ enregistres: number }>(
+        `/products/${produitId}/stock-variantes`,
+        valeurs,
+      ),
+    onSuccess: async (r) => {
+      toast(`${r.enregistres} stock(s) enregistré(s)`);
+      setSaisie({});
+      await qc.invalidateQueries({ queryKey: ["variantes", produitId] });
+      await qc.invalidateQueries({ queryKey: ["produits-publier"] });
+    },
+    onError: (e: unknown) =>
+      toast(e instanceof Error ? e.message : "Enregistrement impossible"),
   });
 
   const variantes = (data?.variantes ?? []).filter((v) => v.status === "active");
   if (variantes.length === 0) return null;
 
-  const sansStock = variantes.filter((v) => v.onHand === null);
-  const aZero = variantes.filter((v) => v.onHand === 0);
-  const total = variantes.reduce((n, v) => n + (v.onHand ?? 0), 0);
+  const valeurDe = (v: VarianteVue) =>
+    saisie[v.id] ?? (v.onHand === null ? "" : String(v.onHand));
+
+  const modifiees = Object.entries(saisie).filter(([id, val]) => {
+    const v = variantes.find((x) => x.id === id);
+    return v && val !== "" && Number(val) !== v.onHand;
+  });
+
+  const total = variantes.reduce((n, v) => {
+    const brut = valeurDe(v);
+    return n + (brut === "" ? 0 : Number(brut) || 0);
+  }, 0);
+  const inconnues = variantes.filter((v) => valeurDe(v) === "").length;
 
   return (
     <>
@@ -714,75 +741,68 @@ function Variantes({ produitId }: { produitId: string }) {
         Déclinaisons <span>{variantes.length}</span>
       </h2>
 
-      {variantes.length === 1 && variantes[0]?.optionValues.length === 0 ? (
-        <div className="card">
-          <p className="muted" style={{ margin: 0 }}>
-            Ce produit n'a pas de déclinaison : une seule annonce, un seul
-            stock.
-          </p>
-        </div>
-      ) : (
-        <div className="card">
-          <p className="muted" style={{ margin: "0 0 10px", lineHeight: 1.5 }}>
-            <b>Une seule annonce</b> sera créée, avec un menu de choix. Chaque
-            ligne part avec son propre stock — rien à saisir, il vient de vos
-            boutiques.
-          </p>
+      <div className="card">
+        <p className="muted" style={{ margin: "0 0 6px" }}>
+          <b>Une seule annonce</b>, avec un menu de choix. Le stock est
+          modifiable — c'est le stock central, il repartira vers vos boutiques.
+        </p>
 
-          <div className="rows">
-            {variantes.map((v) => (
-              <div className="row" key={v.id}>
-                <div className="row__main">
-                  <div className="row__t">
-                    {v.optionValues.join(" · ") || "sans déclinaison"}
-                  </div>
-                  <div className="row__s">
-                    {v.sku ?? "sans SKU"} · {money(v.priceAmount, v.priceCurrency)}
-                  </div>
-                </div>
-                <div className="row__end">
-                  {v.onHand === null ? (
-                    <span className="pill pill--warn">stock inconnu</span>
-                  ) : (
-                    <span className={v.onHand === 0 ? "pill pill--mute" : "amount"}>
-                      {v.onHand === 0 ? "épuisé" : `${v.onHand} en stock`}
-                    </span>
-                  )}
-                </div>
+        {variantes.map((v) => (
+          <div className="decl" key={v.id}>
+            <div>
+              <div className="decl__nom">
+                {v.optionValues.join(" · ") || "sans déclinaison"}
               </div>
-            ))}
-          </div>
-
-          <p className="muted" style={{ marginTop: 10, lineHeight: 1.5 }}>
-            Total : <b>{total}</b> unité{total > 1 ? "s" : ""} réparties sur{" "}
-            {variantes.length} déclinaisons.
-          </p>
-
-          {(sansStock.length > 0 || aZero.length > 0) && (
-            <div className="banner banner--warn" style={{ marginTop: 4 }}>
-              <span className="banner__t">À vérifier avant de diffuser</span>
-              <span className="banner__b">
-                {sansStock.length > 0 && (
-                  <>
-                    {sansStock.length} déclinaison
-                    {sansStock.length > 1 ? "s" : ""} sans stock connu — elle
-                    {sansStock.length > 1 ? "s partiront" : " partira"} à zéro,
-                    donc invendable{sansStock.length > 1 ? "s" : ""}.{" "}
-                  </>
-                )}
-                {aZero.length > 0 && (
-                  <>
-                    {aZero.length} déclinaison{aZero.length > 1 ? "s" : ""} à
-                    zéro : l'annonce sera créée, mais ce
-                    {aZero.length > 1 ? "s coloris ne seront" : " coloris ne sera"}{" "}
-                    pas achetable.
-                  </>
-                )}
-              </span>
+              <div className="decl__meta">
+                {v.sku ?? "sans SKU"} · {money(v.priceAmount, v.priceCurrency)}
+              </div>
             </div>
-          )}
+            <input
+              className="input decl__stock"
+              type="number"
+              min={0}
+              inputMode="numeric"
+              value={valeurDe(v)}
+              placeholder="?"
+              onChange={(e) => setSaisie({ ...saisie, [v.id]: e.target.value })}
+            />
+          </div>
+        ))}
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            marginTop: 10,
+          }}
+        >
+          <span className="muted">
+            {total} unité{total > 1 ? "s" : ""}
+            {inconnues > 0 && (
+              <span style={{ color: "var(--warn)" }}>
+                {" "}
+                · {inconnues} sans stock, partirai{inconnues > 1 ? "ent" : "t"} à
+                zéro
+              </span>
+            )}
+          </span>
+          <button
+            className="btn btn--small btn--primary"
+            disabled={modifiees.length === 0 || enregistrer.isPending}
+            onClick={() =>
+              enregistrer.mutate(
+                Object.fromEntries(modifiees.map(([id, val]) => [id, Number(val)])),
+              )
+            }
+          >
+            {modifiees.length === 0
+              ? "Stock à jour"
+              : `Enregistrer ${modifiees.length} stock${modifiees.length > 1 ? "s" : ""}`}
+          </button>
         </div>
-      )}
+      </div>
     </>
   );
 }
