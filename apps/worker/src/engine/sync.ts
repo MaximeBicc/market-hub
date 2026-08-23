@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { SyncTask } from "@hub/core";
 import { reconcileStock } from "@hub/engine";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
+import { normaliserValeur } from "../lib/variantes.js";
 import {
   eventLog,
   listing,
@@ -40,14 +41,6 @@ import { d1Repositories } from "./repositories.js";
  * variante : sans pliage des accents et de la casse, un changement cosmétique
  * chez la plateforme créerait une variante fantôme, avec son propre stock.
  */
-function normaliser(v: string): string {
-  return v
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "-");
-}
 
 /**
  * Reconstitue les axes du produit à partir de ce que ses variantes portent.
@@ -367,7 +360,7 @@ async function syncCatalogue(
       const optionKey = (item.optionValues ?? [])
         .map(
           (o) =>
-            `${normaliser(o.name)}=${normaliser(o.value)}`,
+            `${normaliserValeur(o.name)}=${normaliserValeur(o.value)}`,
         )
         .join("|");
 

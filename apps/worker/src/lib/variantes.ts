@@ -26,3 +26,23 @@ export async function varianteUnique(
     .limit(2);
   return v.length === 1 ? v[0]!.id : undefined;
 }
+
+/**
+ * L'identité d'une déclinaison, indépendante de sa graphie.
+ *
+ * « Bleu Marine », « bleu marine » et « Bleu  Marine » désignent le même
+ * coloris ; sans mise à plat, la synchronisation en créerait trois et le
+ * stock se répartirait entre des jumeaux.
+ *
+ * Cette règle est partagée entre la synchronisation et la saisie manuelle À
+ * DESSEIN : deux copies qui divergent d'un espace feraient qu'un coloris
+ * saisi à la main ne serait plus reconnu comme celui de la boutique.
+ */
+export function normaliserValeur(v: string): string {
+  return v
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+}

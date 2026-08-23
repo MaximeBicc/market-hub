@@ -20,6 +20,13 @@ function parseNumberInput(val: string | number | undefined): number {
   return isNaN(num) ? 0 : num;
 }
 
+interface LigneDecl {
+  valeur: string;
+  sku: string;
+  prixEuro: string;
+  stock: number;
+}
+
 export function ProductModal({ product, consumables = [], onClose, onSuccess }: ProductModalProps) {
   const qc = useQueryClient();
   const isEditing = Boolean(product);
@@ -69,6 +76,19 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
     return [];
   });
   const [tagInput, setTagInput] = useState("");
+
+  /*
+   * LES DÉCLINAISONS.
+   *
+   * Un produit qui existe en trois coloris n'a pas « un » stock : il en a
+   * trois. Tant que l'API Alibaba n'est pas branchée, ces lignes se saisissent
+   * à la main — c'est la seule façon de dire « il me reste zéro violet »
+   * autrement qu'en le découvrant à la vente.
+   */
+  const [axe, setAxe] = useState("Couleur");
+  const [decl, setDecl] = useState<LigneDecl[]>([]);
+  /** Les déclinaisons chargées depuis le serveur, pour ne rien renvoyer d'inchangé. */
+  const [declChargees, setDeclChargees] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Récupérer la liste des tags existants pour autocomplétion
@@ -77,6 +97,51 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
     queryFn: () => api.get<{ tags: Array<{ name: string; count: number }> }>("/products/tags"),
   });
   const existingTags = existingTagsData?.tags ?? [];
+
+  /*
+   * Les déclinaisons déjà en base, quand on rouvre une fiche.
+   *
+   * Sans ce chargement, rouvrir un produit à trois coloris et enregistrer
+   * effacerait les trois : le formulaire renverrait une liste vide, et la
+   * route interpréterait le vide comme « plus de déclinaisons ».
+   */
+  const { data: declData } = useQuery({
+    queryKey: ["variantes", product?.id],
+    queryFn: () =>
+      api.get<{
+        axes: Array<{ name: string; values: string[] }>;
+        variantes: Array<{
+          sku: string | null;
+          optionValues: string[];
+          priceAmount: number;
+          status: string;
+          onHand: number | null;
+        }>;
+      }>(`/products/${product!.id}/variantes`),
+    enabled: Boolean(product?.id),
+  });
+
+  if (declData && !declChargees) {
+    const vivantes = declData.variantes.filter(
+      (v) => v.status === "active" && v.optionValues.length > 0,
+    );
+    if (vivantes.length > 0) {
+      setAxe(declData.axes[0]?.name || "Couleur");
+      setDecl(
+        vivantes.map((v) => ({
+          valeur: v.optionValues.join(" / "),
+          sku: v.sku ?? "",
+          prixEuro: v.priceAmount ? (v.priceAmount / 100).toFixed(2) : "",
+          stock: v.onHand ?? 0,
+        })),
+      );
+    }
+    setDeclChargees(true);
+  }
+
+  /** Vrai si ce produit vient d'une boutique : ses déclinaisons y sont écrites. */
+  const synchronise = (product?.listings?.length ?? 0) > 0;
+  const totalDecl = decl.reduce((n, l) => n + (Number(l.stock) || 0), 0);
 
   const addTag = (tagToAdd: string) => {
     const clean = tagToAdd.trim();
@@ -121,7 +186,9 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
         priceAmount: saleCents,
         priceCurrency: "EUR",
         costPrice: costCents,
-        stock: Math.max(0, Number(stock) || 0),
+        // Avec des déclinaisons, le stock du produit est la somme des leurs.
+        // L'envoyer déjà juste évite qu'un « 0 » clignote avant le recalcul.
+        stock: decl.length > 0 ? totalDecl : Math.max(0, Number(stock) || 0),
         minAlert: Math.max(1, Number(minAlert) || 3),
         location: location.trim() || null,
         weightGrams: weightGrams.trim() ? Math.max(0, Math.round(parseNumberInput(weightGrams))) : null,
@@ -132,12 +199,42 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
         tags: tags.map((t) => t.trim()).filter(Boolean),
       };
 
-      return api.post<{ ok: boolean; id: string; sku: string }>("/products", payload);
+      const cree = await api.post<{ ok: boolean; id: string; sku: string }>(
+        "/products",
+        payload,
+      );
+
+      /*
+       * Les déclinaisons ensuite, et seulement si on en a.
+       *
+       * En second appel parce que la création du produit doit avoir réussi
+       * pour qu'il y ait quelque chose à décliner. Un produit synchronisé est
+       * laissé tel quel : ses coloris viennent de la boutique, et la route
+       * les refuserait de toute façon.
+       */
+      if (decl.length > 0 && !synchronise) {
+        await api.put(`/products/${cree.id}/declinaisons`, {
+          axe: axe.trim() || "Couleur",
+          lignes: decl
+            .filter((l) => l.valeur.trim())
+            .map((l) => ({
+              valeur: l.valeur.trim(),
+              sku: l.sku.trim() || null,
+              prixCentimes: l.prixEuro.trim()
+                ? Math.round(parseNumberInput(l.prixEuro) * 100)
+                : null,
+              stock: Math.max(0, Number(l.stock) || 0),
+            })),
+        });
+      }
+
+      return cree;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["inventory"] });
       qc.invalidateQueries({ queryKey: ["products"] });
       qc.invalidateQueries({ queryKey: ["product-tags"] });
+      qc.invalidateQueries({ queryKey: ["variantes"] });
       toast(isEditing ? "Produit mis à jour !" : "Nouveau produit ajouté au stock !");
       onSuccess?.();
       onClose();
@@ -296,32 +393,45 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div className="field">
                 <label className="field__label">Quantité en stock</label>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <button
-                    type="button"
-                    className="qty-btn"
-                    onClick={() => setStock((s) => Math.max(0, s - 1))}
-                    title="-1 unité"
-                  >
-                    <Icon name="minus" />
-                  </button>
-                  <input
-                    type="number"
-                    min="0"
+                {decl.length > 0 ? (
+                  /* Avec des déclinaisons, ce champ n'a plus de sens propre :
+                     le stock vit sur chaque coloris. Le laisser saisissable
+                     inviterait à écrire un nombre que rien ne conserverait. */
+                  <div
                     className="input font-mono"
-                    style={{ textAlign: "center", fontWeight: 700 }}
-                    value={stock}
-                    onChange={(e) => setStock(Math.max(0, Number(e.target.value) || 0))}
-                  />
-                  <button
-                    type="button"
-                    className="qty-btn"
-                    onClick={() => setStock((s) => s + 1)}
-                    title="+1 unité"
+                    style={{ textAlign: "center", fontWeight: 700, opacity: 0.75 }}
+                    title="Somme des déclinaisons ci-dessous"
                   >
-                    <Icon name="plus" />
-                  </button>
-                </div>
+                    {totalDecl}
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <button
+                      type="button"
+                      className="qty-btn"
+                      onClick={() => setStock((s) => Math.max(0, s - 1))}
+                      title="-1 unité"
+                    >
+                      <Icon name="minus" />
+                    </button>
+                    <input
+                      type="number"
+                      min="0"
+                      className="input font-mono"
+                      style={{ textAlign: "center", fontWeight: 700 }}
+                      value={stock}
+                      onChange={(e) => setStock(Math.max(0, Number(e.target.value) || 0))}
+                    />
+                    <button
+                      type="button"
+                      className="qty-btn"
+                      onClick={() => setStock((s) => s + 1)}
+                      title="+1 unité"
+                    >
+                      <Icon name="plus" />
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="field">
@@ -334,6 +444,129 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
                   onChange={(e) => setMinAlert(Math.max(1, Number(e.target.value) || 1))}
                 />
               </div>
+            </div>
+
+            {/* Les déclinaisons : un coloris par ligne, chacun son stock */}
+            <div className="field">
+              <label className="field__label">Déclinaisons</label>
+              {synchronise ? (
+                <p className="row__s" style={{ whiteSpace: "normal", margin: 0 }}>
+                  Ce produit vient d'une boutique connectée. Ses déclinaisons y
+                  sont réécrites à chaque synchronisation — elles se modifient
+                  chez la plateforme, pas ici.
+                </p>
+              ) : (
+                <>
+                  {decl.length > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginBottom: 8,
+                      }}
+                    >
+                      <span className="row__s">Critère</span>
+                      <input
+                        type="text"
+                        className="input"
+                        style={{ maxWidth: 160 }}
+                        value={axe}
+                        placeholder="Couleur"
+                        onChange={(e) => setAxe(e.target.value)}
+                      />
+                    </div>
+                  )}
+
+                  {decl.map((l, i) => (
+                    <div className="decl-ligne" key={i}>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Noir"
+                        value={l.valeur}
+                        onChange={(e) =>
+                          setDecl(
+                            decl.map((x, j) =>
+                              j === i ? { ...x, valeur: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                      <input
+                        type="text"
+                        className="input font-mono"
+                        placeholder="SKU"
+                        value={l.sku}
+                        onChange={(e) =>
+                          setDecl(
+                            decl.map((x, j) =>
+                              j === i ? { ...x, sku: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                      <input
+                        type="text"
+                        className="input font-mono"
+                        placeholder={priceEuro || "prix"}
+                        value={l.prixEuro}
+                        onChange={(e) =>
+                          setDecl(
+                            decl.map((x, j) =>
+                              j === i ? { ...x, prixEuro: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        className="input font-mono"
+                        style={{ textAlign: "right" }}
+                        value={l.stock}
+                        onChange={(e) =>
+                          setDecl(
+                            decl.map((x, j) =>
+                              j === i
+                                ? {
+                                    ...x,
+                                    stock: Math.max(0, Number(e.target.value) || 0),
+                                  }
+                                : x,
+                            ),
+                          )
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="qty-btn"
+                        title="Retirer cette déclinaison"
+                        onClick={() => setDecl(decl.filter((_, j) => j !== i))}
+                      >
+                        <Icon name="close" />
+                      </button>
+                    </div>
+                  ))}
+
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    style={{ marginTop: 6 }}
+                    onClick={() =>
+                      setDecl([...decl, { valeur: "", sku: "", prixEuro: "", stock: 0 }])
+                    }
+                  >
+                    <Icon name="plus" /> Ajouter une déclinaison
+                  </button>
+
+                  <p className="row__s" style={{ whiteSpace: "normal", marginTop: 6 }}>
+                    {decl.length === 0
+                      ? "Sans déclinaison, le produit garde le stock unique saisi ci-dessus."
+                      : "Prix et SKU sont facultatifs : vides, la déclinaison reprend ceux du produit. Retirer une ligne l'archive — son historique de stock est conservé."}
+                  </p>
+                </>
+              )}
             </div>
 
             {/* Ligne 4 : Emplacement en atelier & Poids pour expédition */}

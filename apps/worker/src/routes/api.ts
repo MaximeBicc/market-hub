@@ -18,7 +18,7 @@ import {
 } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { randomId } from "../lib/crypto.js";
-import { varianteUnique } from "../lib/variantes.js";
+import { normaliserValeur, varianteUnique } from "../lib/variantes.js";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
 import { sendPushToUser } from "../lib/push.js";
@@ -1365,6 +1365,25 @@ api.post("/products/:id/stock", async (c) => {
   const [existing] = await db.select().from(product).where(eq(product.id, id)).limit(1);
   if (!existing) return c.json({ error: "product_not_found" }, 404);
 
+  /*
+   * SUR UN PRODUIT DÉCLINÉ, « le » stock n'existe pas.
+   *
+   * La route écrivait `product.stock` puis tentait la variante unique — qui
+   * n'existe pas ici. L'écriture du stock ne touchait donc rien, mais le
+   * résumé affiché changeait : le bouton « +1 » semblait marcher et le
+   * chiffre revenait à sa valeur d'origine au passage suivant.
+   */
+  const seule = await varianteUnique(db, id);
+  if (!seule) {
+    return c.json(
+      {
+        error:
+          "Ce produit a plusieurs déclinaisons : le stock se règle coloris par coloris, dans la fiche produit.",
+      },
+      409,
+    );
+  }
+
   let newStock = existing.stock;
   if (typeof body.stock === "number") {
     newStock = Math.max(0, body.stock);
@@ -1380,7 +1399,7 @@ api.post("/products/:id/stock", async (c) => {
   await db
     .update(inventory)
     .set({ onHand: newStock, updatedAt: now })
-    .where(eq(inventory.variantId, (await varianteUnique(db, id)) ?? ""));
+    .where(eq(inventory.variantId, seule));
 
   // Met à jour les listings synchronisés avec ce SKU
   if (existing.sku) {
@@ -1399,12 +1418,27 @@ api.delete("/products/:id", async (c) => {
   const id = c.req.param("id");
 
   await db.update(listing).set({ productId: null }).where(eq(listing.productId, id));
-  await db.delete(inventory).where(
-    eq(inventory.variantId, (await varianteUnique(db, id)) ?? ""),
-  );
+
+  /*
+   * TOUTES les variantes, pas « la » variante.
+   *
+   * Le code ne supprimait le stock que d'un produit à variante unique. Sur un
+   * produit décliné, `varianteUnique` renvoie `undefined` : rien n'était
+   * effacé, et la suppression du produit se heurtait ensuite à la clé
+   * étrangère de `variant` — une erreur 500 sans explication, à chaque essai.
+   */
+  const siennes = await db
+    .select({ id: variant.id })
+    .from(variant)
+    .where(eq(variant.productId, id));
+
+  for (const v of siennes) {
+    await db.delete(inventory).where(eq(inventory.variantId, v.id));
+  }
+  await db.delete(variant).where(eq(variant.productId, id));
   await db.delete(product).where(eq(product.id, id));
 
-  return c.json({ ok: true, id });
+  return c.json({ ok: true, id, variantesSupprimees: siennes.length });
 });
 
 /** Supprimer un consommable d'emballage. */
@@ -1751,6 +1785,182 @@ api.get("/products/:id/variantes", async (c) => {
  * poussera cette valeur vers les plateformes au lieu de la voir écrasée. Une
  * seule source de vérité, celle-ci.
  */
+/**
+ * Déclarer à la main les déclinaisons d'un produit.
+ *
+ * Le stock réel viendra un jour des commandes Alibaba, par l'API. En
+ * attendant, il faut pouvoir dire « ce porte-clés existe en noir, blanc et
+ * rouge, et j'en ai douze, huit et zéro » sans passer par une boutique.
+ *
+ * Les variantes retirées sont ARCHIVÉES, jamais supprimées : une annonce en
+ * ligne pointe sur l'identifiant de variante, et l'effacer laisserait cette
+ * annonce sans stock rattachable — sans erreur, jusqu'à la prochaine vente.
+ */
+api.put("/products/:id/declinaisons", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  type CorpsDeclinaisons = {
+    axe?: string;
+    lignes?: Array<{
+      valeur?: string;
+      sku?: string | null;
+      prixCentimes?: number | null;
+      stock?: number;
+    }>;
+  };
+  const body = await c.req
+    .json<CorpsDeclinaisons>()
+    .catch(() => ({}) as CorpsDeclinaisons);
+
+  const [p] = await db
+    .select({
+      id: product.id,
+      sku: product.sku,
+      priceAmount: product.priceAmount,
+      priceCurrency: product.priceCurrency,
+    })
+    .from(product)
+    .where(eq(product.id, id))
+    .limit(1);
+  if (!p) return c.json({ error: "product_not_found" }, 404);
+
+  /*
+   * UN PRODUIT SYNCHRONISÉ NE SE MODIFIE PAS ICI.
+   *
+   * Les déclinaisons d'un produit venu de Shopify sont réécrites à chaque
+   * passage de la synchronisation, toutes les cinq minutes. Les éditer ici
+   * serait sans effet durable — et, entre-temps, archiverait des variantes
+   * sur lesquelles des annonces en ligne s'appuient. On refuse en le disant.
+   */
+  const [rattachee] = await db
+    .select({ id: listing.id })
+    .from(listing)
+    .where(eq(listing.productId, id))
+    .limit(1);
+  if (rattachee) {
+    return c.json(
+      {
+        error:
+          "Ce produit vient d'une boutique connectée : ses déclinaisons sont réécrites à chaque synchronisation. Modifiez-les chez la plateforme.",
+      },
+      409,
+    );
+  }
+
+  const axe = (body.axe ?? "").trim() || "Couleur";
+  const lignes = (body.lignes ?? [])
+    .map((l) => ({
+      valeur: (l.valeur ?? "").trim(),
+      sku: (l.sku ?? "")?.trim() || null,
+      prixCentimes:
+        typeof l.prixCentimes === "number" && l.prixCentimes >= 0
+          ? Math.round(l.prixCentimes)
+          : null,
+      stock: Math.max(0, Math.round(Number(l.stock ?? 0)) || 0),
+    }))
+    .filter((l) => l.valeur.length > 0);
+
+  if (lignes.length === 0) {
+    return c.json({ error: "Aucune déclinaison à enregistrer" }, 400);
+  }
+
+  /*
+   * La clé d'identité, au format « couleur=noir ».
+   *
+   * C'est celui qu'écrit la synchronisation. S'en écarter ferait qu'un
+   * coloris saisi ici et le même coloris relevé chez la boutique
+   * deviendraient deux variantes distinctes, chacune avec la moitié du stock.
+   *
+   * Deux « Noir » se replieraient sur la même clé et l'un écraserait l'autre
+   * en silence : mieux vaut le refuser à la saisie.
+   */
+  const cles = lignes.map(
+    (l) => `${normaliserValeur(axe)}=${normaliserValeur(l.valeur)}`,
+  );
+  if (new Set(cles).size !== cles.length) {
+    return c.json({ error: "Deux déclinaisons portent le même nom" }, 400);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const mod = buildEngine(c.env, { used: 0 });
+  const gardees = new Set<string>();
+
+  for (let i = 0; i < lignes.length; i++) {
+    const l = lignes[i]!;
+    const cle = cles[i]!;
+    gardees.add(cle);
+
+    const [existante] = await db
+      .select({ id: variant.id })
+      .from(variant)
+      .where(and(eq(variant.productId, id), eq(variant.optionKey, cle)))
+      .limit(1);
+
+    const variantId = existante?.id ?? `var_${randomId()}`;
+    await db
+      .insert(variant)
+      .values({
+        id: variantId,
+        productId: id,
+        sku: l.sku,
+        optionKey: cle,
+        optionValues: JSON.stringify([l.valeur]),
+        priceAmount: l.prixCentimes ?? p.priceAmount,
+        priceCurrency: p.priceCurrency ?? "EUR",
+        position: i,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [variant.productId, variant.optionKey],
+        set: {
+          sku: l.sku,
+          optionValues: JSON.stringify([l.valeur]),
+          priceAmount: l.prixCentimes ?? p.priceAmount,
+          position: i,
+          status: "active",
+          updatedAt: now,
+        },
+      });
+
+    await mod.inventoryService.ensure(variantId, 0);
+    await mod.inventoryService.set(variantId, l.stock);
+  }
+
+  /*
+   * Ce qui n'est plus déclaré passe en archivé — y compris la variante par
+   * défaut, celle à `optionKey` vide, créée avec le produit. La laisser
+   * active ferait compter son stock une seconde fois dans le total.
+   */
+  const toutes = await db
+    .select({ id: variant.id, optionKey: variant.optionKey, status: variant.status })
+    .from(variant)
+    .where(eq(variant.productId, id));
+
+  let archivees = 0;
+  for (const v of toutes) {
+    if (gardees.has(v.optionKey) || v.status !== "active") continue;
+    await db
+      .update(variant)
+      .set({ status: "archived", updatedAt: now })
+      .where(eq(variant.id, v.id));
+    archivees++;
+  }
+
+  await db
+    .update(product)
+    .set({
+      options: JSON.stringify([{ name: axe, values: lignes.map((l) => l.valeur) }]),
+      updatedAt: now,
+    })
+    .where(eq(product.id, id));
+
+  await recalculerStockProduit(db, id);
+
+  return c.json({ ok: true, declinaisons: lignes.length, archivees });
+});
+
 api.patch("/products/:id/stock-variantes", async (c) => {
   const db = drizzle(c.env.DB);
   const id = c.req.param("id");

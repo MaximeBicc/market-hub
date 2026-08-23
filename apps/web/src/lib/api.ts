@@ -35,6 +35,11 @@ export const api = {
       method: "PATCH",
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
+  put: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: "PUT",
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, {
       method: "POST",
