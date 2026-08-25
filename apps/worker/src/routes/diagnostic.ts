@@ -784,9 +784,15 @@ diagnostic.get("/alibaba/produit", async (c) => {
           skus?: Array<{
             sku_id?: number;
             image?: string;
-            cost_origin_price?: string;
-            total_origin_cost_price?: string;
-            shipping_fee?: string;
+            cost_origin_price?: string | number;
+            total_origin_cost_price?: string | number;
+            shipping_fee?: string | number;
+            ladder_price?: Array<{
+              min_quantity?: number;
+              max_quantity?: number;
+              price?: number;
+              currency?: string;
+            }>;
             sku_attr_list?: Array<{
               attr_name_desc?: string;
               attr_value_desc?: string;
@@ -800,6 +806,10 @@ diagnostic.get("/alibaba/produit", async (c) => {
     };
     const d = j.result?.result_data;
     if (d) {
+      // La quantité minimale est la clé de lecture de tous les montants.
+      const qmin = Number(d.min_order_quantity ?? 0);
+      const arrondi = (n: number) =>
+        Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
       lecture = {
         titre: d.title,
         fournisseur: d.supplier,
@@ -817,12 +827,35 @@ diagnostic.get("/alibaba/produit", async (c) => {
               .join(" · ") || "sans déclinaison",
           axe: (sku.sku_attr_list ?? [])[0]?.attr_name_desc ?? null,
           photo: sku.image ?? (sku.sku_attr_list ?? [])[0]?.attr_value_image,
-          // `cost_origin_price` est la marchandise seule ;
-          // `total_origin_cost_price` inclut le fret. C'est le second qui
-          // sert au calcul de marge : le port se paie aussi.
-          prixMarchandise: sku.cost_origin_price,
-          fret: sku.shipping_fee,
-          prixDebarque: sku.total_origin_cost_price,
+          /*
+           * CES MONTANTS SONT DES TOTAUX DE COMMANDE, PAS DES PRIX UNITAIRES.
+           *
+           * Le piège se voit en croisant deux champs : `ladder_price` annonce
+           * 2,56 € la pièce à partir de 500, et `cost_origin_price` vaut
+           * 1277,47 € — soit 500 × 2,56. Ce sont donc les montants pour la
+           * QUANTITÉ MINIMALE de commande.
+           *
+           * Les prendre pour des prix unitaires ferait afficher un coût de
+           * revient quatre cents fois trop élevé, et une marge absurde. On
+           * rend donc les deux lectures, chacune nommée pour ce qu'elle est.
+           */
+          commandeMinimale: {
+            quantite: qmin,
+            marchandise: sku.cost_origin_price,
+            fret: sku.shipping_fee,
+            total: sku.total_origin_cost_price,
+          },
+          parPiece:
+            qmin > 0
+              ? {
+                  marchandise: arrondi(Number(sku.cost_origin_price) / qmin),
+                  fret: arrondi(Number(sku.shipping_fee) / qmin),
+                  debarque: arrondi(
+                    Number(sku.total_origin_cost_price) / qmin,
+                  ),
+                }
+              : null,
+          paliers: sku.ladder_price,
         })),
       };
     }
