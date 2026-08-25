@@ -5,6 +5,7 @@ import {
   EtsyAdapter,
   ShopifyAdapter,
   VintedSafeAdapter,
+  AlibabaAdapter,
   type MarketplaceAdapter,
   type MarketplaceModule,
 } from "@hub/engine";
@@ -127,6 +128,9 @@ export function buildEngine(
       new ShopifyAdapter(),
       new EbayAdapter(),
       new EtsyAdapter(),
+      // Alibaba n'est pas un canal de vente : cet adaptateur le dit, au lieu
+      // de laisser le registre lever « aucun adaptateur » chaque minute.
+      new AlibabaAdapter(),
       ...extraAdapters,
     ],
 

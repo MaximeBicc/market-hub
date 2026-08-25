@@ -4,6 +4,7 @@ import { EbayAdapter } from "../adapters/ebay.js";
 import { EtsyAdapter } from "../adapters/etsy.js";
 import { ShopifyAdapter } from "../adapters/shopify.js";
 import { VintedSafeAdapter } from "../adapters/vinted-safe.js";
+import { AlibabaAdapter } from "../adapters/alibaba.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 
 /**
@@ -170,6 +171,25 @@ describe("Vinted, le cas honnête", () => {
       const r = etatCommande(cmd, "vinted", caps, {});
       // Ni « possible », ni « bloquée » : rien à configurer, l'API n'existe
       // pas. Promettre une configuration qui débloquerait serait mentir.
+      expect(r.etat).toBe("impossible");
+    }
+  });
+});
+
+describe("Alibaba, le cas de l'amont", () => {
+  it("ne prétend à aucune commande de vente", async () => {
+    const caps = await new AlibabaAdapter().capabilities();
+
+    // Le piège que ce test verrouille : `ordersRead` à vrai ferait compter
+    // les ACHATS d'Alibaba comme des ventes, et le stock décroîtrait à chaque
+    // réception de marchandise — l'inverse exact de ce qui se passe.
+    expect(caps.ordersRead).toBe(false);
+    expect(caps.stockWrite).toBe(false);
+
+    for (const cmd of COMMANDES.filter((c) => c.ecrit)) {
+      const r = etatCommande(cmd, "alibaba", caps, {});
+      // « impossible », pas « bloquée » : aucune configuration ne débloquera
+      // la publication d'une annonce chez un fournisseur.
       expect(r.etat).toBe("impossible");
     }
   });
