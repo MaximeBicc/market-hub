@@ -56,10 +56,35 @@ export interface FicheAlibaba {
 export function idDepuisLien(texte: string): string | null {
   const t = (texte ?? "").trim();
   if (!t) return null;
-  // Le dernier nombre long l'emporte : les adresses Alibaba portent parfois
-  // d'autres chiffres avant (identifiant de campagne, de vitrine).
-  const tous = t.match(/\d{10,}/g);
-  return tous?.[tous.length - 1] ?? null;
+
+  // Rien qu'un nombre : c'est l'identifiant, donné directement.
+  if (/^\d+$/.test(t)) return t;
+
+  /*
+   * L'IDENTIFIANT EST CELUI QUI PRÉCÈDE « .html », ET LUI SEUL.
+   *
+   * La première version prenait le dernier nombre long de la chaîne. Ça
+   * marchait sur une adresse propre et se trompait sur toutes les autres :
+   * les liens reçus par courriel traînent des paramètres de suivi qui sont
+   * eux aussi des nombres longs. Sur
+   *
+   *   .../Luxury-Clear-Magnetic-Case-for-iPhone_1601369397918.html
+   *      ?crm_mtn_tracelog_log_id=147046631551&t_id=2000114762&...
+   *
+   * la règle « le dernier » rendait 2000114762 — un identifiant de campagne.
+   * Alibaba répondait alors qu'il ne connaît pas ce produit, ce qui était
+   * exact et incompréhensible.
+   */
+  const chemin = t.split("?")[0] ?? t;
+  const avantHtml = chemin.match(/_(\d{6,})\.html?$/i);
+  if (avantHtml) return avantHtml[1]!;
+
+  // Adresse sans extension : le dernier nombre long DU CHEMIN, jamais de la
+  // chaîne de requête — c'est elle qui porte les paramètres de suivi.
+  const dansChemin = chemin.match(/\d{10,}/g);
+  if (dansChemin) return dansChemin[dansChemin.length - 1]!;
+
+  return null;
 }
 
 /**

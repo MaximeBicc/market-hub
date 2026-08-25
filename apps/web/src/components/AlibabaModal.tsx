@@ -207,8 +207,9 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                 </p>
                 <p className="row__s" style={{ whiteSpace: "normal", margin: 0 }}>
                   {fiche.fournisseur}
-                  {fiche.categorie ? ` · ${fiche.categorie}` : ""} · minimum
-                  de commande {fiche.quantiteMinimale}
+                  {fiche.categorie ? ` · ${fiche.categorie}` : ""} · référence{" "}
+                  {fiche.productId} · minimum de commande{" "}
+                  {fiche.quantiteMinimale}
                   {fiche.coutDebarqueUnitaire != null && (
                     <>
                       {" · "}coût débarqué{" "}

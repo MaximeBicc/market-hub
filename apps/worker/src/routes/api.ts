@@ -1127,8 +1127,19 @@ api.get("/alibaba/fiche", async (c) => {
   try {
     return c.json({ fiche: await ficheProduit(c.env, productId) });
   } catch (err) {
+    /*
+     * L'identifiant LU accompagne l'erreur.
+     *
+     * Sans lui, un lien mal découpé produit un refus incompréhensible :
+     * Alibaba dit vrai — il ne connaît pas ce produit — mais on ne voit pas
+     * que le tort vient de l'adresse, pas du catalogue. Le montrer rend la
+     * cause évidente d'un coup d'œil.
+     */
     return c.json(
-      { error: err instanceof Error ? err.message : String(err) },
+      {
+        error: `Produit ${productId} : ${err instanceof Error ? err.message : String(err)}`,
+        productId,
+      },
       502,
     );
   }
