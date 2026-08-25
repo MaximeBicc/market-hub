@@ -39,7 +39,13 @@ cleanupOutdatedCaches();
  * réseau ne répond pas en 3 secondes — métro, ascenseur, réseau saturé.
  */
 registerRoute(
-  ({ url }) => url.pathname.startsWith("/api/") && !url.pathname.startsWith("/api/auth"),
+  ({ url }) =>
+    url.pathname.startsWith("/api/") &&
+    !url.pathname.startsWith("/api/auth") &&
+    // Le relais d'images est une IMAGE, pas une donnée. Sans cette exclusion
+    // il tomberait dans le cache « api », dont les soixante entrées seraient
+    // vite mangées par des vignettes — au détriment des commandes et du stock.
+    !url.pathname.startsWith("/api/alibaba/image"),
   new NetworkFirst({
     cacheName: "api",
     networkTimeoutSeconds: 3,
@@ -47,12 +53,34 @@ registerRoute(
   }),
 );
 
-// Vignettes produits : elles ne changent jamais, on sert le cache immédiatement
-// et on rafraîchit en arrière-plan.
+/*
+ * VIGNETTES — ET SEULEMENT LES NÔTRES.
+ *
+ * Cette règle interceptait TOUTES les images, y compris celles servies par
+ * les places de marché. C'est ce qui les cassait, et l'explication mérite
+ * d'être écrite parce qu'elle n'a rien d'évident :
+ *
+ * Une balise `<img>` qui pointe vers un autre domaine émet une requête en
+ * mode `no-cors`. La réponse est alors OPAQUE : le service worker la reçoit
+ * avec un statut 0 et un corps illisible. Workbox refuse de mettre en cache
+ * autre chose qu'un 200 ; `StaleWhileRevalidate` se retrouve donc sans rien
+ * à rendre — ni cache, ni réponse jugée valide — et l'image échoue.
+ *
+ * Le paradoxe est que le service worker cassait précisément ce qu'il devait
+ * accélérer, et qu'il ne le faisait que sur les images distantes : les
+ * nôtres, même origine, passaient sans encombre. D'où le diagnostic trompeur
+ * — le CDN d'Alibaba répondait parfaitement en ligne de commande.
+ *
+ * On laisse donc les images distantes aller au réseau sans interception. Le
+ * navigateur les met en cache lui-même, avec les en-têtes du serveur.
+ */
 registerRoute(
-  ({ request }) => request.destination === "image",
+  ({ request, url }) =>
+    request.destination === "image" && url.origin === self.location.origin,
   new StaleWhileRevalidate({
-    cacheName: "images",
+    // Nom changé à dessein : l'ancien cache contient des échecs mémorisés,
+    // et les servir à nouveau reconduirait la panne après la mise à jour.
+    cacheName: "images-v2",
     plugins: [expire({ maxEntries: 200, maxAgeSeconds: 30 * 86400 })],
   }),
 );
