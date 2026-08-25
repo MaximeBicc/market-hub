@@ -7,6 +7,20 @@ import { alibabaConnector } from "./alibaba.js";
 
 export * from "./types.js";
 
+/*
+ * La seule chose qu'un connecteur concret exporte hors de ce registre.
+ *
+ * La règle du fichier — personne n'importe un connecteur concret — vaut pour
+ * les CONNECTEURS. `signRequest` n'en est pas un : c'est la primitive de
+ * signature d'Alibaba, dont la sonde de diagnostic a besoin pour poser UN
+ * appel brut sans passer par une cartographie qui n'existe pas encore.
+ *
+ * La réexporter vaut mieux que la recopier : deux implémentations d'une même
+ * signature finissent toujours par diverger d'un espace, et l'écart ne se voit
+ * qu'au refus de l'appel.
+ */
+export { signRequest } from "./alibaba.js";
+
 /**
  * Registre : le SEUL point d'entrée vers les connecteurs.
  *

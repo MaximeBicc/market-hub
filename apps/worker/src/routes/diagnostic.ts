@@ -12,6 +12,9 @@ import type { Env } from "../env.js";
 import { buildEngine } from "../engine/module.js";
 import { d1Repositories } from "../engine/repositories.js";
 import { authenticate } from "../lib/session.js";
+import { getValidAccessToken } from "../lib/tokens.js";
+import { signRequest } from "@hub/connectors";
+import type { RateLimiter } from "../do/rate-limiter.js";
 
 /**
  * DIAGNOSTIC EN LECTURE SEULE.
@@ -429,5 +432,115 @@ diagnostic.get("/", async (c) => {
       produitsSuivis: stock.length,
       unites: stock.reduce((n, i) => n + i.onHand, 0),
     },
+  });
+});
+
+/**
+ * LA SONDE ALIBABA — l'appel qui tranche une question ouverte.
+ *
+ * Toute l'intégration Alibaba dépend d'une inconnue que la documentation ne
+ * lève pas : `/alibaba/order/list` rend-elle les commandes passées À LA MAIN
+ * sur alibaba.com, ou seulement celles créées par l'API ? Les indices penchent
+ * pour la première — l'API expose des statuts qu'aucun appel ne peut produire
+ * — mais personne ne l'a publiquement éprouvé.
+ *
+ * Construire l'adaptateur avant de savoir, c'est risquer de tout jeter. Cette
+ * route fait l'appel, une fois, et rend la réponse BRUTE. Elle ne mappe rien :
+ * l'intérêt est justement de voir ce qu'Alibaba dit, mot pour mot.
+ *
+ * LECTURE SEULE, par construction : un seul chemin est appelable, celui de la
+ * liste. Aucun paramètre du client ne choisit l'endpoint.
+ *
+ * Piège relevé dans la documentation : les dates de cette API sont exprimées
+ * en fuseau America/Los_Angeles, pas en UTC. Une fenêtre calculée en UTC
+ * manquerait les commandes des dernières heures.
+ */
+diagnostic.get("/alibaba/commandes", async (c) => {
+  const db = drizzle(c.env.DB);
+
+  const [boutique] = await db
+    .select({ id: shop.id, nom: shop.displayName })
+    .from(shop)
+    .where(eq(shop.platform, "alibaba"))
+    .limit(1);
+
+  if (!boutique) {
+    return c.json(
+      {
+        etat: "non_connecte",
+        explication:
+          "Aucune boutique Alibaba en base. Passez d'abord par /api/oauth/alibaba/start, connecté à l'application.",
+      },
+      200,
+    );
+  }
+
+  let jeton: string;
+  try {
+    const stub = c.env.RATE_LIMITER.get(
+      c.env.RATE_LIMITER.idFromName(boutique.id),
+    ) as DurableObjectStub<RateLimiter>;
+    const resolu = await getValidAccessToken(c.env, boutique.id, stub);
+    jeton = resolu.accessToken;
+  } catch (err) {
+    return c.json(
+      {
+        etat: "jeton_indisponible",
+        detail: err instanceof Error ? err.message : String(err),
+      },
+      200,
+    );
+  }
+
+  // Une fenêtre large : on cherche à savoir SI des commandes remontent, pas à
+  // en dresser l'inventaire. Trois cent soixante-cinq jours en arrière.
+  const jours = Number(c.req.query("jours") ?? 365);
+  const fin = new Date();
+  const debut = new Date(fin.getTime() - jours * 86_400_000);
+  const losAngeles = (d: Date) =>
+    d
+      .toLocaleString("sv-SE", { timeZone: "America/Los_Angeles" })
+      .replace("T", " ");
+
+  const chemin = "/alibaba/order/list";
+  const parametres: Record<string, string> = {
+    app_key: c.env.ALIBABA_APP_KEY,
+    timestamp: String(Date.now()),
+    sign_method: "sha256",
+    access_token: jeton,
+    role: "buyer",
+    page_size: "20",
+    current_page: "1",
+    create_date_start: losAngeles(debut),
+    create_date_end: losAngeles(fin),
+  };
+  parametres["sign"] = await signRequest(
+    chemin,
+    parametres,
+    c.env.ALIBABA_APP_SECRET,
+  );
+
+  const reponse = await fetch(`https://openapi-api.alibaba.com/rest${chemin}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(parametres),
+  });
+
+  // Le corps est rendu tel quel — c'est tout l'intérêt. On le tronque
+  // seulement, pour qu'une réponse volumineuse reste lisible.
+  const texte = await reponse.text();
+
+  return c.json({
+    boutique: boutique.nom,
+    fenetre: {
+      debut: parametres["create_date_start"],
+      fin: parametres["create_date_end"],
+      fuseau: "America/Los_Angeles",
+    },
+    statutHttp: reponse.status,
+    // Rappel : la passerelle répond 200 même quand elle refuse. C'est le
+    // corps qui dit la vérité.
+    reponseBrute: texte.slice(0, 4000),
+    tronquee: texte.length > 4000,
   });
 });
