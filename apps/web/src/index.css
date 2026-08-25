@@ -2407,3 +2407,16 @@ h2.sec:first-child {
   flex: 1 1 100%;
   color: var(--muted);
 }
+
+/* L'en-tête des poses de stock : le libellé, et le geste qui reprend tout. */
+.poses__tete {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.poses__tete .btn {
+  margin-left: auto;
+  padding: 3px 8px;
+  font-size: 12px;
+}

@@ -291,6 +291,8 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
   const cibles = (fiche?.declinaisons ?? []).filter((d) =>
     cochees.has(d.optionKey),
   );
+  const toutesCochees =
+    Boolean(fiche) && cibles.length === fiche!.declinaisons.length;
 
   /**
    * LA MÊME QUANTITÉ SUR CHAQUE DÉCLINAISON COCHÉE.
@@ -539,11 +541,29 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
 
               {/* Les deux façons d'entrer du stock */}
               <div className="field">
-                <label className="field__label">
-                  Stock — sur {cibles.length} déclinaison
-                  {cibles.length > 1 ? "s" : ""} cochée
-                  {cibles.length > 1 ? "s" : ""}
-                </label>
+                <div className="poses__tete">
+                  <span className="field__label" style={{ margin: 0 }}>
+                    Stock — sur {cibles.length} déclinaison
+                    {cibles.length > 1 ? "s" : ""} cochée
+                    {cibles.length > 1 ? "s" : ""}
+                  </span>
+                  {/* Le libellé suit l'état : après avoir écarté trois
+                      coloris, on veut tout reprendre ; une fois tout coché,
+                      le seul geste utile est l'inverse. */}
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() =>
+                      setCochees(
+                        toutesCochees
+                          ? new Set()
+                          : new Set(fiche.declinaisons.map((d) => d.optionKey)),
+                      )
+                    }
+                  >
+                    {toutesCochees ? "Tout décocher" : "Tout cocher"}
+                  </button>
+                </div>
                 <div className="poses">
                   <div className="poses__bloc">
                     <input
