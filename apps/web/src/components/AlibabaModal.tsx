@@ -146,6 +146,18 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
   const [ouverts, setOuverts] = useState<Set<string>>(new Set());
   /** L'axe qui porte le groupement. -1 : liste plate. */
   const [axeGroupe, setAxeGroupe] = useState(-1);
+  /**
+   * Les déclinaisons cochées.
+   *
+   * Elles désignent qui reçoit les poses de stock en masse — RIEN D'AUTRE.
+   * Décocher n'exclut pas de l'import : les déclinaisons du fournisseur
+   * partent toutes en base, celles à zéro comprises. Une déclinaison absente
+   * du catalogue ne pourrait jamais recevoir de stock plus tard sans un
+   * nouvel import.
+   */
+  const [cochees, setCochees] = useState<Set<string>>(new Set());
+  const [poseChacun, setPoseChacun] = useState("");
+  const [poseTotal, setPoseTotal] = useState("");
 
   const lire = useMutation({
     mutationFn: async () => {
@@ -159,6 +171,10 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
       setFiche(f);
       setAxeGroupe(axeParDefaut(f.declinaisons, f.axes));
       setOuverts(new Set());
+      // Tout coché d'emblée : le cas courant est d'acheter la gamme entière.
+      setCochees(new Set(f.declinaisons.map((d) => d.optionKey)));
+      setPoseChacun("");
+      setPoseTotal("");
       // Toutes les photos retenues d'emblée : décocher est plus rapide que
       // cocher six cases pour un produit qu'on veut entier.
       setPhotos(new Set(f.images));
@@ -269,6 +285,70 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
   const stockGroupeCommun = (lignes: DeclinaisonAlibaba[]): string => {
     const valeurs = new Set(lignes.map((d) => choix[d.optionKey]?.stock ?? 0));
     return valeurs.size === 1 ? String([...valeurs][0]) : "";
+  };
+
+  /** Les déclinaisons cochées, dans l'ordre de la liste. */
+  const cibles = (fiche?.declinaisons ?? []).filter((d) =>
+    cochees.has(d.optionKey),
+  );
+
+  /**
+   * LA MÊME QUANTITÉ SUR CHAQUE DÉCLINAISON COCHÉE.
+   *
+   * C'est la première façon d'acheter : « dix de chaque coloris ». Le nombre
+   * saisi est celui de CHACUNE, pas du total — le total s'affiche à côté pour
+   * qu'aucune confusion ne survive à la lecture.
+   */
+  const poserSurChacune = () => {
+    const n = Math.max(0, Math.round(Number(poseChacun) || 0));
+    setChoix((s) => {
+      const suite = { ...s };
+      for (const d of cibles) {
+        suite[d.optionKey] = {
+          ...(suite[d.optionKey] ?? { stock: 0, prix: "" }),
+          stock: n,
+        };
+      }
+      return suite;
+    });
+  };
+
+  /**
+   * UN TOTAL, RÉPARTI SUR LES DÉCLINAISONS COCHÉES.
+   *
+   * L'autre façon d'acheter : « cent pièces au total, panachées ». La
+   * division tombe rarement juste ; le reste va aux PREMIÈRES de la liste,
+   * une unité chacune. Cent sur six donne 17, 17, 17, 17, 16, 16 — et non
+   * cinq fois seize avec vingt pièces égarées.
+   */
+  const repartir = () => {
+    if (cibles.length === 0) return;
+    const total = Math.max(0, Math.round(Number(poseTotal) || 0));
+    const base = Math.floor(total / cibles.length);
+    const reste = total % cibles.length;
+    setChoix((s) => {
+      const suite = { ...s };
+      cibles.forEach((d, i) => {
+        suite[d.optionKey] = {
+          ...(suite[d.optionKey] ?? { stock: 0, prix: "" }),
+          stock: base + (i < reste ? 1 : 0),
+        };
+      });
+      return suite;
+    });
+  };
+
+  /** Coche ou décoche d'un geste toutes les déclinaisons d'un modèle. */
+  const basculerGroupe = (lignes: DeclinaisonAlibaba[]) => {
+    const toutes = lignes.every((d) => cochees.has(d.optionKey));
+    setCochees((s) => {
+      const n = new Set(s);
+      for (const d of lignes) {
+        if (toutes) n.delete(d.optionKey);
+        else n.add(d.optionKey);
+      }
+      return n;
+    });
   };
 
   /** Pose la même quantité sur chaque coloris — « j'en ai reçu dix de chaque ». */
@@ -457,6 +537,70 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                 )}
               </div>
 
+              {/* Les deux façons d'entrer du stock */}
+              <div className="field">
+                <label className="field__label">
+                  Stock — sur {cibles.length} déclinaison
+                  {cibles.length > 1 ? "s" : ""} cochée
+                  {cibles.length > 1 ? "s" : ""}
+                </label>
+                <div className="poses">
+                  <div className="poses__bloc">
+                    <input
+                      type="number"
+                      min="0"
+                      className="input font-mono"
+                      placeholder="10"
+                      value={poseChacun}
+                      onChange={(e) => setPoseChacun(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={cibles.length === 0 || !poseChacun.trim()}
+                      onClick={poserSurChacune}
+                    >
+                      sur chacune
+                    </button>
+                    <span className="row__s">
+                      {poseChacun.trim() && cibles.length > 0
+                        ? `soit ${Math.max(0, Math.round(Number(poseChacun) || 0)) * cibles.length} au total`
+                        : "la même quantité partout"}
+                    </span>
+                  </div>
+
+                  <div className="poses__bloc">
+                    <input
+                      type="number"
+                      min="0"
+                      className="input font-mono"
+                      placeholder="100"
+                      value={poseTotal}
+                      onChange={(e) => setPoseTotal(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={cibles.length === 0 || !poseTotal.trim()}
+                      onClick={repartir}
+                    >
+                      à répartir
+                    </button>
+                    <span className="row__s">
+                      {poseTotal.trim() && cibles.length > 0
+                        ? `soit ${Math.floor((Number(poseTotal) || 0) / cibles.length)} ou ${Math.floor((Number(poseTotal) || 0) / cibles.length) + 1} chacune`
+                        : "un total, divisé entre elles"}
+                    </span>
+                  </div>
+                </div>
+                <p className="row__s" style={{ whiteSpace: "normal", marginTop: 6 }}>
+                  Cocher sert à désigner qui reçoit ces quantités. Toutes les
+                  déclinaisons sont importées de toute façon — une déclinaison
+                  absente du catalogue ne pourrait plus recevoir de stock
+                  ensuite.
+                </p>
+              </div>
+
               {/* Les déclinaisons, rangées par modèle */}
               <div className="field">
                 <div className="decl-entete">
@@ -507,6 +651,25 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                     <div className="decl-groupe" key={groupe.titre || "tout"}>
                       {groupe.titre && (
                         <div className="decl-groupe__tete">
+                          <input
+                            type="checkbox"
+                            className="decl-case"
+                            title="Cocher tous les coloris de ce modèle"
+                            checked={groupe.lignes.every((d) =>
+                              cochees.has(d.optionKey),
+                            )}
+                            ref={(el) => {
+                              if (!el) return;
+                              const n = groupe.lignes.filter((d) =>
+                                cochees.has(d.optionKey),
+                              ).length;
+                              // Ni tout ni rien : l'état intermédiaire ne
+                              // s'exprime qu'en JavaScript, pas en HTML.
+                              el.indeterminate =
+                                n > 0 && n < groupe.lignes.length;
+                            }}
+                            onChange={() => basculerGroupe(groupe.lignes)}
+                          />
                           <button
                             type="button"
                             className="chevron-variantes"
@@ -602,6 +765,20 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                               className={`decl-import ${groupe.titre ? "decl-import--fille" : ""}`}
                               key={d.optionKey}
                             >
+                              <input
+                                type="checkbox"
+                                className="decl-case"
+                                title="Recevoir les quantités posées en haut"
+                                checked={cochees.has(d.optionKey)}
+                                onChange={() =>
+                                  setCochees((s) => {
+                                    const n = new Set(s);
+                                    if (n.has(d.optionKey)) n.delete(d.optionKey);
+                                    else n.add(d.optionKey);
+                                    return n;
+                                  })
+                                }
+                              />
                               {d.image ? (
                                 <img
                                   src={vignette(d.image)}

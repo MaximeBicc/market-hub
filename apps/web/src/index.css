@@ -2265,7 +2265,7 @@ h2.sec:first-child {
 /* Une déclinaison : vignette, nom, prix, stock. */
 .decl-import {
   display: grid;
-  grid-template-columns: 56px 1fr 92px 68px;
+  grid-template-columns: 18px 56px 1fr 92px 68px;
   gap: 8px;
   align-items: center;
   padding: 6px 0;
@@ -2326,7 +2326,7 @@ h2.sec:first-child {
 }
 .decl-groupe__tete {
   display: grid;
-  grid-template-columns: 22px 56px 1fr 92px 68px 44px;
+  grid-template-columns: 18px 22px 56px 1fr 92px 68px 44px;
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
@@ -2370,4 +2370,40 @@ h2.sec:first-child {
   padding: 3px 6px;
   font-size: 12px;
   width: auto;
+}
+
+/* La case qui désigne les déclinaisons recevant une pose de stock. */
+.decl-case {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* Les deux façons d'entrer du stock, côte à côte quand la place le permet.
+   Elles correspondent à deux façons d'acheter : autant de chaque, ou un
+   total panaché. */
+.poses {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.poses__bloc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.poses__bloc .input {
+  width: 80px;
+  text-align: right;
+  padding: 6px 8px;
+}
+.poses__bloc .btn {
+  white-space: nowrap;
+}
+.poses__bloc .row__s {
+  flex: 1 1 100%;
+  color: var(--muted);
 }
