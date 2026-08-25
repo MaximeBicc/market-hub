@@ -493,30 +493,27 @@ diagnostic.get("/alibaba/commandes", async (c) => {
   }
 
   /*
-   * POURQUOI UNE RÉPONSE VIDE ?
+   * LES PARAMÈTRES, TELS QUE L'EXPLORATEUR D'API LES DÉCRIT.
    *
-   * L'appel passe — signature, jeton, permission — et rend
-   * {"value":{},"code":"0"}. Deux lectures s'affrontent, et elles n'ont pas
-   * les mêmes conséquences :
+   * Cinq formats de date avaient été refusés du même message,
+   * « null#create_date_start ». Ce n'était pas un problème de format : ce
+   * paramètre est un OBJET, porteur de `date_str` ou de `date_timestamp`.
+   * Le préfixe « null# » désignait le parent manquant, pas la valeur.
    *
-   *   a) L'API ne connaît que les commandes créées PAR l'API. Les achats
-   *      passés à la main sur alibaba.com lui sont invisibles, et le stock
-   *      entrant restera saisi à la main.
-   *   b) La requête est incomplète : mauvais rôle, bornes obligatoires en
-   *      pratique, ou pagination attendue sous d'autres noms.
+   * Deux autres écarts relevés au passage :
+   *   - la pagination s'appelle `start_page`, pas `current_page` ; le nôtre
+   *     était ignoré en silence, ce qui rendait la pagination inopérante ;
+   *   - `page_size` vaut 10 par défaut, et cent au plus.
    *
-   * On ne tranche pas en devinant : on balaie les combinaisons. Chaque essai
-   * est une LECTURE, et le corps brut est rendu tel quel — c'est lui qui
-   * informe, pas notre interprétation.
-   *
-   * Piège relevé : cette API n'est pas en UTC mais en America/Los_Angeles.
+   * Les heures sont celles de America/Los_Angeles — la documentation le
+   * répète sur chacun des quatre champs de date.
    */
   const jours = Number(c.req.query("jours") ?? 365);
   const maintenant = new Date();
   const depuis = new Date(maintenant.getTime() - jours * 86_400_000);
 
-  /** L'heure de Los Angeles, découpée. */
-  const parts = (d: Date) => {
+  /** `yyyy-MM-dd HH:mm:ss` à l'heure de Los Angeles, le format documenté. */
+  const losAngeles = (d: Date) => {
     const f = new Intl.DateTimeFormat("en-CA", {
       timeZone: "America/Los_Angeles",
       year: "numeric",
@@ -528,84 +525,57 @@ diagnostic.get("/alibaba/commandes", async (c) => {
       hour12: false,
     }).formatToParts(d);
     const g = (t: string) => f.find((p) => p.type === t)?.value ?? "00";
-    return {
-      date: `${g("year")}-${g("month")}-${g("day")}`,
-      heure: `${g("hour")}:${g("minute")}:${g("second")}`,
-    };
-  };
-  const a = parts(depuis);
-  const b = parts(maintenant);
-
-  const ESPACE = {
-    create_date_start: `${a.date} ${a.heure}`,
-    create_date_end: `${b.date} ${b.heure}`,
-  };
-  const ISO = {
-    create_date_start: `${a.date}T${a.heure}-0800`,
-    create_date_end: `${b.date}T${b.heure}-0800`,
-  };
-  const MS = {
-    create_date_start: String(depuis.getTime()),
-    create_date_end: String(maintenant.getTime()),
+    return `${g("year")}-${g("month")}-${g("day")} ${g("hour")}:${g("minute")}:${g("second")}`;
   };
 
-  /*
-   * Le format propre à Alibaba : `yyyyMMddHHmmssSSSZ`.
-   *
-   * Trois formats courants — espace, ISO, millisecondes — ont été rejetés du
-   * même message. Ce n'est donc pas une nuance de séparateur : c'est un
-   * format qu'aucun des trois n'approche. Celui-ci, compact et suffixé du
-   * décalage horaire, est celui des API ICBU.
-   */
-  const compact = (p: { date: string; heure: string }, zone: string) =>
-    `${p.date.replace(/-/g, "")}${p.heure.replace(/:/g, "")}000${zone}`;
-  const COMPACT_LA = {
-    create_date_start: compact(a, "-0800"),
-    create_date_end: compact(b, "-0800"),
+  const debutStr = losAngeles(depuis);
+  const finStr = losAngeles(maintenant);
+
+  // L'objet imbriqué voyage en JSON dans son champ de formulaire. La
+  // signature porte sur ce texte tel quel.
+  const parDate = {
+    create_date_start: JSON.stringify({ date_str: debutStr }),
+    create_date_end: JSON.stringify({ date_str: finStr }),
   };
-  const COMPACT_CN = {
-    create_date_start: compact(a, "+0800"),
-    create_date_end: compact(b, "+0800"),
+  const parHorodatage = {
+    create_date_start: JSON.stringify({ date_timestamp: depuis.getTime() }),
+    create_date_end: JSON.stringify({ date_timestamp: maintenant.getTime() }),
   };
 
   const essais: Array<{ nom: string; sup: Record<string, string> }> = [
-    // Le rôle d'abord : c'est le candidat le plus probable. Dans le modèle
-    // de distribution d'Alibaba, celui qui revend est parfois le « seller ».
-    { nom: "role=seller", sup: { role: "seller", page_size: "20", current_page: "1" } },
-    { nom: "sans role", sup: { page_size: "20", current_page: "1" } },
-    { nom: "role=buyer, sans pagination", sup: { role: "buyer" } },
-    // Puis les bornes : peut-être facultatives à la validation, exigées en
-    // pratique pour que la requête retourne quoi que ce soit.
-    { nom: "role=buyer + dates espacées", sup: { role: "buyer", ...ESPACE } },
-    { nom: "role=buyer + dates ISO", sup: { role: "buyer", ...ISO } },
-    { nom: "role=buyer + dates en millisecondes", sup: { role: "buyer", ...MS } },
-    { nom: "role=seller + dates ISO", sup: { role: "seller", ...ISO } },
-    // Enfin la pagination en casse chameau, l'autre convention d'Alibaba.
     {
-      nom: "role=buyer + pageSize/currentPage",
-      sup: { role: "buyer", pageSize: "20", currentPage: "1" },
-    },
-    // Le format compact d'Alibaba, dans les deux fuseaux plausibles.
-    {
-      nom: "role=buyer + compact -0800",
-      sup: { role: "buyer", ...COMPACT_LA },
+      nom: "buyer + dates objet (date_str) + start_page",
+      sup: { role: "buyer", start_page: "0", page_size: "50", ...parDate },
     },
     {
-      nom: "role=buyer + compact +0800",
-      sup: { role: "buyer", ...COMPACT_CN },
+      nom: "buyer + dates objet (date_timestamp)",
+      sup: { role: "buyer", start_page: "0", page_size: "50", ...parHorodatage },
     },
     {
-      nom: "role=seller + compact +0800",
-      sup: { role: "seller", ...COMPACT_CN },
+      nom: "seller + dates objet (date_str)",
+      sup: { role: "seller", start_page: "0", page_size: "50", ...parDate },
+    },
+    // La pagination commence-t-elle à zéro ou à un ? La doc dit « défaut 0 »,
+    // mais un décalage d'un rang est une cause classique de liste vide.
+    {
+      nom: "buyer + dates objet, start_page=1",
+      sup: { role: "buyer", start_page: "1", page_size: "50", ...parDate },
+    },
+    // Sans date mais avec la BONNE pagination : le premier essai passait
+    // `current_page`, un nom qu'Alibaba ignore.
+    {
+      nom: "buyer + start_page correct, sans date",
+      sup: { role: "buyer", start_page: "0", page_size: "50" },
+    },
+    // Un statut connu, au cas où la liste exigerait un filtre.
+    {
+      nom: "buyer + statut unpay",
+      sup: { role: "buyer", start_page: "0", page_size: "50", status: "unpay" },
     },
   ];
 
   const chemin = "/alibaba/order/list";
-  const journal: Array<{
-    essai: string;
-    vide: boolean;
-    reponse: string;
-  }> = [];
+  const journal: Array<{ essai: string; vide: boolean; reponse: string }> = [];
 
   for (const essai of essais) {
     const parametres: Record<string, string> = {
@@ -631,20 +601,24 @@ diagnostic.get("/alibaba/commandes", async (c) => {
     );
     const texte = await reponse.text();
 
-    // « value » à vide, c'est ce qu'on cherche à faire disparaître : tout
-    // essai qui rend autre chose est une piste.
-    const vide = texte.includes('"value":{}') || texte.includes('"value": {}');
-    journal.push({ essai: essai.nom, vide, reponse: texte.slice(0, 1200) });
+    /*
+     * « value » entièrement vide n'est PAS la même chose qu'une liste vide.
+     * Une requête qui s'exécute sans rien trouver rendrait `total_count: 0`.
+     * Un objet vide dit plutôt qu'elle n'a pas tourné comme on croit.
+     */
+    const vide = /"value"\s*:\s*\{\s*\}/.test(texte);
+    journal.push({ essai: essai.nom, vide, reponse: texte.slice(0, 1500) });
 
-    // Un essai qui rend enfin quelque chose met fin au balayage.
     if (!vide && texte.includes('"code":"0"')) break;
   }
 
-  const trouve = journal.find((e) => !e.vide && e.reponse.includes('"code":"0"'));
+  const trouve = journal.find(
+    (e) => !e.vide && e.reponse.includes('"code":"0"'),
+  );
 
   return c.json({
     boutique: boutique.nom,
-    fenetre: { debut: `${a.date} ${a.heure}`, fin: `${b.date} ${b.heure}`, fuseau: "America/Los_Angeles" },
+    fenetre: { debut: debutStr, fin: finStr, fuseau: "America/Los_Angeles" },
     essaiQuiRendQuelqueChose: trouve?.essai ?? null,
     essais: journal,
   });
