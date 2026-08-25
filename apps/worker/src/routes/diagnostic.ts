@@ -493,27 +493,29 @@ diagnostic.get("/alibaba/commandes", async (c) => {
   }
 
   /*
-   * PLUSIEURS FORMATS, UN SEUL ALLER-RETOUR.
+   * POURQUOI UNE RÉPONSE VIDE ?
    *
-   * Le premier essai a rendu « null#create_date_start is not valid » : la
-   * signature, le jeton et la permission passent, seul le format de la date
-   * est refusé. Alibaba ne le documente pas ici, et deviner un format à
-   * chaque déploiement coûterait une demi-journée.
+   * L'appel passe — signature, jeton, permission — et rend
+   * {"value":{},"code":"0"}. Deux lectures s'affrontent, et elles n'ont pas
+   * les mêmes conséquences :
    *
-   * On essaie donc les candidats en série, en s'arrêtant au premier accepté.
-   * Le PREMIER de la liste est le plus important : SANS aucune date. Si les
-   * bornes sont facultatives, la question de fond — les commandes passées à
-   * la main remontent-elles ? — trouve sa réponse tout de suite, et le format
-   * n'a plus d'importance.
+   *   a) L'API ne connaît que les commandes créées PAR l'API. Les achats
+   *      passés à la main sur alibaba.com lui sont invisibles, et le stock
+   *      entrant restera saisi à la main.
+   *   b) La requête est incomplète : mauvais rôle, bornes obligatoires en
+   *      pratique, ou pagination attendue sous d'autres noms.
    *
-   * Chaque essai est un appel de liste. Sept essais restent loin sous les
-   * cinquante sous-requêtes du plan gratuit.
+   * On ne tranche pas en devinant : on balaie les combinaisons. Chaque essai
+   * est une LECTURE, et le corps brut est rendu tel quel — c'est lui qui
+   * informe, pas notre interprétation.
+   *
+   * Piège relevé : cette API n'est pas en UTC mais en America/Los_Angeles.
    */
   const jours = Number(c.req.query("jours") ?? 365);
-  const fin = new Date();
-  const debut = new Date(fin.getTime() - jours * 86_400_000);
+  const maintenant = new Date();
+  const depuis = new Date(maintenant.getTime() - jours * 86_400_000);
 
-  /** L'heure de Los Angeles, découpée — cette API n'est pas en UTC. */
+  /** L'heure de Los Angeles, découpée. */
   const parts = (d: Date) => {
     const f = new Intl.DateTimeFormat("en-CA", {
       timeZone: "America/Los_Angeles",
@@ -531,56 +533,45 @@ diagnostic.get("/alibaba/commandes", async (c) => {
       heure: `${g("hour")}:${g("minute")}:${g("second")}`,
     };
   };
-  const a = parts(debut);
-  const b = parts(fin);
+  const a = parts(depuis);
+  const b = parts(maintenant);
 
-  const essais: Array<{ nom: string; bornes: Record<string, string> }> = [
-    { nom: "sans date", bornes: {} },
+  const ESPACE = {
+    create_date_start: `${a.date} ${a.heure}`,
+    create_date_end: `${b.date} ${b.heure}`,
+  };
+  const ISO = {
+    create_date_start: `${a.date}T${a.heure}-0800`,
+    create_date_end: `${b.date}T${b.heure}-0800`,
+  };
+  const MS = {
+    create_date_start: String(depuis.getTime()),
+    create_date_end: String(maintenant.getTime()),
+  };
+
+  const essais: Array<{ nom: string; sup: Record<string, string> }> = [
+    // Le rôle d'abord : c'est le candidat le plus probable. Dans le modèle
+    // de distribution d'Alibaba, celui qui revend est parfois le « seller ».
+    { nom: "role=seller", sup: { role: "seller", page_size: "20", current_page: "1" } },
+    { nom: "sans role", sup: { page_size: "20", current_page: "1" } },
+    { nom: "role=buyer, sans pagination", sup: { role: "buyer" } },
+    // Puis les bornes : peut-être facultatives à la validation, exigées en
+    // pratique pour que la requête retourne quoi que ce soit.
+    { nom: "role=buyer + dates espacées", sup: { role: "buyer", ...ESPACE } },
+    { nom: "role=buyer + dates ISO", sup: { role: "buyer", ...ISO } },
+    { nom: "role=buyer + dates en millisecondes", sup: { role: "buyer", ...MS } },
+    { nom: "role=seller + dates ISO", sup: { role: "seller", ...ISO } },
+    // Enfin la pagination en casse chameau, l'autre convention d'Alibaba.
     {
-      nom: "espace : 2026-01-31 12:00:00",
-      bornes: {
-        create_date_start: `${a.date} ${a.heure}`,
-        create_date_end: `${b.date} ${b.heure}`,
-      },
-    },
-    {
-      nom: "ISO avec décalage : 2026-01-31T12:00:00-0800",
-      bornes: {
-        create_date_start: `${a.date}T${a.heure}-0800`,
-        create_date_end: `${b.date}T${b.heure}-0800`,
-      },
-    },
-    {
-      nom: "ISO avec décalage à deux-points : ...-08:00",
-      bornes: {
-        create_date_start: `${a.date}T${a.heure}-08:00`,
-        create_date_end: `${b.date}T${b.heure}-08:00`,
-      },
-    },
-    {
-      nom: "ISO UTC : 2026-01-31T12:00:00Z",
-      bornes: {
-        create_date_start: `${a.date}T${a.heure}Z`,
-        create_date_end: `${b.date}T${b.heure}Z`,
-      },
-    },
-    {
-      nom: "date seule : 2026-01-31",
-      bornes: { create_date_start: a.date, create_date_end: b.date },
-    },
-    {
-      nom: "millisecondes depuis epoch",
-      bornes: {
-        create_date_start: String(debut.getTime()),
-        create_date_end: String(fin.getTime()),
-      },
+      nom: "role=buyer + pageSize/currentPage",
+      sup: { role: "buyer", pageSize: "20", currentPage: "1" },
     },
   ];
 
   const chemin = "/alibaba/order/list";
   const journal: Array<{
     essai: string;
-    accepte: boolean;
+    vide: boolean;
     reponse: string;
   }> = [];
 
@@ -590,10 +581,7 @@ diagnostic.get("/alibaba/commandes", async (c) => {
       timestamp: String(Date.now()),
       sign_method: "sha256",
       access_token: jeton,
-      role: "buyer",
-      page_size: "20",
-      current_page: "1",
-      ...essai.bornes,
+      ...essai.sup,
     };
     parametres["sign"] = await signRequest(
       chemin,
@@ -611,36 +599,21 @@ diagnostic.get("/alibaba/commandes", async (c) => {
     );
     const texte = await reponse.text();
 
-    /*
-     * La passerelle répond 200 même sur refus : c'est le corps qui tranche.
-     *
-     * L'erreur est un objet PLAT en tête de réponse — {"type":"ISV","code":
-     * "InvalidParameter",...}. On ne regarde donc que les deux cents premiers
-     * caractères : un « code » niché dans les données d'une commande (un code
-     * pays, un code de statut) ne doit pas se faire prendre pour un refus.
-     */
-    const enTete = texte.slice(0, 200);
-    const accepte = !/"code"\s*:\s*"(?!0")[A-Za-z]/.test(enTete);
-    journal.push({
-      essai: essai.nom,
-      accepte,
-      reponse: texte.slice(0, 2500),
-    });
+    // « value » à vide, c'est ce qu'on cherche à faire disparaître : tout
+    // essai qui rend autre chose est une piste.
+    const vide = texte.includes('"value":{}') || texte.includes('"value": {}');
+    journal.push({ essai: essai.nom, vide, reponse: texte.slice(0, 1200) });
 
-    // Un format accepté suffit : inutile de brûler les suivants.
-    if (accepte) break;
+    // Un essai qui rend enfin quelque chose met fin au balayage.
+    if (!vide && texte.includes('"code":"0"')) break;
   }
 
-  const gagnant = journal.find((e) => e.accepte);
+  const trouve = journal.find((e) => !e.vide && e.reponse.includes('"code":"0"'));
 
   return c.json({
     boutique: boutique.nom,
-    fenetre: {
-      debut: `${a.date} ${a.heure}`,
-      fin: `${b.date} ${b.heure}`,
-      fuseau: "America/Los_Angeles",
-    },
-    formatAccepte: gagnant?.essai ?? null,
+    fenetre: { debut: `${a.date} ${a.heure}`, fin: `${b.date} ${b.heure}`, fuseau: "America/Los_Angeles" },
+    essaiQuiRendQuelqueChose: trouve?.essai ?? null,
     essais: journal,
   });
 });
