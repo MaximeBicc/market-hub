@@ -549,6 +549,25 @@ diagnostic.get("/alibaba/commandes", async (c) => {
     create_date_end: String(maintenant.getTime()),
   };
 
+  /*
+   * Le format propre à Alibaba : `yyyyMMddHHmmssSSSZ`.
+   *
+   * Trois formats courants — espace, ISO, millisecondes — ont été rejetés du
+   * même message. Ce n'est donc pas une nuance de séparateur : c'est un
+   * format qu'aucun des trois n'approche. Celui-ci, compact et suffixé du
+   * décalage horaire, est celui des API ICBU.
+   */
+  const compact = (p: { date: string; heure: string }, zone: string) =>
+    `${p.date.replace(/-/g, "")}${p.heure.replace(/:/g, "")}000${zone}`;
+  const COMPACT_LA = {
+    create_date_start: compact(a, "-0800"),
+    create_date_end: compact(b, "-0800"),
+  };
+  const COMPACT_CN = {
+    create_date_start: compact(a, "+0800"),
+    create_date_end: compact(b, "+0800"),
+  };
+
   const essais: Array<{ nom: string; sup: Record<string, string> }> = [
     // Le rôle d'abord : c'est le candidat le plus probable. Dans le modèle
     // de distribution d'Alibaba, celui qui revend est parfois le « seller ».
@@ -565,6 +584,19 @@ diagnostic.get("/alibaba/commandes", async (c) => {
     {
       nom: "role=buyer + pageSize/currentPage",
       sup: { role: "buyer", pageSize: "20", currentPage: "1" },
+    },
+    // Le format compact d'Alibaba, dans les deux fuseaux plausibles.
+    {
+      nom: "role=buyer + compact -0800",
+      sup: { role: "buyer", ...COMPACT_LA },
+    },
+    {
+      nom: "role=buyer + compact +0800",
+      sup: { role: "buyer", ...COMPACT_CN },
+    },
+    {
+      nom: "role=seller + compact +0800",
+      sup: { role: "seller", ...COMPACT_CN },
     },
   ];
 
