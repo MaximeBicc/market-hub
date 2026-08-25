@@ -56,32 +56,54 @@ function vignette(url: string | null): string | undefined {
 }
 
 /**
- * Les déclinaisons rangées par leur PREMIER axe.
+ * Les déclinaisons rangées par l'axe choisi.
  *
  * Un étui de téléphone existe en huit modèles et six couleurs : quarante-huit
- * lignes à plat, illisibles. Groupées par modèle, ce sont huit lignes qu'on
- * déplie à la demande.
+ * lignes à plat, illisibles. Groupées, ce sont huit lignes qu'on déplie.
  *
- * S'il n'y a qu'un seul axe, on ne groupe pas : une hiérarchie à un étage
- * ajouterait un clic pour ne rien révéler.
+ * QUEL AXE PORTE LE GROUPEMENT NE SE DEVINE PAS. Alibaba énumère ses attributs
+ * dans l'ordre qui l'arrange — sur cet étui, la couleur vient avant le modèle
+ * — et grouper sur le premier venu donnait la hiérarchie à l'envers. C'est
+ * donc un choix, avec un défaut sensé plutôt qu'un tirage au sort.
+ *
+ * `axe` à -1 : pas de groupement, la liste reste plate. C'est le cas d'un
+ * produit à un seul axe, où une hiérarchie ajouterait un clic pour ne rien
+ * révéler.
  */
 function grouper(
   declinaisons: DeclinaisonAlibaba[],
-  plusieursAxes: boolean,
+  axe: number,
 ): Array<{ titre: string; lignes: DeclinaisonAlibaba[] }> {
-  if (!plusieursAxes) {
-    return [{ titre: "", lignes: declinaisons }];
-  }
+  if (axe < 0) return [{ titre: "", lignes: declinaisons }];
+
   const paquets = new Map<string, DeclinaisonAlibaba[]>();
   for (const d of declinaisons) {
     // L'ordre d'arrivée fait l'ordre d'affichage : c'est celui du fournisseur,
     // et il est plus sensé qu'un tri alphabétique sur « iPhone 15 / 16 / 17 ».
-    const cle = d.optionValues[0] || "—";
+    const cle = d.optionValues[axe] || "—";
     const liste = paquets.get(cle);
     if (liste) liste.push(d);
     else paquets.set(cle, [d]);
   }
   return [...paquets].map(([titre, lignes]) => ({ titre, lignes }));
+}
+
+/**
+ * L'axe de groupement par défaut.
+ *
+ * On range par MODÈLE et on déplie les couleurs, pas l'inverse : c'est ainsi
+ * qu'on choisit un article — d'abord ce qu'il équipe, ensuite sa teinte. La
+ * couleur est donc le mauvais candidat, et tout le reste un bon.
+ *
+ * Le nom de l'axe arrive déjà traduit par Alibaba, mais on ne sait pas dans
+ * quelle langue : les deux formes sont donc reconnues.
+ */
+function axeParDefaut(axes: string[]): number {
+  if (axes.length < 2) return -1;
+  const estCouleur = (nom: string) =>
+    /couleur|color|colour|teinte/i.test(nom);
+  const autre = axes.findIndex((nom) => !estCouleur(nom));
+  return autre >= 0 ? autre : 0;
 }
 
 /**
@@ -109,6 +131,8 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
   /** Les groupes ouverts. Tout est replié au départ : on voit la structure
       avant le détail, et un produit à huit modèles tient dans l'écran. */
   const [ouverts, setOuverts] = useState<Set<string>>(new Set());
+  /** L'axe qui porte le groupement. -1 : liste plate. */
+  const [axeGroupe, setAxeGroupe] = useState(-1);
 
   const lire = useMutation({
     mutationFn: async () => {
@@ -120,6 +144,8 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
     },
     onSuccess: (f) => {
       setFiche(f);
+      setAxeGroupe(axeParDefaut(f.axes));
+      setOuverts(new Set());
       // Toutes les photos retenues d'emblée : décocher est plus rapide que
       // cocher six cases pour un produit qu'on veut entier.
       setPhotos(new Set(f.images));
@@ -194,9 +220,7 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
     );
   const desalignes = Object.values(choix).filter((c) => c.prix.trim()).length;
 
-  const groupes = fiche
-    ? grouper(fiche.declinaisons, fiche.axes.length > 1)
-    : [];
+  const groupes = fiche ? grouper(fiche.declinaisons, axeGroupe) : [];
 
   /**
    * Le prix affiché sur la ligne d'un modèle.
@@ -387,8 +411,34 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                   <span className="field__label" style={{ margin: 0 }}>
                     {fiche.declinaisons.length} déclinaison
                     {fiche.declinaisons.length > 1 ? "s" : ""}
-                    {fiche.axes.length > 0 && ` · ${fiche.axes.join(" × ")}`}
                   </span>
+
+                  {/* Quel axe porte les lignes. Alibaba énumère ses attributs
+                      dans l'ordre qui l'arrange, et ce n'est pas toujours
+                      celui qui se lit le mieux. */}
+                  {fiche.axes.length > 1 && (
+                    <label className="decl-entete__axe">
+                      Ranger par
+                      <select
+                        className="input"
+                        value={axeGroupe}
+                        onChange={(e) => {
+                          setAxeGroupe(Number(e.target.value));
+                          // Les groupes changent de nature : ce qui était
+                          // ouvert n'a plus de sens.
+                          setOuverts(new Set());
+                        }}
+                      >
+                        {fiche.axes.map((nom, i) => (
+                          <option key={nom} value={i}>
+                            {nom}
+                          </option>
+                        ))}
+                        <option value={-1}>tout à plat</option>
+                      </select>
+                    </label>
+                  )}
+
                   <span className="muted">{total} unités au total</span>
                 </div>
 
@@ -469,11 +519,19 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                             stock: 0,
                             prix: "",
                           };
-                          // Sur deux axes, le nom du modèle est déjà porté par
-                          // la ligne parente : le répéter alourdirait pour rien.
+                          /*
+                           * La valeur qui porte le groupe est déjà sur la ligne
+                           * parente : la répéter alourdirait chaque enfant. On
+                           * retire donc CELLE-LÀ, pas la première — sans quoi
+                           * changer d'axe afficherait « Noir » sous « Noir » et
+                           * cacherait le modèle.
+                           */
                           const nom =
-                            groupe.titre && d.optionValues.length > 1
-                              ? d.optionValues.slice(1).filter(Boolean).join(" · ")
+                            groupe.titre && axeGroupe >= 0
+                              ? d.optionValues
+                                  .filter((_, i) => i !== axeGroupe)
+                                  .filter(Boolean)
+                                  .join(" · ")
                               : d.nom;
                           return (
                             <div
