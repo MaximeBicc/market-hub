@@ -12,6 +12,7 @@ import { Empty } from "../components/Empty.js";
 import { Icon } from "../components/Icon.js";
 import { toast } from "../components/Toast.js";
 import { ProductModal } from "../components/ProductModal.js";
+import { AlibabaModal } from "../components/AlibabaModal.js";
 import { ConsumableModal } from "../components/ConsumableModal.js";
 import { FulfillmentModal } from "../components/FulfillmentModal.js";
 
@@ -43,6 +44,8 @@ export function Inventory() {
   const [search, setSearch] = useState("");
   /** Produit dont les déclinaisons sont dépliées, le cas échéant. */
   const [deplie, setDeplie] = useState<string | null>(null);
+  /** Le formulaire d'import Alibaba, ouvert ou non. */
+  const [importAlibaba, setImportAlibaba] = useState(false);
   const [onlyLowStock, setOnlyLowStock] = useState(false);
 
   const [selectedProduct, setSelectedProduct] = useState<ProductItem | null | "new">(null);
@@ -155,13 +158,26 @@ export function Inventory() {
 
         <div className="page-head__actions">
           {activeTab === "products" && (
-            <button
-              type="button"
-              className="btn btn--primary"
-              onClick={() => setSelectedProduct("new")}
-            >
-              <Icon name="plus" /> Nouveau produit
-            </button>
+            <>
+              {/* L'import passe avant la saisie : c'est le geste courant dès
+                  qu'un fournisseur est branché. La saisie manuelle reste
+                  pour ce qui ne vient d'aucune place de marché. */}
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={() => setImportAlibaba(true)}
+                title="Coller un lien Alibaba et reprendre toute la fiche"
+              >
+                <Icon name="upload" /> Depuis Alibaba
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setSelectedProduct("new")}
+              >
+                <Icon name="plus" /> Nouveau produit
+              </button>
+            </>
           )}
 
           {activeTab === "consumables" && (
@@ -729,6 +745,9 @@ export function Inventory() {
       )}
 
       {/* Modal Produit */}
+      {importAlibaba && (
+        <AlibabaModal onClose={() => setImportAlibaba(false)} />
+      )}
       {selectedProduct && (
         <ProductModal
           product={selectedProduct === "new" ? null : selectedProduct}

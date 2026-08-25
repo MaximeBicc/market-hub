@@ -19,6 +19,7 @@ import {
 import type { Env } from "../env.js";
 import { randomId } from "../lib/crypto.js";
 import { normaliserValeur, varianteUnique } from "../lib/variantes.js";
+import { ficheProduit, idDepuisLien } from "../lib/alibaba.js";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
 import { sendPushToUser } from "../lib/push.js";
@@ -1103,6 +1104,224 @@ api.get("/growth", async (c) => {
 /* ------------------------------------------------------------------ */
 
 /** Liste de tous les produits du catalogue maître avec leurs annonces associées. */
+
+/**
+ * LIRE UNE FICHE ALIBABA, SANS RIEN ENREGISTRER.
+ *
+ * Deux temps volontairement séparés : on regarde d'abord, on décide ensuite.
+ * Écrire le produit dès la lecture remplirait le catalogue de fiches ouvertes
+ * par curiosité, et il faudrait les supprimer une à une.
+ */
+api.get("/alibaba/fiche", async (c) => {
+  const productId = idDepuisLien(c.req.query("url") ?? c.req.query("id") ?? "");
+  if (!productId) {
+    return c.json(
+      {
+        error:
+          "Collez l'adresse de la page produit Alibaba, ou son identifiant.",
+      },
+      400,
+    );
+  }
+
+  try {
+    return c.json({ fiche: await ficheProduit(c.env, productId) });
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      502,
+    );
+  }
+});
+
+/**
+ * IMPORTER LA FICHE DANS LE STOCK.
+ *
+ * Le client renvoie ce qu'il a décidé — photos retenues, prix de vente,
+ * stock par déclinaison — et cette route l'écrit. Elle ne rappelle PAS
+ * Alibaba : ce qui a été montré à l'écran est ce qui sera enregistré, sans
+ * qu'un changement de prix survenu entre-temps ne se glisse en douce.
+ */
+api.post("/alibaba/importer", async (c) => {
+  const db = drizzle(c.env.DB);
+  type Corps = {
+    productId?: string;
+    titre?: string;
+    description?: string;
+    categorie?: string | null;
+    lien?: string | null;
+    images?: string[];
+    /** Prix de vente commun, en centimes. */
+    prixVente?: number;
+    coutDebarque?: number | null;
+    axes?: string[];
+    declinaisons?: Array<{
+      skuId?: string;
+      nom?: string;
+      optionKey?: string;
+      optionValues?: string[];
+      image?: string | null;
+      prixVente?: number;
+      stock?: number;
+      coutDebarque?: number | null;
+    }>;
+  };
+  const body = await c.req.json<Corps>().catch(() => ({}) as Corps);
+
+  const productId = (body.productId ?? "").trim();
+  const titre = (body.titre ?? "").trim();
+  if (!productId || !titre) {
+    return c.json({ error: "Identifiant Alibaba et titre requis" }, 400);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const prixCommun = Math.max(0, Math.round(Number(body.prixVente ?? 0)));
+
+  /*
+   * LE SKU DÉRIVE DE L'IDENTIFIANT ALIBABA.
+   *
+   * Il doit être stable et unique : c'est lui qui fera reconnaître le produit
+   * si on réimporte la même fiche, plutôt que d'en créer un jumeau. Le
+   * préfixe rend l'origine lisible d'un coup d'œil dans la liste du stock.
+   */
+  const sku = `ALI-${productId}`;
+
+  const [existant] = await db
+    .select({ id: product.id })
+    .from(product)
+    .where(eq(product.sku, sku))
+    .limit(1);
+  const id = existant?.id ?? `prod_${randomId()}`;
+
+  const champs = {
+    sku,
+    title: titre.slice(0, 200),
+    description: (body.description ?? "").slice(0, 5000) || null,
+    priceAmount: prixCommun,
+    priceCurrency: "EUR",
+    costPrice:
+      typeof body.coutDebarque === "number" && body.coutDebarque >= 0
+        ? Math.round(body.coutDebarque)
+        : null,
+    images: JSON.stringify((body.images ?? []).filter(Boolean).slice(0, 25)),
+    options: JSON.stringify(
+      (body.axes ?? []).map((nom, i) => ({
+        name: nom,
+        values: [
+          ...new Set(
+            (body.declinaisons ?? [])
+              .map((d) => d.optionValues?.[i] ?? "")
+              .filter(Boolean),
+          ),
+        ],
+      })),
+    ),
+    minAlert: 3,
+    updatedAt: now,
+  };
+
+  if (existant) {
+    await db.update(product).set(champs).where(eq(product.id, id));
+  } else {
+    await db
+      .insert(product)
+      .values({ id, ...champs, stock: 0, createdAt: now });
+  }
+
+  const mod = buildEngine(c.env, { used: 0 });
+  const gardees = new Set<string>();
+  let ecrites = 0;
+
+  const lignes = (body.declinaisons ?? []).filter((d) => d.optionKey != null);
+  for (let i = 0; i < lignes.length; i++) {
+    const d = lignes[i]!;
+    const cle = String(d.optionKey);
+    // Deux déclinaisons sur la même clé s'écraseraient l'une l'autre, stock
+    // compris. On garde la première et on ignore le doublon.
+    if (gardees.has(cle)) continue;
+    gardees.add(cle);
+
+    const [deja] = await db
+      .select({ id: variant.id })
+      .from(variant)
+      .where(and(eq(variant.productId, id), eq(variant.optionKey, cle)))
+      .limit(1);
+    const variantId = deja?.id ?? `var_${randomId()}`;
+
+    // Le SKU de la déclinaison porte celui d'Alibaba : c'est ce qui permettra
+    // plus tard de rapprocher une ligne de commande d'achat de la bonne
+    // variante, sans deviner par le nom du coloris.
+    const skuVariante = d.skuId ? `${sku}-${d.skuId}` : null;
+    const prix =
+      typeof d.prixVente === "number" && d.prixVente >= 0
+        ? Math.round(d.prixVente)
+        : prixCommun;
+
+    await db
+      .insert(variant)
+      .values({
+        id: variantId,
+        productId: id,
+        sku: skuVariante,
+        optionKey: cle,
+        optionValues: JSON.stringify(d.optionValues ?? []),
+        priceAmount: prix,
+        priceCurrency: "EUR",
+        imageUrl: d.image ?? null,
+        position: i,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [variant.productId, variant.optionKey],
+        set: {
+          sku: skuVariante,
+          optionValues: JSON.stringify(d.optionValues ?? []),
+          priceAmount: prix,
+          imageUrl: d.image ?? null,
+          position: i,
+          status: "active",
+          updatedAt: now,
+        },
+      });
+
+    await mod.inventoryService.ensure(variantId, 0);
+    await mod.inventoryService.set(variantId, Math.max(0, Math.round(Number(d.stock ?? 0)) || 0));
+    ecrites++;
+  }
+
+  /*
+   * Ce qui n'est plus dans la fiche passe en archivé — jamais supprimé. Une
+   * annonce en ligne pointe sur l'identifiant de variante ; l'effacer la
+   * laisserait sans stock rattachable jusqu'à la prochaine vente.
+   */
+  const toutes = await db
+    .select({ id: variant.id, optionKey: variant.optionKey, status: variant.status })
+    .from(variant)
+    .where(eq(variant.productId, id));
+  let archivees = 0;
+  for (const v of toutes) {
+    if (gardees.has(v.optionKey) || v.status !== "active") continue;
+    await db
+      .update(variant)
+      .set({ status: "archived", updatedAt: now })
+      .where(eq(variant.id, v.id));
+    archivees++;
+  }
+
+  await recalculerStockProduit(db, id);
+
+  return c.json({
+    ok: true,
+    id,
+    sku,
+    declinaisons: ecrites,
+    archivees,
+    remplace: Boolean(existant),
+  });
+});
+
 api.get("/products", async (c) => {
   const db = drizzle(c.env.DB);
   const products = await db.select().from(product).orderBy(desc(product.updatedAt));
