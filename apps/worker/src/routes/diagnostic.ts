@@ -623,3 +623,173 @@ diagnostic.get("/alibaba/commandes", async (c) => {
     essais: journal,
   });
 });
+
+
+/**
+ * LA FICHE D'UN PRODUIT FOURNISSEUR, PAR SON LIEN OU SON IDENTIFIANT.
+ *
+ * C'est la moitié utile d'Alibaba qui ne dépend pas de l'historique d'achat :
+ * `/eco/buyer/product/description` rend le titre, la description, toutes les
+ * photos en URL publiques, les déclinaisons avec leur propre image, et le
+ * prix de revient DÉBARQUÉ — marchandise plus fret jusqu'en France.
+ *
+ * Deux pièges que cette route enjambe :
+ *
+ *   1. `query_req` est un OBJET, comme les dates de la liste de commandes.
+ *      Envoyer `product_id` à plat vaudrait « null#product_id is not valid ».
+ *   2. `ship_to_country` n'est pas décoratif : la documentation dit qu'il est
+ *      « essential for calculating the cost price ». Sans lui, le fret est
+ *      calculé pour un ailleurs, et la marge affichée est fausse.
+ *
+ * Lecture seule : un seul chemin, aucun paramètre du client ne le choisit.
+ */
+diagnostic.get("/alibaba/produit", async (c) => {
+  const db = drizzle(c.env.DB);
+
+  const [boutique] = await db
+    .select({ id: shop.id })
+    .from(shop)
+    .where(eq(shop.platform, "alibaba"))
+    .limit(1);
+  if (!boutique) return c.json({ etat: "non_connecte" }, 200);
+
+  /*
+   * L'identifiant se lit aussi bien dans un lien que seul.
+   *
+   * Les liens Alibaba portent l'identifiant en fin de chemin, précédé d'un
+   * tiret bas : .../product-detail/Sublimation-Mug_1601206892606.html
+   * On accepte donc l'un ou l'autre — coller l'adresse de la page est ce
+   * qu'on fait naturellement.
+   */
+  const brut = (c.req.query("id") ?? "").trim();
+  const trouve = brut.match(/(\d{10,})/);
+  if (!trouve) {
+    return c.json(
+      {
+        erreur:
+          "Passez ?id= avec un identifiant produit Alibaba, ou l'adresse complète de sa page.",
+      },
+      400,
+    );
+  }
+  const productId = trouve[1]!;
+
+  let jeton: string;
+  try {
+    const stub = c.env.RATE_LIMITER.get(
+      c.env.RATE_LIMITER.idFromName(boutique.id),
+    ) as DurableObjectStub<RateLimiter>;
+    jeton = (await getValidAccessToken(c.env, boutique.id, stub)).accessToken;
+  } catch (err) {
+    return c.json(
+      {
+        etat: "jeton_indisponible",
+        detail: err instanceof Error ? err.message : String(err),
+      },
+      200,
+    );
+  }
+
+  const chemin = "/eco/buyer/product/description";
+  const parametres: Record<string, string> = {
+    app_key: c.env.ALIBABA_APP_KEY,
+    timestamp: String(Date.now()),
+    sign_method: "sha256",
+    access_token: jeton,
+    query_req: JSON.stringify({
+      product_id: Number(productId),
+      country: "FR",
+      language: "fr-FR",
+      currency: "EUR",
+      // Le fret jusqu'en France entre dans le prix de revient. L'omettre
+      // donnerait un coût calculé pour un autre pays.
+      ship_to_country: "FR",
+    }),
+  };
+  parametres["sign"] = await signRequest(
+    chemin,
+    parametres,
+    c.env.ALIBABA_APP_SECRET,
+  );
+
+  const reponse = await fetch(`https://openapi-api.alibaba.com/rest${chemin}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(parametres),
+  });
+  const texte = await reponse.text();
+
+  // On rend le brut ET une lecture. Le brut sert à voir ce qu'Alibaba dit
+  // vraiment ; la lecture, à vérifier qu'on le comprend bien.
+  let lecture: unknown = null;
+  try {
+    const j = JSON.parse(texte) as {
+      result?: {
+        result_data?: {
+          title?: string;
+          description?: string;
+          images?: string[];
+          main_image?: string;
+          category?: string;
+          min_order_quantity?: number;
+          currency?: string;
+          detail_url?: string;
+          supplier?: string;
+          weight?: string;
+          skus?: Array<{
+            sku_id?: number;
+            image?: string;
+            cost_origin_price?: string;
+            total_origin_cost_price?: string;
+            shipping_fee?: string;
+            sku_attr_list?: Array<{
+              attr_name_desc?: string;
+              attr_value_desc?: string;
+              attr_value_image?: string;
+            }>;
+          }>;
+        };
+        result_msg?: string;
+        result_code?: string;
+      };
+    };
+    const d = j.result?.result_data;
+    if (d) {
+      lecture = {
+        titre: d.title,
+        fournisseur: d.supplier,
+        categorie: d.category,
+        quantiteMinimale: d.min_order_quantity,
+        photos: (d.images ?? []).length,
+        lien: d.detail_url,
+        declinaisons: (d.skus ?? []).map((sku) => ({
+          // Le nom lisible d'une déclinaison est la concaténation de ses
+          // attributs — « Color: 40oz solid color tumbler 1.0 ».
+          nom:
+            (sku.sku_attr_list ?? [])
+              .map((a) => a.attr_value_desc)
+              .filter(Boolean)
+              .join(" · ") || "sans déclinaison",
+          axe: (sku.sku_attr_list ?? [])[0]?.attr_name_desc ?? null,
+          photo: sku.image ?? (sku.sku_attr_list ?? [])[0]?.attr_value_image,
+          // `cost_origin_price` est la marchandise seule ;
+          // `total_origin_cost_price` inclut le fret. C'est le second qui
+          // sert au calcul de marge : le port se paie aussi.
+          prixMarchandise: sku.cost_origin_price,
+          fret: sku.shipping_fee,
+          prixDebarque: sku.total_origin_cost_price,
+        })),
+      };
+    }
+  } catch {
+    // Le brut suffira à comprendre.
+  }
+
+  return c.json({
+    productId,
+    statutHttp: reponse.status,
+    lecture,
+    reponseBrute: texte.slice(0, 6000),
+    tronquee: texte.length > 6000,
+  });
+});
