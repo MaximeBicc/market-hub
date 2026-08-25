@@ -492,55 +492,155 @@ diagnostic.get("/alibaba/commandes", async (c) => {
     );
   }
 
-  // Une fenêtre large : on cherche à savoir SI des commandes remontent, pas à
-  // en dresser l'inventaire. Trois cent soixante-cinq jours en arrière.
+  /*
+   * PLUSIEURS FORMATS, UN SEUL ALLER-RETOUR.
+   *
+   * Le premier essai a rendu « null#create_date_start is not valid » : la
+   * signature, le jeton et la permission passent, seul le format de la date
+   * est refusé. Alibaba ne le documente pas ici, et deviner un format à
+   * chaque déploiement coûterait une demi-journée.
+   *
+   * On essaie donc les candidats en série, en s'arrêtant au premier accepté.
+   * Le PREMIER de la liste est le plus important : SANS aucune date. Si les
+   * bornes sont facultatives, la question de fond — les commandes passées à
+   * la main remontent-elles ? — trouve sa réponse tout de suite, et le format
+   * n'a plus d'importance.
+   *
+   * Chaque essai est un appel de liste. Sept essais restent loin sous les
+   * cinquante sous-requêtes du plan gratuit.
+   */
   const jours = Number(c.req.query("jours") ?? 365);
   const fin = new Date();
   const debut = new Date(fin.getTime() - jours * 86_400_000);
-  const losAngeles = (d: Date) =>
-    d
-      .toLocaleString("sv-SE", { timeZone: "America/Los_Angeles" })
-      .replace("T", " ");
+
+  /** L'heure de Los Angeles, découpée — cette API n'est pas en UTC. */
+  const parts = (d: Date) => {
+    const f = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Los_Angeles",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(d);
+    const g = (t: string) => f.find((p) => p.type === t)?.value ?? "00";
+    return {
+      date: `${g("year")}-${g("month")}-${g("day")}`,
+      heure: `${g("hour")}:${g("minute")}:${g("second")}`,
+    };
+  };
+  const a = parts(debut);
+  const b = parts(fin);
+
+  const essais: Array<{ nom: string; bornes: Record<string, string> }> = [
+    { nom: "sans date", bornes: {} },
+    {
+      nom: "espace : 2026-01-31 12:00:00",
+      bornes: {
+        create_date_start: `${a.date} ${a.heure}`,
+        create_date_end: `${b.date} ${b.heure}`,
+      },
+    },
+    {
+      nom: "ISO avec décalage : 2026-01-31T12:00:00-0800",
+      bornes: {
+        create_date_start: `${a.date}T${a.heure}-0800`,
+        create_date_end: `${b.date}T${b.heure}-0800`,
+      },
+    },
+    {
+      nom: "ISO avec décalage à deux-points : ...-08:00",
+      bornes: {
+        create_date_start: `${a.date}T${a.heure}-08:00`,
+        create_date_end: `${b.date}T${b.heure}-08:00`,
+      },
+    },
+    {
+      nom: "ISO UTC : 2026-01-31T12:00:00Z",
+      bornes: {
+        create_date_start: `${a.date}T${a.heure}Z`,
+        create_date_end: `${b.date}T${b.heure}Z`,
+      },
+    },
+    {
+      nom: "date seule : 2026-01-31",
+      bornes: { create_date_start: a.date, create_date_end: b.date },
+    },
+    {
+      nom: "millisecondes depuis epoch",
+      bornes: {
+        create_date_start: String(debut.getTime()),
+        create_date_end: String(fin.getTime()),
+      },
+    },
+  ];
 
   const chemin = "/alibaba/order/list";
-  const parametres: Record<string, string> = {
-    app_key: c.env.ALIBABA_APP_KEY,
-    timestamp: String(Date.now()),
-    sign_method: "sha256",
-    access_token: jeton,
-    role: "buyer",
-    page_size: "20",
-    current_page: "1",
-    create_date_start: losAngeles(debut),
-    create_date_end: losAngeles(fin),
-  };
-  parametres["sign"] = await signRequest(
-    chemin,
-    parametres,
-    c.env.ALIBABA_APP_SECRET,
-  );
+  const journal: Array<{
+    essai: string;
+    accepte: boolean;
+    reponse: string;
+  }> = [];
 
-  const reponse = await fetch(`https://openapi-api.alibaba.com/rest${chemin}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(parametres),
-  });
+  for (const essai of essais) {
+    const parametres: Record<string, string> = {
+      app_key: c.env.ALIBABA_APP_KEY,
+      timestamp: String(Date.now()),
+      sign_method: "sha256",
+      access_token: jeton,
+      role: "buyer",
+      page_size: "20",
+      current_page: "1",
+      ...essai.bornes,
+    };
+    parametres["sign"] = await signRequest(
+      chemin,
+      parametres,
+      c.env.ALIBABA_APP_SECRET,
+    );
 
-  // Le corps est rendu tel quel — c'est tout l'intérêt. On le tronque
-  // seulement, pour qu'une réponse volumineuse reste lisible.
-  const texte = await reponse.text();
+    const reponse = await fetch(
+      `https://openapi-api.alibaba.com/rest${chemin}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(parametres),
+      },
+    );
+    const texte = await reponse.text();
+
+    /*
+     * La passerelle répond 200 même sur refus : c'est le corps qui tranche.
+     *
+     * L'erreur est un objet PLAT en tête de réponse — {"type":"ISV","code":
+     * "InvalidParameter",...}. On ne regarde donc que les deux cents premiers
+     * caractères : un « code » niché dans les données d'une commande (un code
+     * pays, un code de statut) ne doit pas se faire prendre pour un refus.
+     */
+    const enTete = texte.slice(0, 200);
+    const accepte = !/"code"\s*:\s*"(?!0")[A-Za-z]/.test(enTete);
+    journal.push({
+      essai: essai.nom,
+      accepte,
+      reponse: texte.slice(0, 2500),
+    });
+
+    // Un format accepté suffit : inutile de brûler les suivants.
+    if (accepte) break;
+  }
+
+  const gagnant = journal.find((e) => e.accepte);
 
   return c.json({
     boutique: boutique.nom,
     fenetre: {
-      debut: parametres["create_date_start"],
-      fin: parametres["create_date_end"],
+      debut: `${a.date} ${a.heure}`,
+      fin: `${b.date} ${b.heure}`,
       fuseau: "America/Los_Angeles",
     },
-    statutHttp: reponse.status,
-    // Rappel : la passerelle répond 200 même quand elle refuse. C'est le
-    // corps qui dit la vérité.
-    reponseBrute: texte.slice(0, 4000),
-    tronquee: texte.length > 4000,
+    formatAccepte: gagnant?.essai ?? null,
+    essais: journal,
   });
 });
