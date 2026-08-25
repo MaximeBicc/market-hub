@@ -25,6 +25,7 @@ interface FicheAlibaba {
   quantiteMinimale: number;
   images: string[];
   axes: string[];
+  caracteristiques: Array<{ nom: string; valeur: string }>;
   declinaisons: DeclinaisonAlibaba[];
   coutDebarqueUnitaire: number | null;
 }
@@ -89,21 +90,33 @@ function grouper(
 }
 
 /**
- * L'axe de groupement par défaut.
+ * L'axe de groupement par défaut : celui qui découpe le plus.
  *
- * On range par MODÈLE et on déplie les couleurs, pas l'inverse : c'est ainsi
- * qu'on choisit un article — d'abord ce qu'il équipe, ensuite sa teinte. La
- * couleur est donc le mauvais candidat, et tout le reste un bon.
+ * À nombre égal de déclinaisons, l'axe le plus riche donne beaucoup de lignes
+ * courtes plutôt que quelques lignes interminables. Huit modèles de six
+ * couleurs se lisent mieux en huit lignes de six qu'en six lignes de huit —
+ * on cherche d'abord ce que l'article équipe, la teinte vient après.
  *
- * Le nom de l'axe arrive déjà traduit par Alibaba, mais on ne sait pas dans
- * quelle langue : les deux formes sont donc reconnues.
+ * Les noms d'axes ne sont pas fiables pour trancher : Alibaba les traduit
+ * sans dire dans quelle langue, et « Modèle applicable » ou « Compatible
+ * avec » désignent la même chose sans se ressembler. Compter les valeurs ne
+ * dépend d'aucune langue.
  */
-function axeParDefaut(axes: string[]): number {
+function axeParDefaut(declinaisons: DeclinaisonAlibaba[], axes: string[]): number {
   if (axes.length < 2) return -1;
-  const estCouleur = (nom: string) =>
-    /couleur|color|colour|teinte/i.test(nom);
-  const autre = axes.findIndex((nom) => !estCouleur(nom));
-  return autre >= 0 ? autre : 0;
+  let meilleur = 0;
+  let record = -1;
+  for (let i = 0; i < axes.length; i++) {
+    const distinctes = new Set(declinaisons.map((d) => d.optionValues[i] ?? ""))
+      .size;
+    // Strictement supérieur : à égalité, le premier axe d'Alibaba l'emporte,
+    // et l'ordre reste stable d'un import à l'autre.
+    if (distinctes > record) {
+      record = distinctes;
+      meilleur = i;
+    }
+  }
+  return meilleur;
 }
 
 /**
@@ -144,7 +157,7 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
     },
     onSuccess: (f) => {
       setFiche(f);
-      setAxeGroupe(axeParDefaut(f.axes));
+      setAxeGroupe(axeParDefaut(f.declinaisons, f.axes));
       setOuverts(new Set());
       // Toutes les photos retenues d'emblée : décocher est plus rapide que
       // cocher six cases pour un produit qu'on veut entier.
@@ -245,6 +258,34 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
       return n;
     });
 
+  /**
+   * Le stock affiché sur la ligne d'un modèle.
+   *
+   * Vide dès que ses coloris divergent — comme le prix. Y montrer la somme
+   * inviterait à la corriger, et le nombre saisi partirait alors à
+   * l'identique sur chaque coloris : on aurait tapé 60 et obtenu 360.
+   * La somme a sa propre colonne, à droite, en lecture seule.
+   */
+  const stockGroupeCommun = (lignes: DeclinaisonAlibaba[]): string => {
+    const valeurs = new Set(lignes.map((d) => choix[d.optionKey]?.stock ?? 0));
+    return valeurs.size === 1 ? String([...valeurs][0]) : "";
+  };
+
+  /** Pose la même quantité sur chaque coloris — « j'en ai reçu dix de chaque ». */
+  const poserStockGroupe = (lignes: DeclinaisonAlibaba[], brut: string) => {
+    const n = Math.max(0, Number(brut) || 0);
+    setChoix((s) => {
+      const suite = { ...s };
+      for (const d of lignes) {
+        suite[d.optionKey] = {
+          ...(suite[d.optionKey] ?? { stock: 0, prix: "" }),
+          stock: n,
+        };
+      }
+      return suite;
+    });
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
@@ -314,6 +355,17 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                   )}
                 </p>
               </div>
+
+              {fiche.caracteristiques.length > 0 && (
+                <p className="row__s" style={{ whiteSpace: "normal", margin: "-6px 0 12px" }}>
+                  {/* Ce qui vaut pour toutes les pièces : gardé comme
+                      information, écarté des déclinaisons. Un menu déroulant
+                      à un seul choix n'a de sens sur aucune plateforme. */}
+                  {fiche.caracteristiques
+                    .map((c) => `${c.nom} : ${c.valeur}`)
+                    .join(" · ")}
+                </p>
+              )}
 
               {/* Les photos : toutes montrées, à décocher */}
               <div className="field">
@@ -505,6 +557,18 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                             value={prixGroupe(groupe.lignes)}
                             onChange={(e) =>
                               poserPrixGroupe(groupe.lignes, e.target.value)
+                            }
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            className="input font-mono"
+                            style={{ textAlign: "right" }}
+                            placeholder="—"
+                            title="Même quantité sur chaque coloris de ce modèle"
+                            value={stockGroupeCommun(groupe.lignes)}
+                            onChange={(e) =>
+                              poserStockGroupe(groupe.lignes, e.target.value)
                             }
                           />
                           <span className="decl-groupe__total">

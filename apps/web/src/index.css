@@ -2192,7 +2192,7 @@ h2.sec:first-child {
    décocher deux vignettes va plus vite que d'en cocher six. */
 .photos-grille {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
   gap: 8px;
 }
 .photo-choix {
@@ -2265,7 +2265,7 @@ h2.sec:first-child {
 /* Une déclinaison : vignette, nom, prix, stock. */
 .decl-import {
   display: grid;
-  grid-template-columns: 44px 1fr 96px 80px;
+  grid-template-columns: 56px 1fr 92px 68px;
   gap: 8px;
   align-items: center;
   padding: 6px 0;
@@ -2275,20 +2275,20 @@ h2.sec:first-child {
   border-bottom: 0;
 }
 .decl-import img {
-  width: 44px;
-  height: 44px;
+  width: 56px;
+  height: 56px;
   object-fit: cover;
   border-radius: 6px;
   display: block;
 }
 .decl-import__vide {
   display: block;
-  width: 44px;
-  height: 44px;
+  width: 56px;
+  height: 56px;
   border-radius: 6px;
   background: var(--surface-2, rgba(128, 128, 128, 0.12));
   text-align: center;
-  line-height: 44px;
+  line-height: 56px;
   color: var(--muted);
 }
 .decl-import__nom {
@@ -2326,7 +2326,7 @@ h2.sec:first-child {
 }
 .decl-groupe__tete {
   display: grid;
-  grid-template-columns: 22px 40px 1fr 96px 44px;
+  grid-template-columns: 22px 56px 1fr 92px 68px 44px;
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
@@ -2334,11 +2334,15 @@ h2.sec:first-child {
 }
 .decl-groupe__tete img,
 .decl-groupe__tete .decl-import__vide {
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 56px;
   object-fit: cover;
   border-radius: 6px;
-  line-height: 40px;
+  line-height: 56px;
+}
+.decl-groupe__tete .input {
+  padding: 6px 8px;
+  font-size: 13px;
 }
 .decl-groupe__total {
   text-align: right;
@@ -2350,7 +2354,7 @@ h2.sec:first-child {
 /* Un coloris, en retrait sous son modèle. */
 .decl-import--fille {
   padding-left: 30px;
-  padding-right: 10px;
+  padding-right: 54px;
 }
 
 /* Le choix de l'axe qui porte les lignes. Discret : c'est un réglage

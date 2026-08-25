@@ -40,6 +40,15 @@ export interface FicheAlibaba {
   quantiteMinimale: number;
   images: string[];
   axes: string[];
+  /**
+   * Ce que le fournisseur annonce pour TOUTES les pièces indifféremment.
+   *
+   * Alibaba mélange dans ses attributs de SKU ce qui distingue les
+   * déclinaisons — le modèle, la couleur — et ce qui ne distingue rien :
+   * « Sac d'OPP » désigne l'emballage, identique sur chaque pièce. Les deux
+   * arrivent au même endroit ; c'est le nombre de valeurs qui les sépare.
+   */
+  caracteristiques: Array<{ nom: string; valeur: string }>;
   declinaisons: DeclinaisonAlibaba[];
   /** Le coût débarqué du premier coloris, à défaut de mieux. */
   coutDebarqueUnitaire: number | null;
@@ -134,6 +143,31 @@ export function nettoyerDescription(html: string): string {
       // que de se faire refuser l'annonce.
       .slice(0, 5000)
   );
+}
+
+/**
+ * Les entités HTML, décodées.
+ *
+ * Alibaba encode les apostrophes et les accents jusque dans les NOMS et les
+ * VALEURS d'attributs, pas seulement dans la description. « Sac d&#39;opp »
+ * s'affichait tel quel, et un vendeur ne devrait jamais lire ça. Le nom sert
+ * aussi de clé d'identité une fois normalisé : le laisser encodé ferait
+ * diverger « d&#39;opp » et « d'opp » en deux déclinaisons distinctes.
+ */
+export function decoder(t: string): string {
+  if (!t) return "";
+  return t
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&nbsp;/g, " ")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    // L'esperluette en dernier : la décoder d'abord transformerait
+    // « &amp;#39; » en apostrophe, alors qu'il faut lire « &#39; ».
+    .replace(/&amp;/g, "&")
+    .trim();
 }
 
 /** Euros décimaux vers centimes entiers, en refusant ce qui n'est pas un nombre. */
@@ -247,28 +281,60 @@ export async function ficheProduit(
   const skus = (d["skus"] as SkuAlibaba[] | undefined) ?? [];
 
   /*
-   * LES AXES, DANS L'ORDRE OÙ ALIBABA LES PRÉSENTE.
+   * LES AXES QUI DÉCOUPENT VRAIMENT — ET LES AUTRES.
    *
-   * Un produit peut en avoir plusieurs — « Couleur » ET « Capacité ». Les
-   * réduire à un seul fondrait deux coloris de contenances différentes en une
-   * même déclinaison, et leurs stocks avec.
+   * Un produit peut avoir plusieurs axes : « Couleur » ET « Modèle ». Les
+   * réduire à un seul fondrait deux modèles d'une même teinte en une
+   * déclinaison, et leurs stocks avec.
+   *
+   * Mais Alibaba range aussi, parmi les attributs de SKU, des choses qui ne
+   * distinguent RIEN. « Sac d'OPP » — le sachet plastique — vaut pareil sur
+   * chaque pièce. Le garder comme axe créait un groupe unique contenant tout
+   * le produit, et aurait produit chez Shopify, eBay et Etsy un menu
+   * déroulant à un seul choix : inutile au mieux, refusé au pire.
+   *
+   * Le nombre de valeurs distinctes tranche : deux ou plus, c'est un axe ;
+   * une seule, c'est une caractéristique du produit.
    */
-  const axes: string[] = [];
+  const valeursParAxe = new Map<string, Set<string>>();
+  const ordre: string[] = [];
   for (const sku of skus) {
     for (const a of sku.sku_attr_list ?? []) {
-      const nom = (a.attr_name_desc ?? "").trim();
-      if (nom && !axes.includes(nom)) axes.push(nom);
+      const nom = decoder(a.attr_name_desc ?? "");
+      if (!nom) continue;
+      if (!valeursParAxe.has(nom)) {
+        valeursParAxe.set(nom, new Set());
+        ordre.push(nom);
+      }
+      valeursParAxe.get(nom)!.add(decoder(a.attr_value_desc ?? ""));
     }
   }
+
+  let axes = ordre.filter((nom) => (valeursParAxe.get(nom)?.size ?? 0) > 1);
+
+  /*
+   * Le garde-fou : si AUCUN axe ne découpe alors qu'il y a plusieurs SKU,
+   * toutes les déclinaisons se replieraient sur une clé vide et s'écraseraient
+   * l'une l'autre en base, stock compris. Dans ce cas improbable on garde tout.
+   */
+  if (axes.length === 0 && skus.length > 1) axes = ordre;
+
+  const caracteristiques = ordre
+    .filter((nom) => !axes.includes(nom))
+    .map((nom) => ({
+      nom,
+      valeur: [...(valeursParAxe.get(nom) ?? [])][0] ?? "",
+    }));
 
   const declinaisons: DeclinaisonAlibaba[] = skus
     .filter((sku) => sku.status !== "DELETE")
     .map((sku) => {
       const attrs = sku.sku_attr_list ?? [];
-      const valeurs = axes.map(
-        (axe) =>
-          attrs.find((a) => (a.attr_name_desc ?? "").trim() === axe)
+      const valeurs = axes.map((axe) =>
+        decoder(
+          attrs.find((a) => decoder(a.attr_name_desc ?? "") === axe)
             ?.attr_value_desc ?? "",
+        ),
       );
 
       /*
@@ -311,15 +377,16 @@ export async function ficheProduit(
 
   return {
     productId,
-    titre: String(d["title"] ?? "").slice(0, 200),
+    titre: decoder(String(d["title"] ?? "")).slice(0, 200),
     description: nettoyerDescription(String(d["description"] ?? "")),
-    categorie: (d["category"] as string) ?? null,
-    fournisseur: (d["supplier"] as string) ?? null,
+    categorie: d["category"] ? decoder(String(d["category"])) : null,
+    fournisseur: d["supplier"] ? decoder(String(d["supplier"])) : null,
     lien: (d["detail_url"] as string) ?? null,
     devise: String(d["currency"] ?? "EUR"),
     quantiteMinimale: qmin,
     images: ((d["images"] as string[] | undefined) ?? []).filter(Boolean),
     axes,
+    caracteristiques,
     declinaisons,
     coutDebarqueUnitaire: declinaisons[0]?.coutDebarque ?? null,
   };
