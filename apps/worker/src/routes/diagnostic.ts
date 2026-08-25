@@ -712,12 +712,57 @@ diagnostic.get("/alibaba/produit", async (c) => {
     c.env.ALIBABA_APP_SECRET,
   );
 
-  const reponse = await fetch(`https://openapi-api.alibaba.com/rest${chemin}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(parametres),
-  });
-  const texte = await reponse.text();
+  /*
+   * TOUTES LES API D'ALIBABA NE PARLENT PAS LA MÊME MÉTHODE.
+   *
+   * `/alibaba/order/list` répond en POST ; celle-ci a rendu
+   * « UnsupportedHTTPMethod ». Le formulaire de l'explorateur propose bien
+   * quatre méthodes, sans dire laquelle va avec quelle API — on essaie donc,
+   * plutôt que de redéployer à chaque hypothèse.
+   *
+   * En GET, les paramètres passent par la chaîne de requête. La signature,
+   * elle, se calcule de la même façon : sur les valeurs, avant encodage.
+   */
+  const base = `https://openapi-api.alibaba.com/rest${chemin}`;
+  const tentatives: Array<{ methode: string; envoi: () => Promise<Response> }> =
+    [
+      {
+        methode: "GET",
+        envoi: () =>
+          fetch(`${base}?${new URLSearchParams(parametres)}`, {
+            method: "GET",
+          }),
+      },
+      {
+        methode: "POST",
+        envoi: () =>
+          fetch(base, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams(parametres),
+          }),
+      },
+      {
+        methode: "PUT",
+        envoi: () =>
+          fetch(base, {
+            method: "PUT",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams(parametres),
+          }),
+      },
+    ];
+
+  let reponse!: Response;
+  let texte = "";
+  let methodeRetenue = "";
+  for (const t of tentatives) {
+    reponse = await t.envoi();
+    texte = await reponse.text();
+    methodeRetenue = t.methode;
+    // On s'arrête dès que la méthode cesse d'être le problème.
+    if (!texte.includes("UnsupportedHTTPMethod")) break;
+  }
 
   // On rend le brut ET une lecture. Le brut sert à voir ce qu'Alibaba dit
   // vraiment ; la lecture, à vérifier qu'on le comprend bien.
@@ -787,6 +832,7 @@ diagnostic.get("/alibaba/produit", async (c) => {
 
   return c.json({
     productId,
+    methode: methodeRetenue,
     statutHttp: reponse.status,
     lecture,
     reponseBrute: texte.slice(0, 6000),
