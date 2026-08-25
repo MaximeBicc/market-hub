@@ -49,6 +49,16 @@ export interface FicheAlibaba {
    * arrivent au même endroit ; c'est le nombre de valeurs qui les sépare.
    */
   caracteristiques: Array<{ nom: string; valeur: string }>;
+  /**
+   * Ce que le fournisseur dit de l'expédition.
+   *
+   * Repris TEL QUEL, sans conversion. Alibaba ne précise ni l'unité du poids
+   * ni s'il concerne une pièce ou un carton entier — deux inconnues qu'on ne
+   * lève pas en devinant. Le nombre est donc montré, pas injecté dans le
+   * poids d'expédition du produit : une valeur fausse là-dedans fausserait
+   * tous les calculs de port sans jamais se signaler.
+   */
+  logistique: Array<{ nom: string; valeur: string }>;
   declinaisons: DeclinaisonAlibaba[];
   /** Le coût débarqué du premier coloris, à défaut de mieux. */
   coutDebarqueUnitaire: number | null;
@@ -375,8 +385,26 @@ export async function ficheProduit(
       };
     });
 
+  /*
+   * Les données d'expédition vivent dans `wholesale_trade`, un objet qui
+   * n'est pas toujours présent — d'où la lecture défensive champ par champ.
+   */
+  const gros = (d["wholesale_trade"] as Record<string, unknown> | undefined) ?? {};
+  const logistique: Array<{ nom: string; valeur: string }> = [];
+  const ajouter = (nom: string, v: unknown, suffixe = "") => {
+    const t = v === null || v === undefined ? "" : String(v).trim();
+    if (t && t !== "0") logistique.push({ nom, valeur: t + suffixe });
+  };
+  ajouter("Poids annoncé", gros["weight"]);
+  ajouter("Dimensions du colis", gros["package_size"]);
+  ajouter("Volume", gros["volume"], " cm³");
+  ajouter("Délai de préparation", gros["handling_time"], " jours");
+  ajouter("Unité", gros["unit_type"]);
+  ajouter("Vidéo", d["video_url"]);
+
   return {
     productId,
+    logistique,
     titre: decoder(String(d["title"] ?? "")).slice(0, 200),
     description: nettoyerDescription(String(d["description"] ?? "")),
     categorie: d["category"] ? decoder(String(d["category"])) : null,

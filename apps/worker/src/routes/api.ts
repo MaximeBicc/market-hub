@@ -15,6 +15,7 @@ import {
   shop,
   syncJob,
   variant,
+  listingGroup,
 } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { randomId } from "../lib/crypto.js";
@@ -1707,24 +1708,49 @@ api.delete("/products/:id", async (c) => {
   const db = drizzle(c.env.DB);
   const id = c.req.param("id");
 
-  await db.update(listing).set({ productId: null }).where(eq(listing.productId, id));
-
   /*
-   * TOUTES les variantes, pas « la » variante.
+   * CINQ RÉFÉRENCES POINTENT VERS CE PRODUIT ET SES VARIANTES.
    *
-   * Le code ne supprimait le stock que d'un produit à variante unique. Sur un
-   * produit décliné, `varianteUnique` renvoie `undefined` : rien n'était
-   * effacé, et la suppression du produit se heurtait ensuite à la clé
-   * étrangère de `variant` — une erreur 500 sans explication, à chaque essai.
+   * D1 fait respecter les clés étrangères. Il faut donc les détacher TOUTES
+   * avant d'effacer quoi que ce soit, dans l'ordre inverse des dépendances —
+   * sinon la base refuse, et l'écran affiche « 500 » sans rien expliquer.
+   *
+   *   listing.product_id       → le produit
+   *   listing.variant_id       → ses variantes      ← oublié, cause du 500
+   *   listing_group.product_id → le produit          ← oublié aussi
+   *   inventory.variant_id     → ses variantes
+   *   variant.product_id       → le produit
+   *
+   * Les annonces, elles, SURVIVENT : elles existent chez la plateforme et
+   * continueront d'être relevées par la synchronisation. Les supprimer ici
+   * les ferait réapparaître au passage suivant, orphelines et sans stock.
    */
   const siennes = await db
     .select({ id: variant.id })
     .from(variant)
     .where(eq(variant.productId, id));
 
+  await db
+    .update(listing)
+    .set({ productId: null })
+    .where(eq(listing.productId, id));
+
   for (const v of siennes) {
+    // Une annonce en ligne peut pointer sur une variante de ce produit. La
+    // laisser accrochée bloquerait la suppression ; la détacher la laisse
+    // vivre, rattachable plus tard par son SKU.
+    await db
+      .update(listing)
+      .set({ variantId: null })
+      .where(eq(listing.variantId, v.id));
     await db.delete(inventory).where(eq(inventory.variantId, v.id));
   }
+
+  await db
+    .update(listingGroup)
+    .set({ productId: null })
+    .where(eq(listingGroup.productId, id));
+
   await db.delete(variant).where(eq(variant.productId, id));
   await db.delete(product).where(eq(product.id, id));
 

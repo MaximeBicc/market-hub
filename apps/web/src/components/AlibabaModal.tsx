@@ -26,6 +26,7 @@ interface FicheAlibaba {
   images: string[];
   axes: string[];
   caracteristiques: Array<{ nom: string; valeur: string }>;
+  logistique: Array<{ nom: string; valeur: string }>;
   declinaisons: DeclinaisonAlibaba[];
   coutDebarqueUnitaire: number | null;
 }
@@ -199,7 +200,25 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
         {
           productId: fiche.productId,
           titre: fiche.titre,
-          description: fiche.description,
+          /*
+           * Les caractéristiques rejoignent la description.
+           *
+           * Sans ça, elles ne vivraient que le temps de cette fenêtre : notre
+           * modèle de produit n'a pas de champ pour « Sac d'OPP » ni pour un
+           * délai de préparation. Les perdre obligerait à rouvrir la fiche
+           * Alibaba au moment de rédiger l'annonce.
+           */
+          description: [
+            fiche.description,
+            [...fiche.caracteristiques, ...fiche.logistique].length > 0
+              ? "\n\nInformations fournisseur\n" +
+                [...fiche.caracteristiques, ...fiche.logistique]
+                  .map((c) => `${c.nom} : ${c.valeur}`)
+                  .join("\n")
+              : "",
+          ]
+            .filter(Boolean)
+            .join(""),
           categorie: fiche.categorie,
           lien: fiche.lien,
           images: fiche.images.filter((u) => photos.has(u)),
@@ -438,12 +457,13 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                 </p>
               </div>
 
-              {fiche.caracteristiques.length > 0 && (
+              {(fiche.caracteristiques.length > 0 ||
+                fiche.logistique.length > 0) && (
                 <p className="row__s" style={{ whiteSpace: "normal", margin: "-6px 0 12px" }}>
                   {/* Ce qui vaut pour toutes les pièces : gardé comme
                       information, écarté des déclinaisons. Un menu déroulant
                       à un seul choix n'a de sens sur aucune plateforme. */}
-                  {fiche.caracteristiques
+                  {[...fiche.caracteristiques, ...fiche.logistique]
                     .map((c) => `${c.nom} : ${c.valeur}`)
                     .join(" · ")}
                 </p>
