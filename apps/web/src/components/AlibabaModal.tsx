@@ -43,6 +43,48 @@ function centimes(saisie: string): number {
 }
 
 /**
+ * Les vignettes passent par notre serveur.
+ *
+ * En direct, les adresses du CDN d'Alibaba ne s'affichaient pas dans
+ * l'application — entre la politique de sécurité de la page, le service worker
+ * et le référent, trois causes possibles qu'on ne départage pas. Relayées,
+ * elles deviennent une ressource de même origine et plus rien ne s'interpose.
+ */
+function vignette(url: string | null): string | undefined {
+  if (!url) return undefined;
+  return `/api/alibaba/image?u=${encodeURIComponent(url)}`;
+}
+
+/**
+ * Les déclinaisons rangées par leur PREMIER axe.
+ *
+ * Un étui de téléphone existe en huit modèles et six couleurs : quarante-huit
+ * lignes à plat, illisibles. Groupées par modèle, ce sont huit lignes qu'on
+ * déplie à la demande.
+ *
+ * S'il n'y a qu'un seul axe, on ne groupe pas : une hiérarchie à un étage
+ * ajouterait un clic pour ne rien révéler.
+ */
+function grouper(
+  declinaisons: DeclinaisonAlibaba[],
+  plusieursAxes: boolean,
+): Array<{ titre: string; lignes: DeclinaisonAlibaba[] }> {
+  if (!plusieursAxes) {
+    return [{ titre: "", lignes: declinaisons }];
+  }
+  const paquets = new Map<string, DeclinaisonAlibaba[]>();
+  for (const d of declinaisons) {
+    // L'ordre d'arrivée fait l'ordre d'affichage : c'est celui du fournisseur,
+    // et il est plus sensé qu'un tri alphabétique sur « iPhone 15 / 16 / 17 ».
+    const cle = d.optionValues[0] || "—";
+    const liste = paquets.get(cle);
+    if (liste) liste.push(d);
+    else paquets.set(cle, [d]);
+  }
+  return [...paquets].map(([titre, lignes]) => ({ titre, lignes }));
+}
+
+/**
  * Importer un produit fournisseur depuis un lien Alibaba.
  *
  * Le geste est en deux temps, et c'est délibéré : on LIT d'abord, on décide
@@ -64,7 +106,9 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
   const [photos, setPhotos] = useState<Set<string>>(new Set());
   const [prixCommun, setPrixCommun] = useState("");
   const [choix, setChoix] = useState<Record<string, Choix>>({});
-  const [deplie, setDeplie] = useState(true);
+  /** Les groupes ouverts. Tout est replié au départ : on voit la structure
+      avant le détail, et un produit à huit modèles tient dans l'écran. */
+  const [ouverts, setOuverts] = useState<Set<string>>(new Set());
 
   const lire = useMutation({
     mutationFn: async () => {
@@ -149,6 +193,33 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
       ),
     );
   const desalignes = Object.values(choix).filter((c) => c.prix.trim()).length;
+
+  const groupes = fiche
+    ? grouper(fiche.declinaisons, fiche.axes.length > 1)
+    : [];
+
+  /**
+   * Le prix affiché sur la ligne d'un modèle.
+   *
+   * Vide dès que ses coloris ne s'accordent pas : montrer l'un d'eux
+   * laisserait croire que tout le modèle est à ce prix.
+   */
+  const prixGroupe = (lignes: DeclinaisonAlibaba[]): string => {
+    const valeurs = new Set(
+      lignes.map((d) => (choix[d.optionKey]?.prix ?? "").trim()),
+    );
+    return valeurs.size === 1 ? [...valeurs][0]! : "";
+  };
+
+  /** Pose un prix sur tous les coloris d'un modèle d'un seul geste. */
+  const poserPrixGroupe = (lignes: DeclinaisonAlibaba[], prix: string) =>
+    setChoix((s) => {
+      const n = { ...s };
+      for (const d of lignes) {
+        n[d.optionKey] = { ...(n[d.optionKey] ?? { stock: 0, prix: "" }), prix };
+      }
+      return n;
+    });
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -244,7 +315,12 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                           })
                         }
                       >
-                        <img src={url} alt="" loading="lazy" />
+                        <img
+                          src={vignette(url)}
+                          alt=""
+                          loading="lazy"
+                          title={url}
+                        />
                         {prise && <span className="photo-choix__coche">✓</span>}
                       </button>
                     );
@@ -305,84 +381,164 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                 )}
               </div>
 
-              {/* Les déclinaisons, dépliables */}
+              {/* Les déclinaisons, rangées par modèle */}
               <div className="field">
-                <button
-                  type="button"
-                  className="declinaisons-entete"
-                  onClick={() => setDeplie(!deplie)}
-                  aria-expanded={deplie}
-                >
-                  <Icon name={deplie ? "chevronLeft" : "chevronRight"} />
-                  <span>
+                <div className="decl-entete">
+                  <span className="field__label" style={{ margin: 0 }}>
                     {fiche.declinaisons.length} déclinaison
                     {fiche.declinaisons.length > 1 ? "s" : ""}
                     {fiche.axes.length > 0 && ` · ${fiche.axes.join(" × ")}`}
                   </span>
                   <span className="muted">{total} unités au total</span>
-                </button>
+                </div>
 
-                {deplie && (
-                  <div className="declinaisons-liste">
-                    {fiche.declinaisons.map((d) => {
-                      const c = choix[d.optionKey] ?? { stock: 0, prix: "" };
-                      const propre = c.prix.trim() ? centimes(c.prix) : null;
-                      return (
-                        <div className="decl-import" key={d.optionKey}>
-                          {d.image ? (
-                            <img src={d.image} alt="" loading="lazy" />
+                {groupes.map((groupe) => {
+                  const ouvert = !groupe.titre || ouverts.has(groupe.titre);
+                  const stockGroupe = groupe.lignes.reduce(
+                    (n, d) => n + (choix[d.optionKey]?.stock ?? 0),
+                    0,
+                  );
+                  const photoGroupe =
+                    groupe.lignes.find((d) => d.image)?.image ?? null;
+
+                  return (
+                    <div className="decl-groupe" key={groupe.titre || "tout"}>
+                      {groupe.titre && (
+                        <div className="decl-groupe__tete">
+                          <button
+                            type="button"
+                            className="chevron-variantes"
+                            aria-expanded={ouvert}
+                            title={
+                              ouvert
+                                ? "Replier"
+                                : `Voir les ${groupe.lignes.length} déclinaisons`
+                            }
+                            onClick={() =>
+                              setOuverts((s) => {
+                                const n = new Set(s);
+                                if (n.has(groupe.titre)) n.delete(groupe.titre);
+                                else n.add(groupe.titre);
+                                return n;
+                              })
+                            }
+                          >
+                            <Icon
+                              name={ouvert ? "chevronLeft" : "chevronRight"}
+                            />
+                          </button>
+
+                          {photoGroupe ? (
+                            <img src={vignette(photoGroupe)} alt="" loading="lazy" />
                           ) : (
                             <span className="decl-import__vide">—</span>
                           )}
+
                           <div className="decl-import__nom">
-                            <b>{d.nom}</b>
-                            {d.coutDebarque != null && (
-                              <span className="row__s">
-                                revient {money(d.coutDebarque)}
-                              </span>
-                            )}
+                            <b>{groupe.titre}</b>
+                            <span className="row__s">
+                              {groupe.lignes.length} coloris ·{" "}
+                              {stockGroupe > 0
+                                ? `${stockGroupe} unités`
+                                : "aucun stock"}
+                            </span>
                           </div>
+
+                          {/* Un prix posé ici descend sur tout le modèle : sur
+                              huit modèles à six couleurs, le saisir coloris
+                              par coloris serait quarante-huit champs. */}
                           <input
                             type="text"
                             className="input font-mono"
                             placeholder={prixCommun || "prix"}
-                            title={
-                              propre === null
-                                ? "Vide : suit le prix commun"
-                                : "Prix particulier à cette déclinaison"
-                            }
-                            value={c.prix}
+                            title="Prix de ce modèle — s'applique à ses coloris"
+                            value={prixGroupe(groupe.lignes)}
                             onChange={(e) =>
-                              setChoix((s) => ({
-                                ...s,
-                                [d.optionKey]: { ...c, prix: e.target.value },
-                              }))
+                              poserPrixGroupe(groupe.lignes, e.target.value)
                             }
                           />
-                          <input
-                            type="number"
-                            min="0"
-                            className="input font-mono"
-                            style={{ textAlign: "right" }}
-                            value={c.stock}
-                            onChange={(e) =>
-                              setChoix((s) => ({
-                                ...s,
-                                [d.optionKey]: {
-                                  ...c,
-                                  stock: Math.max(
-                                    0,
-                                    Number(e.target.value) || 0,
-                                  ),
-                                },
-                              }))
-                            }
-                          />
+                          <span className="decl-groupe__total">
+                            {stockGroupe}
+                          </span>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                      )}
+
+                      {ouvert &&
+                        groupe.lignes.map((d) => {
+                          const c = choix[d.optionKey] ?? {
+                            stock: 0,
+                            prix: "",
+                          };
+                          // Sur deux axes, le nom du modèle est déjà porté par
+                          // la ligne parente : le répéter alourdirait pour rien.
+                          const nom =
+                            groupe.titre && d.optionValues.length > 1
+                              ? d.optionValues.slice(1).filter(Boolean).join(" · ")
+                              : d.nom;
+                          return (
+                            <div
+                              className={`decl-import ${groupe.titre ? "decl-import--fille" : ""}`}
+                              key={d.optionKey}
+                            >
+                              {d.image ? (
+                                <img
+                                  src={vignette(d.image)}
+                                  alt=""
+                                  loading="lazy"
+                                  title={d.image}
+                                />
+                              ) : (
+                                <span className="decl-import__vide">—</span>
+                              )}
+                              <div className="decl-import__nom">
+                                <b>{nom || "sans déclinaison"}</b>
+                                {d.coutDebarque != null && (
+                                  <span className="row__s">
+                                    revient {money(d.coutDebarque)}
+                                  </span>
+                                )}
+                              </div>
+                              <input
+                                type="text"
+                                className="input font-mono"
+                                placeholder={prixCommun || "prix"}
+                                title="Vide : suit le prix commun"
+                                value={c.prix}
+                                onChange={(e) =>
+                                  setChoix((s) => ({
+                                    ...s,
+                                    [d.optionKey]: {
+                                      ...c,
+                                      prix: e.target.value,
+                                    },
+                                  }))
+                                }
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                className="input font-mono"
+                                style={{ textAlign: "right" }}
+                                value={c.stock}
+                                onChange={(e) =>
+                                  setChoix((s) => ({
+                                    ...s,
+                                    [d.optionKey]: {
+                                      ...c,
+                                      stock: Math.max(
+                                        0,
+                                        Number(e.target.value) || 0,
+                                      ),
+                                    },
+                                  }))
+                                }
+                              />
+                            </div>
+                          );
+                        })}
+                    </div>
+                  );
+                })}
               </div>
             </>
           )}

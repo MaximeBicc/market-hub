@@ -1106,6 +1106,66 @@ api.get("/growth", async (c) => {
 /** Liste de tous les produits du catalogue maître avec leurs annonces associées. */
 
 /**
+ * LES VIGNETTES ALIBABA, SERVIES PAR NOUS.
+ *
+ * Les adresses du CDN d'Alibaba fonctionnent en direct — vérifié en ligne de
+ * commande — mais pas dans le navigateur de l'application. Entre les deux il y
+ * a la politique de sécurité de la page, le service worker qui intercepte les
+ * requêtes, et le référent envoyé par le navigateur : trois causes possibles,
+ * qu'on ne départage pas depuis un poste de développement.
+ *
+ * Passer par le Worker les supprime toutes à la fois. L'image devient une
+ * ressource de MÊME ORIGINE, et plus rien ne peut s'interposer.
+ *
+ * LE GARDE-FOU QUI COMPTE : sans liste blanche, cette route serait un relais
+ * ouvert. N'importe qui pourrait s'en servir pour faire émettre des requêtes
+ * par notre Worker vers n'importe quelle adresse — y compris des services
+ * internes joignables depuis lui et non depuis l'extérieur. Seuls les hôtes
+ * d'Alibaba sont donc acceptés, et rien d'autre.
+ */
+api.get("/alibaba/image", async (c) => {
+  const brut = c.req.query("u") ?? "";
+  let cible: URL;
+  try {
+    cible = new URL(brut);
+  } catch {
+    return c.text("Adresse invalide", 400);
+  }
+
+  const hote = cible.hostname.toLowerCase();
+  const autorise =
+    cible.protocol === "https:" &&
+    (hote === "alicdn.com" ||
+      hote.endsWith(".alicdn.com") ||
+      hote.endsWith(".alibaba.com"));
+  if (!autorise) return c.text("Hôte non autorisé", 403);
+
+  const amont = await fetch(cible.toString(), {
+    // Le CDN sert la même image avec ou sans référent ; ne rien envoyer
+    // évite de lui apprendre où nos écrans se trouvent.
+    headers: { Accept: "image/*" },
+  });
+  if (!amont.ok) {
+    return c.text(`Image indisponible (${amont.status})`, 502);
+  }
+
+  const type = amont.headers.get("content-type") ?? "";
+  // Une réponse qui n'est pas une image n'a rien à faire ici, quel que soit
+  // l'hôte : on ne relaie pas du HTML ni du JSON sous couvert de vignette.
+  if (!type.startsWith("image/")) {
+    return c.text("Ce n'est pas une image", 415);
+  }
+
+  return new Response(amont.body, {
+    headers: {
+      "Content-Type": type,
+      // Ces fichiers ne changent jamais : leur nom porte une empreinte.
+      "Cache-Control": "public, max-age=604800, immutable",
+    },
+  });
+});
+
+/**
  * LIRE UNE FICHE ALIBABA, SANS RIEN ENREGISTRER.
  *
  * Deux temps volontairement séparés : on regarde d'abord, on décide ensuite.

@@ -2302,3 +2302,53 @@ h2.sec:first-child {
   padding: 6px 8px;
   font-size: 13px;
 }
+
+/* ── Les déclinaisons à deux étages ────────────────────────────────
+   Un étui existe en huit modèles et six couleurs : quarante-huit lignes
+   à plat sont illisibles. Le modèle porte la ligne, les coloris se
+   déplient dessous. */
+.decl-entete {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.decl-entete > .muted {
+  margin-left: auto;
+  font-size: 13px;
+}
+
+.decl-groupe {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+.decl-groupe__tete {
+  display: grid;
+  grid-template-columns: 22px 40px 1fr 96px 44px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--surface-2, rgba(128, 128, 128, 0.06));
+}
+.decl-groupe__tete img,
+.decl-groupe__tete .decl-import__vide {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  line-height: 40px;
+}
+.decl-groupe__total {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Un coloris, en retrait sous son modèle. */
+.decl-import--fille {
+  padding-left: 30px;
+  padding-right: 10px;
+}
