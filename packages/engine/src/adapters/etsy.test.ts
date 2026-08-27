@@ -1186,3 +1186,20 @@ describe("prix d'une déclinaison", () => {
     expect(ecrits[1].offerings[0].price).toBe(24.9);
   });
 });
+
+describe("indice de boutique", () => {
+  it("lit shop_id dans le corps, sous forme de texte", () => {
+    // Etsy envoie un nombre ; notre `externalId` est une chaîne. Sans cette
+    // conversion la comparaison échouerait toujours, en silence.
+    expect(
+      adapter.indiceCompte(new Request("https://x/"), '{"shop_id":67654730}'),
+    ).toBe("67654730");
+  });
+
+  it("rend null sur un corps illisible plutôt que de lever", () => {
+    // Le corps n'est pas encore vérifié à cet instant : il peut être
+    // n'importe quoi, y compris une tentative de faire planter la route.
+    expect(adapter.indiceCompte(new Request("https://x/"), "pas du json")).toBeNull();
+    expect(adapter.indiceCompte(new Request("https://x/"), "{}")).toBeNull();
+  });
+});

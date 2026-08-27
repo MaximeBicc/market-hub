@@ -214,6 +214,25 @@ export interface MarketplaceAdapter {
   webhookSignaux?(request: Request, rawBody: string): SignalWebhook[];
 
   /**
+   * Un INDICE sur la boutique concernée, lu dans la notification.
+   *
+   * ═══ CE QUE CET INDICE N'EST PAS ═══
+   *
+   * Ce n'est PAS une identification. La valeur vient d'un en-tête ou d'un
+   * corps que l'appelant contrôle entièrement : n'importe qui peut prétendre
+   * être n'importe quelle boutique. La signature reste seule juge, et elle est
+   * vérifiée après, sans exception.
+   *
+   * L'indice sert uniquement à ORDONNER les candidats : on essaie d'abord
+   * celui qu'il désigne. Avec deux boutiques, ça n'a aucune importance ; avec
+   * deux cents, ça fait la différence entre une vérification et deux cents.
+   *
+   * Rendre `null` est toujours correct : la liste garde alors son ordre
+   * naturel, et le comportement est exactement celui d'avant.
+   */
+  indiceCompte?(request: Request, rawBody: string): string | null;
+
+  /**
    * Vérifie la signature d'un webhook et le traduit en événements canoniques.
    * Reçoit la requête brute : re-sérialiser le corps casserait la signature.
    */

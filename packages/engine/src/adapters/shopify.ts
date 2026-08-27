@@ -1461,6 +1461,12 @@ export class ShopifyAdapter implements MarketplaceAdapter {
    * main dans l'administration. C'est ce qui fait passer la détection de
    * quinze minutes à quelques secondes.
    */
+  indiceCompte(request: Request): string | null {
+    // Shopify nomme la boutique dans un en-tête dédié, sous la forme exacte
+    // que porte notre `externalId` : « xxxxx.myshopify.com ».
+    return request.headers.get("X-Shopify-Shop-Domain");
+  }
+
   webhookSignaux(request: Request, rawBody: string): SignalWebhook[] {
     const topic = request.headers.get("X-Shopify-Topic") ?? "";
 

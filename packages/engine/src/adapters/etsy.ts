@@ -1793,6 +1793,18 @@ export class EtsyAdapter implements MarketplaceAdapter {
    * webhook dit « une commande a bougé » ; le relevé, déjà éprouvé, va lire
    * laquelle. Quelques secondes au lieu de quinze minutes, sans rien inventer.
    */
+  indiceCompte(_request: Request, rawBody: string): string | null {
+    // Etsy met `shop_id` dans le corps, sous la forme numérique que porte
+    // notre `externalId`. Le corps n'est pas encore vérifié à cet instant :
+    // raison de plus pour n'en tirer qu'un ordre de passage.
+    try {
+      const corps = JSON.parse(rawBody) as { shop_id?: number | string };
+      return corps.shop_id !== undefined ? String(corps.shop_id) : null;
+    } catch {
+      return null;
+    }
+  }
+
   webhookSignaux(): SignalWebhook[] {
     /*
      * Etsy ne pousse qu'un identifiant de commande, dans une forme que sa

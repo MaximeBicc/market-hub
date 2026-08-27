@@ -47,16 +47,30 @@ webhooks.post("/:platform", async (c) => {
   if (!adapter.verifyAndParseWebhook) return c.text("OK", 200);
 
   /**
-   * Le webhook n'identifie pas le compte de façon exploitable avant
-   * vérification : on essaie donc chaque compte de cette plateforme, et la
-   * signature elle-même désigne le bon. Avec une poignée de comptes c'est
-   * négligeable ; et surtout, aucune signature n'est acceptée sur la foi
-   * d'un en-tête que l'appelant contrôle.
+   * AUCUNE SIGNATURE N'EST ACCEPTÉE SUR LA FOI D'UN EN-TÊTE.
+   *
+   * C'est la règle, et elle ne bouge pas : la notification ne prouve rien
+   * avant vérification cryptographique, et l'appelant contrôle entièrement ce
+   * qu'il envoie. On essaie donc les comptes de la plateforme jusqu'à ce
+   * qu'une signature soit valide — c'est elle qui désigne le bon.
+   *
+   * Ce qui change : l'ORDRE dans lequel on les essaie. Shopify nomme la
+   * boutique dans un en-tête, Etsy dans son corps. Cette valeur ne prouve
+   * rien, mais elle indique qui essayer D'ABORD. Avec quatre boutiques c'est
+   * invisible ; avec deux cents, c'est une vérification au lieu de deux
+   * cents, et la même garantie exactement.
    */
   const candidats = await db
-    .select({ id: shop.id })
+    .select({ id: shop.id, externalId: shop.externalId })
     .from(shop)
     .where(eq(shop.platform, platform));
+
+  const indice = adapter.indiceCompte?.(c.req.raw, rawBody) ?? null;
+  if (indice) {
+    const rang = (x: { externalId: string | null }) =>
+      x.externalId === indice ? 0 : 1;
+    candidats.sort((a, b) => rang(a) - rang(b));
+  }
 
   let events: CanonicalOrderEvent[] | null = null;
   let accountId: string | null = null;

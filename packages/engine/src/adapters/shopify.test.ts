@@ -1190,3 +1190,26 @@ describe("prix d'une déclinaison", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("indice de boutique", () => {
+  /**
+   * L'indice sert à ORDONNER les candidats, jamais à les autoriser. Ces tests
+   * verrouillent le contrat : il rend ce que l'en-tête dit, sans le croire.
+   */
+  it("lit le domaine annoncé par l'en-tête", () => {
+    const r = adapter.indiceCompte(
+      new Request("https://x/", {
+        headers: { "X-Shopify-Shop-Domain": "8yt4iu-py.myshopify.com" },
+      }),
+    );
+    // La forme exacte de notre `externalId` : la comparaison doit tomber juste
+    // sans normalisation, sinon l'indice ne servirait jamais.
+    expect(r).toBe("8yt4iu-py.myshopify.com");
+  });
+
+  it("rend null sans en-tête, ce qui reste correct", () => {
+    // Null n'est pas un échec : la liste garde son ordre naturel et la
+    // vérification se déroule comme avant.
+    expect(adapter.indiceCompte(new Request("https://x/"))).toBeNull();
+  });
+});
