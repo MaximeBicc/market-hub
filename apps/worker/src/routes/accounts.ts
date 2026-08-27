@@ -31,6 +31,7 @@ import {
   etsyFindShop,
   etsyPkce,
 } from "@hub/engine";
+import { ConnectorError } from "@hub/core";
 import { d1Repositories } from "../engine/repositories.js";
 import { ensureSyncJobs } from "../engine/sync.js";
 import { activerTempsReel } from "../lib/temps-reel.js";
@@ -368,20 +369,49 @@ accounts.post("/:id/test", async (c) => {
   try {
     const mod = buildEngine(c.env);
     const adapter = mod.registry.get(account.marketplace);
+    /*
+     * Le crédential est muté SUR PLACE, jamais recopié.
+     *
+     * L'ancienne écriture — `put(id, { ...current, ...patch })` — repartait
+     * d'un instantané FIGÉ. Un adaptateur qui enregistre deux fois pendant le
+     * même test, ce que fait eBay en renouvelant son jeton puis en mémorisant
+     * le jeton applicatif, voyait sa seconde écriture effacer la première.
+     * C'est le piège qui a déjà coûté une reconnexion Etsy.
+     */
     const current = { ...(await repos.credentials.get(id)) };
     await adapter.testConnection({
       account: { ...account, enabled: true },
       credentials: current,
       saveCredentials: async (patch) => {
-        await repos.credentials.put(id, { ...current, ...patch });
+        Object.assign(current, patch);
+        await repos.credentials.put(id, current);
       },
     });
   } catch (err) {
-    await db.update(shop).set({ status: "error" }).where(eq(shop.id, id));
-    return c.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
-      400,
-    );
+    const message = err instanceof Error ? err.message : String(err);
+
+    /*
+     * UNE PANNE PASSAGÈRE NE CONDAMNE PAS UNE BOUTIQUE.
+     *
+     * Ce bloc marquait `error` sur N'IMPORTE QUELLE exception. Or
+     * l'ordonnanceur ne relève que les boutiques actives : un hoquet
+     * d'infrastructure — un Durable Object réinitialisé, une coupure réseau —
+     * arrêtait donc la synchronisation JUSQU'À CE QU'UN HUMAIN reclique sur
+     * « Tester ». C'est exactement ce qui est arrivé à eBay, resté cinq
+     * heures sans relevé pour un incident de quelques secondes.
+     *
+     * Le statut ne change plus que sur un refus d'AUTORISATION — le seul cas
+     * où réessayer ne servirait à rien.
+     */
+    const transitoire =
+      err instanceof ConnectorError
+        ? err.kind === "transient" || err.kind === "rate_limited"
+        : /timeout|durable object|network|fetch failed|reset/i.test(message);
+
+    if (!transitoire) {
+      await db.update(shop).set({ status: "error" }).where(eq(shop.id, id));
+    }
+    return c.json({ ok: false, error: message, transitoire }, 400);
   }
 
   await db.update(shop).set({ status: "active" }).where(eq(shop.id, id));
