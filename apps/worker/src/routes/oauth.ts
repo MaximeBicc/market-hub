@@ -2,6 +2,20 @@ import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import { eq } from "drizzle-orm";
 import { getConnector } from "@hub/connectors";
+/*
+ * LE MÊME PLANIFICATEUR QUE PARTOUT AILLEURS.
+ *
+ * Ce fichier avait le sien, aveugle aux capacités : il créait trois
+ * relevés pour TOUTE plateforme connectée. Alibaba, qui ne vend rien et
+ * déclare toutes ses capacités à faux, s'est donc retrouvé avec un relevé
+ * de commandes, un d'inventaire et un de catalogue — actifs, exécutés, et
+ * consommant du quota pour un adaptateur qui n'a rien à relever.
+ *
+ * Le planificateur du moteur lit les capacités et désactive ce qui n'a pas
+ * lieu d'être. Deux fonctions du même nom faisant presque la même chose,
+ * c'est celle qui tourne à la connexion qui gagnait.
+ */
+import { ensureSyncJobs } from "../engine/sync.js";
 import { PLATFORMS, type Platform } from "@hub/core";
 import { shop, syncJob } from "../db/schema.js";
 import { credentialsFor, type Env } from "../env.js";
@@ -122,7 +136,7 @@ oauth.get("/:platform/callback", async (c) => {
     });
 
   await storeTokens(c.env, shopId, tokens);
-  await ensureSyncJobs(c.env, shopId, platform);
+  await ensureSyncJobs(c.env, shopId);
 
   return c.redirect("/settings/shops?connected=1", 302);
 });
@@ -149,43 +163,3 @@ function buildRedirectUri(
   return shopDomain ? `${base}?shop=${encodeURIComponent(shopDomain)}` : base;
 }
 
-/**
- * Cadence de synchronisation par plateforme.
- *
- * Elle n'est pas identique partout, et ce n'est pas arbitraire :
- * Shopify et eBay poussent des webhooks, on peut donc y sonder rarement.
- * Etsy ne pousse rien : c'est le polling ou rien.
- */
-async function ensureSyncJobs(
-  env: Env,
-  shopId: string,
-  platform: Platform,
-): Promise<void> {
-  const db = drizzle(env.DB);
-  const now = Math.floor(Date.now() / 1000);
-  const pushes = getConnector(platform).supportsWebhooks;
-
-  const plan = [
-    { resource: "orders", intervalSec: pushes ? 1800 : 600 },
-    { resource: "inventory", intervalSec: 900 },
-    { resource: "listings", intervalSec: 86400 },
-  ];
-
-  for (const p of plan) {
-    await db
-      .insert(syncJob)
-      .values({
-        id: randomId(),
-        shopId,
-        resource: p.resource,
-        intervalSec: p.intervalSec,
-        nextRunAt: now,
-        enabled: 1,
-        failureCount: 0,
-      })
-      .onConflictDoUpdate({
-        target: [syncJob.shopId, syncJob.resource],
-        set: { enabled: 1, failureCount: 0, nextRunAt: now },
-      });
-  }
-}
