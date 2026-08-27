@@ -33,6 +33,14 @@ export interface MockCall {
   accountId: string;
   idempotencyKey: string;
   value?: number | Money;
+  /**
+   * L'annonce visée.
+   *
+   * Sans elle, un test ne peut pas distinguer « les trois annonces du produit
+   * ont été retirées » de « la même a été retirée trois fois » — ni vérifier
+   * qu'un stock part sur l'annonce du bon coloris.
+   */
+  listingId?: string;
 }
 
 export class MockAdapter implements MarketplaceAdapter {
@@ -109,7 +117,7 @@ export class MockAdapter implements MarketplaceAdapter {
 
   async updateStock(
     ctx: MarketplaceContext,
-    _listing: Listing,
+    listing: Listing,
     stock: number,
     idempotencyKey: string,
   ): Promise<TargetResult> {
@@ -118,28 +126,35 @@ export class MockAdapter implements MarketplaceAdapter {
       accountId: ctx.account.id,
       idempotencyKey,
       value: stock,
+      listingId: listing.id,
     });
     return this.ok(ctx);
   }
 
   async activateListing(
     ctx: MarketplaceContext,
-    _listing: Listing,
+    listing: Listing,
     idempotencyKey: string,
   ): Promise<TargetResult> {
-    this.calls.push({ op: "activate", accountId: ctx.account.id, idempotencyKey });
+    this.calls.push({
+      op: "activate",
+      accountId: ctx.account.id,
+      idempotencyKey,
+      listingId: listing.id,
+    });
     return this.ok(ctx);
   }
 
   async deactivateListing(
     ctx: MarketplaceContext,
-    _listing: Listing,
+    listing: Listing,
     idempotencyKey: string,
   ): Promise<TargetResult> {
     this.calls.push({
       op: "deactivate",
       accountId: ctx.account.id,
       idempotencyKey,
+      listingId: listing.id,
     });
     return this.ok(ctx);
   }

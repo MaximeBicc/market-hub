@@ -278,3 +278,90 @@ describe("stock central", () => {
     expect(module.inventoryService.available(item)).toBe(3);
   });
 });
+
+describe("plusieurs annonces pour un même produit", () => {
+  /**
+   * Le cas que le catalogue réel impose : trois produits portent aujourd'hui
+   * deux à trois annonces sur la MÊME boutique, une par coloris. Le dépôt
+   * s'arrêtait à la première trouvée, et deux commandes en souffraient sans
+   * jamais le dire.
+   */
+  async function troisColoris() {
+    const { repos, mock, module } = await setup();
+    for (const [i, nom] of ["noir", "blanc", "rouge"].entries()) {
+      await repos.variants.put({
+        id: `v-${nom}`,
+        productId: "p1",
+        sku: `SAC-${nom}`,
+        optionValues: [nom],
+        optionKey: `couleur=${nom}`,
+        price: EUR(14900),
+        position: i,
+        status: "active",
+      });
+      await repos.listings.put({
+        id: `l-${nom}`,
+        productId: "p1",
+        variantId: `v-${nom}`,
+        accountId: "a1",
+        remoteId: `r-${nom}`,
+        status: "active",
+        price: EUR(14900),
+        stock: 5,
+      });
+    }
+    return { repos, mock, module };
+  }
+
+  it("retire TOUTES les annonces du produit, pas une seule", async () => {
+    const { module, mock } = await troisColoris();
+
+    await module.orchestrator.setActive({
+      productId: "p1",
+      accountIds: ["a1"],
+      active: false,
+      idempotencyKey: "k-retrait",
+    });
+
+    const retires = mock.calls.filter((c) => c.op === "deactivate");
+    // Trois appels, sur trois annonces DISTINCTES. N'en coucher qu'une
+    // laisserait les deux autres achetables à stock nul.
+    expect(retires).toHaveLength(3);
+    expect(new Set(retires.map((c) => c.listingId))).toEqual(
+      new Set(["l-noir", "l-blanc", "l-rouge"]),
+    );
+  });
+
+  it("écrit le stock sur l'annonce de LA variante visée", async () => {
+    const { module, mock } = await troisColoris();
+
+    await module.orchestrator.setStock({
+      productId: "p1",
+      variantId: "v-rouge",
+      accountIds: ["a1"],
+      stock: 7,
+      idempotencyKey: "k-stock",
+    });
+
+    const ecrits = mock.calls.filter((c) => c.op === "updateStock");
+    expect(ecrits).toHaveLength(1);
+    // Le cœur du défaut : sans ciblage, la quantité du rouge partait sur
+    // l'annonce du noir — sans erreur, jusqu'à la survente.
+    expect(ecrits[0]?.listingId).toBe("l-rouge");
+    expect(ecrits[0]?.value).toBe(7);
+  });
+
+  it("marque les trois annonces inactives en base, pas seulement la première", async () => {
+    const { module, repos } = await troisColoris();
+
+    await module.orchestrator.setActive({
+      productId: "p1",
+      accountIds: ["a1"],
+      active: false,
+      idempotencyKey: "k-etat",
+    });
+
+    const etats = (await repos.listings.listByProduct("p1")).map((l) => l.status);
+    expect(etats).toEqual(["inactive", "inactive", "inactive"]);
+  });
+});

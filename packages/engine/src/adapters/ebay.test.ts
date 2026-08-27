@@ -555,3 +555,106 @@ describe("ne jamais écraser ce qui est déjà en ligne", () => {
     expect(sent[1]?.method).toBe("PUT");
   });
 });
+
+describe("annonces à déclinaisons", () => {
+  /**
+   * Le cœur envoie la même commande — « publie », « retire » — quelle que
+   * soit la forme de l'annonce chez eBay. C'est l'adaptateur qui traduit.
+   * Ces tests verrouillent la traduction, parce qu'elle est invisible depuis
+   * l'orchestrateur : rien, à ce niveau-là, ne distinguerait un groupe publié
+   * d'un groupe resté brouillon.
+   */
+  const groupe: Listing = {
+    id: "l-grp",
+    productId: "p1",
+    accountId: "acc-ebay",
+    remoteId: "GRP-CASE",
+    status: "draft",
+    price: { amount: 450, currency: "EUR" },
+    stock: 34,
+    marketplaceData: {
+      inventoryItemGroupKey: "GRP-CASE",
+      offers: { "GRP-CASE-1": "off-1", "GRP-CASE-2": "off-2" },
+    },
+  };
+
+  const seule: Listing = {
+    id: "l-off",
+    productId: "p2",
+    accountId: "acc-ebay",
+    remoteId: "AvionBBR",
+    status: "draft",
+    price: { amount: 450, currency: "EUR" },
+    stock: 29,
+    marketplaceData: { offerId: "off-9" },
+  };
+
+  it("publie un groupe d'un seul tenant, pas offre par offre", async () => {
+    const { http, sent } = fakeHttp([{ body: { listingId: "1122334455" } }]);
+    const r = await adapter.activateListing(ctxWith(http), groupe);
+
+    expect(r.status).toBe("success");
+    // UN seul appel : publier offre par offre produirait deux annonces
+    // distinctes au lieu d'un menu déroulant, et deux lignes du plafond.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toContain("publish_by_inventory_item_group");
+    expect(sent[0]?.body.inventoryItemGroupKey).toBe("GRP-CASE");
+    expect(sent[0]?.body.marketplaceId).toBe("EBAY_FR");
+    expect(r.remoteId).toBe("1122334455");
+  });
+
+  it("retire un groupe d'un seul tenant", async () => {
+    const { http, sent } = fakeHttp([{ status: 204, body: {} }]);
+    const r = await adapter.deactivateListing(ctxWith(http), groupe);
+
+    expect(r.status).toBe("success");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toContain("withdraw_by_inventory_item_group");
+    expect(sent[0]?.body.inventoryItemGroupKey).toBe("GRP-CASE");
+  });
+
+  it("garde le chemin de l'offre unique pour une annonce sans déclinaison", async () => {
+    const { http, sent } = fakeHttp([{ body: { listingId: "999" } }]);
+    await adapter.activateListing(ctxWith(http), seule);
+
+    expect(sent[0]?.url).toContain("/offer/off-9/publish");
+    expect(sent[0]?.url).not.toContain("inventory_item_group");
+  });
+
+  it("préfère le groupe quand l'annonce porte les deux", async () => {
+    /*
+     * Le piège que ce test verrouille : une annonce groupée porte AUSSI une
+     * carte d'offres. Choisir l'offre publierait une seule déclinaison sur
+     * les deux, et l'autre resterait invisible sans que rien ne le signale.
+     */
+    const ambigu: Listing = {
+      ...groupe,
+      marketplaceData: { ...groupe.marketplaceData, offerId: "off-1" },
+    };
+    const { http, sent } = fakeHttp([{ body: { listingId: "77" } }]);
+    await adapter.activateListing(ctxWith(http), ambigu);
+
+    expect(sent[0]?.url).toContain("publish_by_inventory_item_group");
+  });
+
+  it("respecte la place de marché du compte", async () => {
+    const { http, sent } = fakeHttp([{ status: 204, body: {} }]);
+    await adapter.deactivateListing(
+      ctxWith(http, { marketplaceId: "EBAY_DE" }),
+      groupe,
+    );
+
+    expect(sent[0]?.body.marketplaceId).toBe("EBAY_DE");
+  });
+
+  it("dit ce qui manque plutôt que d'échouer, sans offre ni groupe", async () => {
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.deactivateListing(ctxWith(http), {
+      ...seule,
+      marketplaceData: {},
+    });
+
+    expect(r.status).toBe("unsupported");
+    expect(sent).toHaveLength(0);
+  });
+});

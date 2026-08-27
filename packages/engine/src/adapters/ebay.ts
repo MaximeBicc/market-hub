@@ -1571,13 +1571,51 @@ export class EbayAdapter implements MarketplaceAdapter {
     return this.ok(ctx, listing.remoteId);
   }
 
+  /*
+   * ══ UNE ANNONCE, DEUX FORMES CHEZ EBAY ══
+   *
+   * Le cœur ne connaît qu'une commande : « mets cette annonce en ligne », ou
+   * « retire-la ». C'est ici, et nulle part ailleurs, que se sait comment
+   * eBay veut l'entendre — parce qu'eBay a deux façons de dire la même chose :
+   *
+   *   sans déclinaison   une OFFRE            /offer/{id}/publish
+   *   avec déclinaisons  un GROUPE d'articles /offer/publish_by_inventory_item_group
+   *
+   * Les deux chemins ne sont pas interchangeables. Publier une offre d'un
+   * groupe coloris par coloris produirait dix-sept annonces distinctes au lieu
+   * d'un menu déroulant, dix-sept lignes du plafond vendeur consommées, et un
+   * acheteur qui voit le même article dix-sept fois.
+   *
+   * L'ancienne version exigeait un `offerId`, que les annonces groupées ne
+   * portent pas : elles rendent un `inventoryItemGroupKey` et une CARTE de
+   * SKU vers offres. Elles répondaient donc « aucune offre à publier » et
+   * restaient hors d'atteinte de l'outil, à la publication comme au retrait.
+   */
+
+  /** La forme de cette annonce chez eBay, telle que la création l'a laissée. */
+  private forme(listing: Listing):
+    | { type: "offre"; offerId: string }
+    | { type: "groupe"; cle: string }
+    | null {
+    const groupe = listing.marketplaceData?.["inventoryItemGroupKey"] as
+      | string
+      | undefined;
+    // Le groupe est testé EN PREMIER : une annonce groupée peut aussi porter
+    // une carte d'offres, et la traiter comme une offre unique en publierait
+    // une seule des dix-sept.
+    if (groupe) return { type: "groupe", cle: groupe };
+    const offerId = listing.marketplaceData?.["offerId"] as string | undefined;
+    if (offerId) return { type: "offre", offerId };
+    return null;
+  }
+
   async activateListing(
     ctx: MarketplaceContext,
     listing: Listing,
     _idempotencyKey?: string,
   ): Promise<TargetResult> {
-    const offerId = listing.marketplaceData?.["offerId"] as string | undefined;
-    if (!offerId) {
+    const forme = this.forme(listing);
+    if (!forme) {
       return {
         accountId: ctx.account.id,
         marketplace: ctx.account.marketplace,
@@ -1585,9 +1623,29 @@ export class EbayAdapter implements MarketplaceAdapter {
         message: "Aucune offre eBay à publier pour cet article.",
       };
     }
+
+    if (forme.type === "groupe") {
+      const r = await this.call<{ listingId?: string }>(
+        ctx,
+        "/sell/inventory/v1/offer/publish_by_inventory_item_group",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            inventoryItemGroupKey: forme.cle,
+            marketplaceId: ctx.credentials?.["marketplaceId"] ?? "EBAY_FR",
+          }),
+        },
+      );
+      return this.ok(
+        ctx,
+        r?.listingId ?? listing.remoteId,
+        "Annonce à déclinaisons publiée d'un seul tenant.",
+      );
+    }
+
     const r = await this.call<{ listingId?: string }>(
       ctx,
-      `/sell/inventory/v1/offer/${offerId}/publish`,
+      `/sell/inventory/v1/offer/${forme.offerId}/publish`,
       { method: "POST" },
     );
     return this.ok(ctx, r?.listingId ?? listing.remoteId);
@@ -1598,8 +1656,8 @@ export class EbayAdapter implements MarketplaceAdapter {
     listing: Listing,
     _idempotencyKey?: string,
   ): Promise<TargetResult> {
-    const offerId = listing.marketplaceData?.["offerId"] as string | undefined;
-    if (!offerId) {
+    const forme = this.forme(listing);
+    if (!forme) {
       return {
         accountId: ctx.account.id,
         marketplace: ctx.account.marketplace,
@@ -1607,9 +1665,32 @@ export class EbayAdapter implements MarketplaceAdapter {
         message: "Aucune offre eBay à retirer pour cet article.",
       };
     }
-    // « withdraw » retire l'annonce mais conserve l'offre : on peut republier
-    // sans tout recréer. Supprimer l'offre perdrait son historique.
-    await this.call(ctx, `/sell/inventory/v1/offer/${offerId}/withdraw`, {
+
+    /*
+     * « withdraw » retire l'annonce mais CONSERVE l'offre et le groupe : on
+     * peut republier sans tout recréer. Supprimer l'offre perdrait son
+     * historique de vente, et le groupe ses déclinaisons.
+     */
+    if (forme.type === "groupe") {
+      await this.call(
+        ctx,
+        "/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            inventoryItemGroupKey: forme.cle,
+            marketplaceId: ctx.credentials?.["marketplaceId"] ?? "EBAY_FR",
+          }),
+        },
+      );
+      return this.ok(
+        ctx,
+        listing.remoteId,
+        "Annonce à déclinaisons retirée d'un seul tenant.",
+      );
+    }
+
+    await this.call(ctx, `/sell/inventory/v1/offer/${forme.offerId}/withdraw`, {
       method: "POST",
     });
     return this.ok(ctx, listing.remoteId);

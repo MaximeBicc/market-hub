@@ -220,6 +220,33 @@ export class D1ListingRepository implements ListingRepository {
     return rows[0] ? this.map(rows[0]) : undefined;
   }
 
+  async findByProductVariantAndAccount(
+    productId: ProductId,
+    variantId: VariantId,
+    accountId: AccountId,
+  ) {
+    const rows = await this.db
+      .select()
+      .from(listing)
+      .where(
+        and(
+          eq(listing.productId, productId),
+          eq(listing.variantId, variantId),
+          eq(listing.shopId, accountId),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? this.map(rows[0]) : undefined;
+  }
+
+  async listByProductAndAccount(productId: ProductId, accountId: AccountId) {
+    const rows = await this.db
+      .select()
+      .from(listing)
+      .where(and(eq(listing.productId, productId), eq(listing.shopId, accountId)));
+    return rows.map((r) => this.map(r));
+  }
+
   async findByRemoteId(accountId: AccountId, remoteId: string) {
     const rows = await this.db
       .select()

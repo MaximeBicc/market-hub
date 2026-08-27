@@ -31,10 +31,40 @@ export interface ProductRepository {
 }
 
 export interface ListingRepository {
+  /**
+   * UNE annonce du produit sur ce compte — la première venue.
+   *
+   * Suffisant quand le produit n'en a qu'une, faux dès qu'il en a plusieurs.
+   * Trois produits du catalogue portent aujourd'hui deux à trois annonces sur
+   * la même boutique, une par coloris : cette méthode en désigne une au
+   * hasard. Préférer `listByProductAndAccount` ou la variante ciblée.
+   */
   findByProductAndAccount(
     productId: ProductId,
     accountId: AccountId,
   ): Promise<Listing | undefined>;
+  /**
+   * L'annonce qui porte EXACTEMENT cette unité vendable.
+   *
+   * C'est elle qu'il faut pour écrire un stock : sur un produit à dix-sept
+   * coloris, écrire la quantité du violet sur l'annonce du noir se voit des
+   * jours plus tard, à la survente.
+   */
+  findByProductVariantAndAccount(
+    productId: ProductId,
+    variantId: VariantId,
+    accountId: AccountId,
+  ): Promise<Listing | undefined>;
+  /**
+   * TOUTES les annonces du produit sur ce compte.
+   *
+   * Nécessaire pour retirer un article de la vente : n'en coucher qu'une
+   * laisserait les autres achetables alors que le stock est à zéro.
+   */
+  listByProductAndAccount(
+    productId: ProductId,
+    accountId: AccountId,
+  ): Promise<Listing[]>;
   findByRemoteId(
     accountId: AccountId,
     remoteId: string,

@@ -370,10 +370,33 @@ export class MarketplaceOrchestrator {
     idempotencyKey: string;
   }): Promise<CommandOutcome> {
     const outcome = await this.fanOut(input.accountIds, "stockWrite", async (ctx, adapter) => {
-      const listing = await this.listings.findByProductAndAccount(
-        input.productId,
-        ctx.account.id,
-      );
+      /*
+       * L'ANNONCE DE CETTE UNITÉ-LÀ, PAS UNE ANNONCE DU PRODUIT.
+       *
+       * `findByProductAndAccount` s'arrête à la première trouvée. Tant qu'un
+       * produit n'avait qu'une annonce par boutique, c'était la bonne. Trois
+       * produits du catalogue en portent aujourd'hui deux à trois sur la même
+       * boutique — une par coloris — et la quantité du violet partait sur
+       * l'annonce du noir. Sans erreur, sans trace, jusqu'à la survente.
+       *
+       * Le repli sur la recherche large couvre les annonces pas encore
+       * rapprochées d'une variante : elles n'ont pas de `variantId`, et les
+       * ignorer priverait de stock des annonces bien vivantes.
+       */
+      const listing = input.variantId
+        ? ((await this.listings.findByProductVariantAndAccount(
+            input.productId,
+            input.variantId,
+            ctx.account.id,
+          )) ??
+          (await this.listings.findByProductAndAccount(
+            input.productId,
+            ctx.account.id,
+          )))
+        : await this.listings.findByProductAndAccount(
+            input.productId,
+            ctx.account.id,
+          );
       if (!listing) {
         return {
           accountId: ctx.account.id,
@@ -408,11 +431,22 @@ export class MarketplaceOrchestrator {
       : "listingDeactivate";
 
     const outcome = await this.fanOut(input.accountIds, need, async (ctx, adapter) => {
-      const listing = await this.listings.findByProductAndAccount(
+      /*
+       * TOUTES LES ANNONCES DU PRODUIT, PAS UNE SEULE.
+       *
+       * Retirer de la vente un article épuisé n'a de sens que si RIEN ne
+       * reste achetable. N'en coucher qu'une laisserait les autres coloris en
+       * ligne à stock nul — précisément la commande impossible à honorer que
+       * cette commande cherche à éviter.
+       *
+       * Une annonce eBay à déclinaisons ne compte que pour une ligne ici :
+       * c'est l'adaptateur qui sait qu'elle se retire d'un seul tenant.
+       */
+      const listings = await this.listings.listByProductAndAccount(
         input.productId,
         ctx.account.id,
       );
-      if (!listing) {
+      if (listings.length === 0) {
         return {
           accountId: ctx.account.id,
           marketplace: ctx.account.marketplace,
@@ -420,19 +454,45 @@ export class MarketplaceOrchestrator {
           message: "Aucune annonce pour ce produit sur ce compte",
         };
       }
-      const key = `${input.idempotencyKey}:${ctx.account.id}`;
-      const r = input.active
-        ? await adapter.activateListing(ctx, listing, key)
-        : await adapter.deactivateListing(ctx, listing, key);
 
-      if (r.status === "success") {
-        const next: Listing = {
-          ...listing,
-          status: input.active ? "active" : "inactive",
-        };
-        await this.listings.put(next);
+      const resultats: TargetResult[] = [];
+      for (const l of listings) {
+        const cle = `${input.idempotencyKey}:${ctx.account.id}:${l.id}`;
+        resultats.push(
+          input.active
+            ? await adapter.activateListing(ctx, l, cle)
+            : await adapter.deactivateListing(ctx, l, cle),
+        );
+        const dernier = resultats[resultats.length - 1]!;
+        if (dernier.status === "success") {
+          await this.listings.put({
+            ...l,
+            status: input.active ? "active" : "inactive",
+          });
+        }
       }
-      return r;
+
+      /*
+       * Un seul verdict pour le compte, et c'est le PIRE qui l'emporte.
+       *
+       * Annoncer « réussi » parce que deux annonces sur trois ont suivi
+       * laisserait la troisième en vente sans que personne le sache.
+       */
+      const rate = resultats.find(
+        (x) => x.status !== "success" && x.status !== "unsupported",
+      );
+      // L'état local a déjà été écrit annonce par annonce dans la boucle :
+      // le refaire ici n'en couvrirait qu'une, et masquerait les autres.
+      return (
+        rate ?? {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "success",
+          ...(listings.length > 1
+            ? { message: `${listings.length} annonces basculées` }
+            : {}),
+        }
+      );
     });
     await this.report("setActive", input.idempotencyKey, input.productId, outcome);
     return outcome;

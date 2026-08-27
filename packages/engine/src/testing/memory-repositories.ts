@@ -63,6 +63,23 @@ export class MemoryListingRepository implements ListingRepository {
       (l) => l.productId === productId && l.accountId === accountId,
     );
   }
+  async findByProductVariantAndAccount(
+    productId: ProductId,
+    variantId: VariantId,
+    accountId: AccountId,
+  ) {
+    return [...this.items.values()].find(
+      (l) =>
+        l.productId === productId &&
+        l.variantId === variantId &&
+        l.accountId === accountId,
+    );
+  }
+  async listByProductAndAccount(productId: ProductId, accountId: AccountId) {
+    return [...this.items.values()].filter(
+      (l) => l.productId === productId && l.accountId === accountId,
+    );
+  }
   async findByRemoteId(accountId: AccountId, remoteId: string) {
     return [...this.items.values()].find(
       (l) => l.accountId === accountId && l.remoteId === remoteId,
