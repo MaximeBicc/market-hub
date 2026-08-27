@@ -12,6 +12,11 @@ import type {
   TargetResult,
   Variant,
 } from "../domain/types.js";
+import {
+  importerClePublique,
+  lireEnTeteSignature,
+  verifierSignatureEbay,
+} from "./ebay-notifications.js";
 import type {
   MarketplaceAdapter,
   MarketplaceContext,
@@ -521,6 +526,46 @@ function preparerUnites(product: Product, variantes: Variant[]): Preparation {
   };
 }
 
+
+/**
+ * L'enveloppe commune à toutes les notifications eBay.
+ *
+ * `metadata` porte le sujet, `notification` la substance. La forme est
+ * identique quel que soit le sujet — c'est `data` qui change.
+ */
+interface ChargeNotificationEbay {
+  metadata?: { topic?: string; schemaVersion?: string };
+  notification?: {
+    notificationId?: string;
+    eventDate?: string;
+    publishAttemptCount?: number;
+    data?: {
+      user?: { userId?: string; username?: string };
+      order?: {
+        orderId?: string;
+        orderLineItems?: Array<{
+          orderLineItemId?: string;
+          listingId?: string;
+          quantity?: number;
+        }>;
+      };
+    };
+  };
+}
+
+/**
+ * Les sujets qu'on sait traduire, et le sens qu'ils donnent au stock.
+ *
+ * Un sujet absent de cette table n'est pas une erreur : il est simplement
+ * ignoré. Mieux vaut ne rien faire d'une notification qu'on ne comprend pas
+ * que d'en deviner l'effet sur le stock.
+ */
+const GENRE_PAR_SUJET: Record<string, "paid" | "cancelled" | "returned"> = {
+  ORDER_CONFIRMATION: "paid",
+  ORDER_CANCELLATION_ACTIVITY: "cancelled",
+  ORDER_RETURN_ACTIVITY: "returned",
+};
+
 export class EbayAdapter implements MarketplaceAdapter {
   readonly id = "ebay";
 
@@ -554,10 +599,23 @@ export class EbayAdapter implements MarketplaceAdapter {
       ordersRead: true,
       ordersFulfill: true,
       trackingWrite: true,
-      // Les notifications eBay sont signées en ECDSA et exigent de récupérer
-      // puis vérifier une clé publique. Tant que ce n'est pas fait, on ne
-      // prétend pas les gérer : le relevé périodique fait le travail.
-      inboundSales: "poll",
+      /*
+       * « SAVOIR VÉRIFIER » N'EST PAS « ÊTRE ABONNÉ ».
+       *
+       * La vérification ECDSA est écrite et éprouvée : l'outil SAIT lire une
+       * notification eBay. Mais eBay n'en envoie qu'aux destinations
+       * enregistrées, avec un abonnement par vendeur — et cet enregistrement
+       * se fait en dehors du code.
+       *
+       * Déclarer « webhook » sans abonnement détendrait le relevé à un quart
+       * d'heure pour des notifications qui n'arriveraient jamais : les ventes
+       * seraient vues quinze minutes trop tard, et personne ne saurait
+       * pourquoi. La capacité suit donc l'abonnement RÉEL, marqué au moment
+       * où il est créé.
+       */
+      inboundSales: (ctx?.credentials?.["notificationsActives"] === "1"
+        ? "both"
+        : "poll") as CapabilitySet["inboundSales"],
     };
   }
 
@@ -1838,6 +1896,141 @@ export class EbayAdapter implements MarketplaceAdapter {
       method: "POST",
     });
     return this.ok(ctx, listing.remoteId);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Notifications                                                     */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Les clés publiques d'eBay, gardées le temps de vie de l'isolat.
+   *
+   * eBay avertit explicitement du dépassement de quota si on redemande la clé
+   * à chaque notification. Un cache d'instance suffit : un isolat sert
+   * beaucoup de requêtes, et une clé change rarement. Le pire cas — un isolat
+   * neuf — coûte un appel, pas une panne.
+   */
+  private readonly clesPubliques = new Map<string, CryptoKey>();
+
+  private async clePublique(
+    ctx: MarketplaceContext,
+    kid: string,
+  ): Promise<CryptoKey> {
+    const enCache = this.clesPubliques.get(kid);
+    if (enCache) return enCache;
+
+    /*
+     * La clé se demande avec un jeton APPLICATIF, pas celui du vendeur : elle
+     * ne dépend d'aucun compte, et c'est cohérent — c'est la clé d'eBay.
+     */
+    const jeton = await this.jetonApplicatif(ctx);
+    const base = hosts(ctx.credentials?.["environment"]).api;
+    // `fetch` direct et non `ctx.http` : cet appel ne vise pas la boutique du
+    // vendeur mais eBay lui-même, et n'a donc rien à faire dans le compteur
+    // de débit d'un compte.
+    const r = await fetch(
+      `${base}/commerce/notification/v1/public_key/${encodeURIComponent(kid)}`,
+      { headers: { Authorization: `Bearer ${jeton}` } },
+    );
+    if (!r.ok) {
+      throw new Error(
+        `eBay : clé publique ${kid} introuvable (${r.status}). Notification non vérifiable.`,
+      );
+    }
+    const corps = (await r.json()) as { key?: string };
+    if (!corps.key) throw new Error("eBay : réponse sans clé publique");
+
+    const cle = await importerClePublique(corps.key);
+    this.clesPubliques.set(kid, cle);
+    return cle;
+  }
+
+  /**
+   * Vérifie une notification eBay et la traduit en événement de vente.
+   *
+   * ══ CE QUI REND EBAY DIFFÉRENT ══
+   *
+   * Chez Shopify et Etsy, le secret de signature appartient à la boutique :
+   * vérifier la signature IDENTIFIE le compte. Chez eBay, la clé est celle
+   * d'eBay — globale. Toutes les boutiques la vérifieraient avec succès, et
+   * une vente serait attribuée à la première venue.
+   *
+   * C'est donc l'identifiant de vendeur porté par la charge utile qui décide,
+   * une fois celle-ci authentifiée. On le mémorise au premier passage : eBay
+   * ne le donne nulle part ailleurs sans une portée supplémentaire.
+   *
+   * RÉSERVE ASSUMÉE : tant qu'un compte n'a pas appris son identifiant, il
+   * accepte la première notification qui lui parvient. Avec un seul compte
+   * eBay c'est sans conséquence ; avec deux comptes neufs, la première vente
+   * pourrait être attribuée au mauvais. Reconnecter la boutique concernée
+   * corrige l'attribution, et le cas cesse dès que l'identifiant est connu.
+   */
+  async verifyAndParseWebhook(
+    ctx: MarketplaceContext,
+    request: Request,
+    rawBody: string,
+  ): Promise<CanonicalOrderEvent[]> {
+    const brut = request.headers.get("x-ebay-signature");
+    if (!brut) throw new Error("eBay : notification sans signature");
+
+    const entete = lireEnTeteSignature(brut);
+    if (!entete) throw new Error("eBay : en-tête de signature illisible");
+
+    const cle = await this.clePublique(ctx, entete.kid);
+    const valide = await verifierSignatureEbay(cle, entete.signature, rawBody);
+    if (!valide) throw new Error("eBay : signature invalide");
+
+    // À partir d'ici seulement, le corps est digne de confiance.
+    const charge = JSON.parse(rawBody) as ChargeNotificationEbay;
+    const notif = charge.notification;
+    const sujet = charge.metadata?.topic ?? "";
+
+    const utilisateur = notif?.data?.user?.userId;
+    const connu = ctx.credentials?.["ebayUserId"];
+    if (connu && utilisateur && connu !== utilisateur) {
+      /*
+       * Ce n'est pas une erreur de signature : c'est une notification pour un
+       * AUTRE vendeur. La refuser ici laisse le routeur essayer le compte
+       * suivant, exactement comme pour une signature qui ne correspond pas.
+       */
+      throw new Error("eBay : notification destinée à un autre compte");
+    }
+    if (!connu && utilisateur && ctx.saveCredentials) {
+      await ctx.saveCredentials({ ebayUserId: utilisateur });
+    }
+
+    const genre = GENRE_PAR_SUJET[sujet];
+    if (!genre || !notif?.data?.order) return [];
+
+    const commande = notif.data.order;
+    const lignes = (commande.orderLineItems ?? [])
+      .filter((l) => l.listingId)
+      .map((l) => ({
+        // La notification ne donne PAS de SKU : c'est l'identifiant d'annonce
+        // qui fait le lien, et le dépôt sait le retrouver dans les données de
+        // plateforme mémorisées par le relevé de catalogue.
+        remoteListingId: String(l.listingId),
+        quantity: Math.abs(Number(l.quantity ?? 0)) || 0,
+      }))
+      .filter((l) => l.quantity > 0);
+
+    if (lignes.length === 0) return [];
+
+    return [
+      {
+        marketplace: ctx.account.marketplace,
+        accountId: ctx.account.id,
+        remoteOrderId: String(commande.orderId ?? ""),
+        /*
+         * eBay réessaie jusqu'à trois fois : sans déduplication sur cet
+         * identifiant, une vente serait décomptée trois fois du stock.
+         */
+        eventId: String(notif.notificationId ?? commande.orderId ?? ""),
+        kind: genre,
+        occurredAt: String(notif.eventDate ?? new Date().toISOString()),
+        lines: lignes,
+      },
+    ];
   }
 
   /* ---------------------------------------------------------------- */

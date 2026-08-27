@@ -1,5 +1,5 @@
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type {
   AccountId,
   AccountRepository,
@@ -253,7 +253,34 @@ export class D1ListingRepository implements ListingRepository {
       .from(listing)
       .where(and(eq(listing.shopId, accountId), eq(listing.externalId, remoteId)))
       .limit(1);
-    return rows[0] ? this.map(rows[0]) : undefined;
+    if (rows[0]) return this.map(rows[0]);
+
+    /*
+     * UNE ANNONCE EBAY PORTE DEUX NOMS.
+     *
+     * Chez eBay, l'identifiant stable est le SKU — c'est lui qu'on garde en
+     * `externalId`, parce que l'identifiant d'annonce n'existe qu'une fois
+     * publiée et change à chaque republication.
+     *
+     * Mais les NOTIFICATIONS de vente, elles, ne parlent que par
+     * `listingId`. Sans ce repli, une vente eBay ne retrouverait aucune
+     * annonce et ne décrémenterait rien — exactement le défaut qu'on a déjà
+     * payé sur les variantes Shopify sans SKU.
+     *
+     * L'identifiant est mémorisé par le relevé de catalogue, dans les données
+     * propres à la plateforme.
+     */
+    const parAnnonce = await this.db
+      .select()
+      .from(listing)
+      .where(
+        and(
+          eq(listing.shopId, accountId),
+          sql`json_extract(${listing.marketplaceData}, '$.listingId') = ${remoteId}`,
+        ),
+      )
+      .limit(1);
+    return parAnnonce[0] ? this.map(parAnnonce[0]) : undefined;
   }
 
   async listByProduct(productId: ProductId) {
