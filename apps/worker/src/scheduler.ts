@@ -15,6 +15,7 @@ import {
 import type { Env } from "./env.js";
 import { d1Repositories } from "./engine/repositories.js";
 import { randomId } from "./lib/crypto.js";
+import { rattraperTempsReel } from "./lib/temps-reel.js";
 import { sendPushToUser } from "./lib/push.js";
 
 /**
@@ -72,6 +73,14 @@ export async function handleScheduled(
       // anticipé qui suit ne voit rien à renouveler.
       await backfillExpiries(env);
       await refreshExpiringTokens(env);
+      /*
+       * Le rattrapage du temps réel vient APRÈS le renouvellement : il parle
+       * à Shopify, et un jeton fraîchement renouvelé est celui qui a le plus
+       * de chances d'être accepté.
+       *
+       * Il ne coûte qu'une lecture de base quand tout est déjà abonné.
+       */
+      await rattraperTempsReel(env);
       break;
     case "40 3 * * *":
       await enqueueDueJobs(env, true);

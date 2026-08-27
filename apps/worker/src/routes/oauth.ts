@@ -16,6 +16,7 @@ import { getConnector } from "@hub/connectors";
  * c'est celle qui tourne à la connexion qui gagnait.
  */
 import { ensureSyncJobs } from "../engine/sync.js";
+import { activerTempsReel } from "../lib/temps-reel.js";
 import { PLATFORMS, type Platform } from "@hub/core";
 import { shop, syncJob } from "../db/schema.js";
 import { credentialsFor, type Env } from "../env.js";
@@ -137,6 +138,23 @@ oauth.get("/:platform/callback", async (c) => {
 
   await storeTokens(c.env, shopId, tokens);
   await ensureSyncJobs(c.env, shopId);
+
+  /*
+   * LE TEMPS RÉEL S'ACTIVE TOUT DE SUITE, PAS À UN CLIC PRÈS.
+   *
+   * Une boutique Shopify connectée sans abonnement reste relevée toutes les
+   * deux minutes : sept fois plus de tâches, pour une fraîcheur sept fois
+   * pire. L'abonnement échoue en silence si la portée `write_webhooks`
+   * manque — la boutique fonctionne alors comme avant, en relevé, et le
+   * rattrapage horaire réessaiera.
+   */
+  if (platform === "shopify") {
+    try {
+      await activerTempsReel(c.env, shopId);
+    } catch {
+      // Rien à dire ici : la connexion a réussi, c'est l'essentiel.
+    }
+  }
 
   return c.redirect("/settings/shops?connected=1", 302);
 });

@@ -33,6 +33,7 @@ import {
 } from "@hub/engine";
 import { d1Repositories } from "../engine/repositories.js";
 import { ensureSyncJobs } from "../engine/sync.js";
+import { activerTempsReel } from "../lib/temps-reel.js";
 
 /**
  * Connexion des comptes marchands.
@@ -1351,38 +1352,16 @@ accounts.post("/:id/temps-reel", async (c) => {
     );
   }
 
-  const credentials = { ...(await repos.credentials.get(id)) };
-  const mod = buildEngine(c.env);
-  const adaptateur = mod.registry.get("shopify") as ShopifyAdapter;
-
-  const rappel = `${c.env.APP_URL.replace(/\/+$/, "")}/api/webhooks/shopify`;
-
   try {
-    const rapport = await shopifyEnsureWebhooks(
-      adaptateur,
-      {
-        account,
-        credentials,
-        http: mod.httpFor(account),
-        saveCredentials: async (patch) => {
-          Object.assign(credentials, patch);
-          await repos.credentials.put(id, credentials);
-        },
-      },
-      rappel,
-    );
-
-    const poses = rapport.crees.length + rapport.dejaLa.length;
-    if (poses > 0) {
-      const frais = await repos.credentials.get(id);
-      await repos.credentials.put(id, { ...frais, webhooksActifs: "1" });
-      // Recalcule les cadences : le relevé devient un filet.
-      await ensureSyncJobs(c.env, id);
-    }
+    // Le geste vit dans une fonction partagée : la connexion et le rattrapage
+    // horaire l'appellent aussi. Trois copies de cette séquence auraient
+    // divergé, et c'est elle qui décide si une boutique pousse ou se fait
+    // relever toutes les deux minutes.
+    const rapport = await activerTempsReel(c.env, id);
 
     return c.json({
       ok: rapport.echecs.length === 0,
-      rappel,
+      rappel: rapport.rappel,
       crees: rapport.crees,
       dejaLa: rapport.dejaLa,
       echecs: rapport.echecs,

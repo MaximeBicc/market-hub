@@ -3,6 +3,7 @@ export * from "./ports/marketplace.js";
 export * from "./ports/repositories.js";
 export * from "./core/registry.js";
 export * from "./core/catalogue.js";
+export * from "./core/releves.js";
 export * from "./core/module.js";
 export * from "./services/orchestrator.js";
 export * from "./services/inventory-service.js";
