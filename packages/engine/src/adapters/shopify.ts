@@ -950,7 +950,46 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     listing: Listing,
     price: Money,
     _idempotencyKey?: string,
+    unite?: Variant,
   ): Promise<TargetResult> {
+    /*
+     * Chez Shopify le prix vit sur la VARIANTE, pas sur le produit.
+     *
+     * `remoteId` porte la première : suffisant pour une annonce synchronisée,
+     * qui a une ligne par coloris, faux pour une annonce créée par l'outil
+     * dont une seule ligne porte les dix-sept variantes distantes.
+     */
+    let variantId = listing.remoteId;
+    const declinaisons = listing.marketplaceData?.["variants"];
+    if (Array.isArray(declinaisons) && declinaisons.length > 1) {
+      if (!unite) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message:
+            "Annonce à déclinaisons : impossible d'écrire un prix sans savoir quel coloris est visé.",
+        };
+      }
+      const lignes = declinaisons as Array<{
+        id?: string;
+        optionKey?: string;
+        sku?: string;
+      }>;
+      const trouvee =
+        lignes.find((l) => l.optionKey && l.optionKey === unite.optionKey) ??
+        (unite.sku ? lignes.find((l) => l.sku === unite.sku) : undefined);
+      if (!trouvee?.id) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message: `Déclinaison « ${unite.optionKey || unite.sku || unite.id} » introuvable dans l'annonce Shopify. Relancez une synchronisation du catalogue.`,
+        };
+      }
+      variantId = trouvee.id;
+    }
+
     const productId = listing.marketplaceData?.["productId"] as string | undefined;
     if (!productId) {
       // `productVariantsBulkUpdate` exige le produit parent : sans lui, on ne
@@ -960,13 +999,13 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       }>(
         ctx,
         `query Parent($id: ID!) { productVariant(id: $id) { product { id } } }`,
-        { id: listing.remoteId },
+        { id: variantId },
       );
       const parent = found.productVariant?.product.id;
       if (!parent) throw new Error("Shopify : variante introuvable");
-      return this.applyPrice(ctx, parent, listing.remoteId!, price);
+      return this.applyPrice(ctx, parent, variantId!, price);
     }
-    return this.applyPrice(ctx, productId, listing.remoteId!, price);
+    return this.applyPrice(ctx, productId, variantId!, price);
   }
 
   private async applyPrice(

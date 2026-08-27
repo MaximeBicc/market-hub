@@ -325,15 +325,29 @@ export class MarketplaceOrchestrator {
 
   async setPrice(input: {
     productId: ProductId;
+    /** L'unité visée, quand le produit en a plusieurs. */
+    variantId?: VariantId | undefined;
     accountIds: AccountId[];
     price: Money;
     idempotencyKey: string;
   }): Promise<CommandOutcome> {
     const outcome = await this.fanOut(input.accountIds, "priceWrite", async (ctx, adapter) => {
-      const listing = await this.listings.findByProductAndAccount(
-        input.productId,
-        ctx.account.id,
-      );
+      // Même ciblage que pour le stock : l'annonce de CETTE unité, avec repli
+      // sur la recherche large pour les annonces pas encore rapprochées.
+      const listing = input.variantId
+        ? ((await this.listings.findByProductVariantAndAccount(
+            input.productId,
+            input.variantId,
+            ctx.account.id,
+          )) ??
+          (await this.listings.findByProductAndAccount(
+            input.productId,
+            ctx.account.id,
+          )))
+        : await this.listings.findByProductAndAccount(
+            input.productId,
+            ctx.account.id,
+          );
       if (!listing) {
         return {
           accountId: ctx.account.id,
@@ -342,11 +356,15 @@ export class MarketplaceOrchestrator {
           message: "Aucune annonce pour ce produit sur ce compte",
         };
       }
+      const unite = input.variantId
+        ? await this.variants.get(input.variantId)
+        : undefined;
       const r = await adapter.updatePrice(
         ctx,
         listing,
         input.price,
         `${input.idempotencyKey}:${ctx.account.id}`,
+        unite,
       );
       if (r.status === "success") {
         await this.listings.put({ ...listing, price: input.price });

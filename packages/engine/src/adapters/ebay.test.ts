@@ -770,3 +770,89 @@ describe("stock d'une déclinaison", () => {
     expect(sent[0]?.body.requests[0].offers[0].offerId).toBe("off-9");
   });
 });
+
+describe("durée de mise en vente", () => {
+  it("pose GTC sur chaque offre, sans quoi la publication échouerait", async () => {
+    const { http, sent } = fakeHttp([
+      { status: 404, body: {} }, // la sonde d'existence du SKU
+      { status: 204, body: {} }, // l'article d'inventaire
+      { body: { offerId: "off-1" } }, // l'offre
+    ]);
+
+    await adapter.createListing(
+      ctxWith(http, {
+        merchantLocationKey: "e1",
+        fulfillmentPolicyId: "f1",
+        paymentPolicyId: "p1",
+        returnPolicyId: "r1",
+        defaultCategoryId: "9355",
+      }),
+      {
+        id: "p1",
+        sku: "AvionBBR",
+        title: "Porte-clés avion",
+        price: { amount: 450, currency: "EUR" },
+        stock: 29,
+        images: ["https://exemple.test/a.jpg"],
+        condition: "new",
+      } as unknown as Product,
+      "k",
+    );
+
+    const offre = sent.find((x) => x.url.endsWith("/offer"));
+    // eBay tolère l'absence à la création et l'exige à la publication : le
+    // test doit donc porter sur la création, seul endroit où on peut la poser.
+    expect(offre?.body.listingDuration).toBe("GTC");
+    expect(offre?.body.format).toBe("FIXED_PRICE");
+  });
+});
+
+describe("prix d'une déclinaison", () => {
+  const groupe: Listing = {
+    id: "l-grp",
+    productId: "p1",
+    accountId: "acc-ebay",
+    remoteId: "GRP-CASE",
+    status: "active",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 34,
+    marketplaceData: {
+      inventoryItemGroupKey: "GRP-CASE",
+      offers: { "grp-case-couleur-noir": "off-1", "grp-case-couleur-blanc": "off-2" },
+      unites: [
+        { optionKey: "couleur=noir", sku: "grp-case-couleur-noir", offerId: "off-1" },
+        { optionKey: "couleur=blanc", sku: "grp-case-couleur-blanc", offerId: "off-2" },
+      ],
+    },
+  };
+
+  it("écrit sur l'offre du coloris visé", async () => {
+    const { http, sent } = fakeHttp([{ status: 204, body: {} }]);
+    const r = await adapter.updatePrice(
+      ctxWith(http),
+      groupe,
+      { amount: 2490, currency: "EUR" },
+      "k",
+      variante("couleur=blanc", ["Blanc"]),
+    );
+
+    expect(r.status).toBe("success");
+    const req = sent[0]?.body.requests[0];
+    expect(req.sku).toBe("grp-case-couleur-blanc");
+    expect(req.offers[0].offerId).toBe("off-2");
+    expect(req.offers[0].price.value).toBe("24.90");
+  });
+
+  it("refuse un prix sur un groupe sans savoir quel coloris", async () => {
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.updatePrice(
+      ctxWith(http),
+      groupe,
+      { amount: 2490, currency: "EUR" },
+      "k",
+    );
+
+    expect(r.status).toBe("unsupported");
+    expect(sent).toHaveLength(0);
+  });
+});

@@ -139,6 +139,8 @@ engine.post("/listing", async (c) => {
 engine.post("/price", async (c) => {
   const body = await c.req.json<{
     productId: string;
+    /** La déclinaison visée. Obligatoire dès que le produit en a plusieurs. */
+    variantId?: string;
     accountIds: string[];
     amount: number;
     currency?: string;
@@ -149,6 +151,7 @@ engine.post("/price", async (c) => {
   const mod = buildEngine(c.env);
   const outcome = await mod.orchestrator.setPrice({
     productId: body.productId,
+    ...(body.variantId ? { variantId: body.variantId } : {}),
     accountIds: body.accountIds,
     price: { amount: body.amount, currency: body.currency ?? "EUR" },
     idempotencyKey: key,

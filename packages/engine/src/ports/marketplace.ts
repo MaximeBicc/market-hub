@@ -73,11 +73,20 @@ export interface MarketplaceAdapter {
     idempotencyKey: string,
   ): Promise<TargetResult>;
 
+  /**
+   * Écrire le prix d'une unité vendable.
+   *
+   * Même règle que pour le stock : `unite` dit LAQUELLE, et le module traduit.
+   * Un prix appliqué à toutes les déclinaisons se voit moins vite qu'un stock
+   * faux — personne ne survend — mais il se voit à la première commande au
+   * mauvais tarif, et il faut alors l'honorer.
+   */
   updatePrice(
     ctx: MarketplaceContext,
     listing: Listing,
     price: Money,
     idempotencyKey: string,
+    unite?: Variant,
   ): Promise<TargetResult>;
 
   /**

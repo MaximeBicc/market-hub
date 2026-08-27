@@ -1135,3 +1135,52 @@ describe("stock d'une déclinaison", () => {
     expect(corpsPut(sent)?.products[0].offerings[0].quantity).toBe(8);
   });
 });
+
+describe("prix d'une déclinaison", () => {
+  const annonce: Listing = {
+    id: "l1",
+    productId: "p1",
+    accountId: "acc-etsy",
+    remoteId: "5551",
+    status: "active",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 9,
+    marketplaceData: {},
+  };
+
+  const inventaire = {
+    products: [
+      {
+        product_id: 1,
+        sku: "",
+        property_values: [{ property_id: 200, property_name: "Couleur", values: ["Noir"] }],
+        offerings: [{ offering_id: 11, price: { amount: 1990, divisor: 100 }, quantity: 5, is_enabled: true }],
+      },
+      {
+        product_id: 2,
+        sku: "",
+        property_values: [{ property_id: 200, property_name: "Couleur", values: ["Blanc"] }],
+        offerings: [{ offering_id: 12, price: { amount: 1990, divisor: 100 }, quantity: 4, is_enabled: true }],
+      },
+    ],
+  };
+
+  it("ne change le prix que de la déclinaison visée", async () => {
+    const { http, sent } = fakeHttp([{ body: inventaire }, { body: {} }]);
+    const r = await adapter.updatePrice(
+      ctxWith(http),
+      annonce,
+      { amount: 2490, currency: "EUR" },
+      "k",
+      variante("couleur=blanc", ["Blanc"]),
+    );
+
+    expect(r.status).toBe("success");
+    const ecrits = corpsPut(sent)?.products;
+    // Le noir garde son prix ET sa quantité : le remplacement est complet,
+    // son contenu ne l'est pas.
+    expect(ecrits[0].offerings[0].price).toBe(19.9);
+    expect(ecrits[0].offerings[0].quantity).toBe(5);
+    expect(ecrits[1].offerings[0].price).toBe(24.9);
+  });
+});

@@ -1258,8 +1258,14 @@ export class EtsyAdapter implements MarketplaceAdapter {
     listing: Listing,
     price: Money,
     _idempotencyKey?: string,
+    unite?: Variant,
   ): Promise<TargetResult> {
-    return this.writeInventory(ctx, listing, { priceMinor: price.amount });
+    return this.writeInventory(
+      ctx,
+      listing,
+      { priceMinor: price.amount },
+      unite,
+    );
   }
 
   async updateStock(

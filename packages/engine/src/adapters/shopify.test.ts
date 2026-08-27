@@ -1099,3 +1099,53 @@ describe("stock d'une déclinaison", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("prix d'une déclinaison", () => {
+  const groupe: Listing = {
+    id: "l-grp",
+    productId: "p1",
+    accountId: "acc-shopify",
+    remoteId: "gid://shopify/ProductVariant/1",
+    status: "active",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 9,
+    marketplaceData: {
+      productId: "gid://shopify/Product/9",
+      variants: [
+        { id: "gid://shopify/ProductVariant/1", optionKey: "couleur=noir" },
+        { id: "gid://shopify/ProductVariant/2", optionKey: "couleur=blanc" },
+      ],
+    },
+  };
+
+  it("écrit sur la variante du coloris visé", async () => {
+    const { http, sent } = fakeHttp([
+      { data: { productVariantsBulkUpdate: { userErrors: [] } } },
+    ]);
+    const r = await adapter.updatePrice(
+      ctxWith(http),
+      groupe,
+      { amount: 2490, currency: "EUR" },
+      "k",
+      variante("couleur=blanc", ["Blanc"]),
+    );
+
+    expect(r.status).toBe("success");
+    const v = sent[0]?.body.variables.variants[0];
+    expect(v.id).toBe("gid://shopify/ProductVariant/2");
+    expect(v.price).toBe("24.90");
+  });
+
+  it("refuse un prix sans savoir quel coloris", async () => {
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.updatePrice(
+      ctxWith(http),
+      groupe,
+      { amount: 2490, currency: "EUR" },
+      "k",
+    );
+
+    expect(r.status).toBe("unsupported");
+    expect(sent).toHaveLength(0);
+  });
+});

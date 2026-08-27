@@ -1196,6 +1196,19 @@ export class EbayAdapter implements MarketplaceAdapter {
       sku: unite.sku,
       marketplaceId: commun.marketplaceId,
       format: "FIXED_PRICE",
+      /*
+       * `GTC` — « Good 'Til Cancelled », l'annonce court jusqu'à retrait.
+       *
+       * eBay TOLÈRE son absence à la création de l'offre et l'EXIGE à la
+       * publication. Le piège tient tout entier là-dedans : l'outil rapportait
+       * « offre créée » avec succès, et la mise en vente échouait plus tard
+       * sur un champ qu'on croyait facultatif — sans lien évident avec le
+       * geste qui l'avait omis.
+       *
+       * C'est d'ailleurs la seule valeur admise au format prix fixe : les
+       * durées en jours sont réservées aux enchères.
+       */
+      listingDuration: "GTC",
       availableQuantity: unite.stock,
       categoryId: commun.categoryId,
       merchantLocationKey: c["merchantLocationKey"],
@@ -1520,45 +1533,20 @@ export class EbayAdapter implements MarketplaceAdapter {
      * donc à écrire sur SON SKU — reste à savoir lequel, ce que la table
      * mémorisée à la création permet enfin.
      */
-    let sku = listing.remoteId;
-    let offerId = listing.marketplaceData?.["offerId"] as string | undefined;
-
-    if (listing.marketplaceData?.["inventoryItemGroupKey"]) {
-      if (!unite) {
-        return {
-          accountId: ctx.account.id,
-          marketplace: ctx.account.marketplace,
-          status: "unsupported",
-          message:
-            "Annonce à déclinaisons : impossible d'écrire un stock sans savoir quel coloris est visé.",
-        };
-      }
-
-      const table = listing.marketplaceData["unites"];
-      const lignes = Array.isArray(table)
-        ? (table as Array<{ optionKey?: string; sku?: string; offerId?: string }>)
-        : [];
-      const ligne =
-        lignes.find((l) => l.optionKey && l.optionKey === unite.optionKey) ??
-        (unite.sku ? lignes.find((l) => l.sku === unite.sku) : undefined);
-
-      if (!ligne?.sku) {
-        /*
-         * Sans correspondance, on REFUSE. La tentation serait d'utiliser le
-         * SKU de la variante : mais si eBay a reçu un SKU fabriqué, écrire
-         * sur celui de la variante créerait un article d'inventaire NEUF,
-         * hors du groupe, invisible dans l'annonce et pourtant facturé.
-         */
-        return {
-          accountId: ctx.account.id,
-          marketplace: ctx.account.marketplace,
-          status: "unsupported",
-          message: `Déclinaison « ${unite.optionKey || unite.sku || unite.id} » introuvable dans l'annonce eBay. Republiez-la pour reconstruire la correspondance.`,
-        };
-      }
-      sku = ligne.sku;
-      offerId = ligne.offerId;
+    // Même question que pour le prix, même réponse : `cibler` la porte une
+    // seule fois. Deux copies d'une règle identique finissent par diverger,
+    // et celle-ci décide sur quel article d'inventaire on écrit.
+    const cible = this.cibler(listing, unite);
+    if (cible.erreur) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "unsupported",
+        message: cible.erreur,
+      };
     }
+    const sku = cible.sku;
+    const offerId = cible.offerId;
 
     if (!sku) throw new Error("eBay : SKU manquant sur l'annonce");
 
@@ -1590,9 +1578,25 @@ export class EbayAdapter implements MarketplaceAdapter {
     listing: Listing,
     price: Money,
     _idempotencyKey?: string,
+    unite?: Variant,
   ): Promise<TargetResult> {
-    const offerId = listing.marketplaceData?.["offerId"] as string | undefined;
-    if (!offerId) {
+    /*
+     * Le prix vit sur l'OFFRE, et un groupe en a une par déclinaison.
+     *
+     * La résolution est la même que pour le stock — c'est la même table de
+     * correspondance, écrite à la création — parce que c'est la même
+     * question : quel SKU eBay porte ce coloris ?
+     */
+    const cible = this.cibler(listing, unite);
+    if (cible.erreur) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "unsupported",
+        message: cible.erreur,
+      };
+    }
+    if (!cible.offerId) {
       return {
         accountId: ctx.account.id,
         marketplace: ctx.account.marketplace,
@@ -1601,13 +1605,14 @@ export class EbayAdapter implements MarketplaceAdapter {
           "Aucune offre eBay pour cet article : le prix vit sur l'offre, pas sur l'inventaire.",
       };
     }
+    const offerId = cible.offerId;
 
     await this.call(ctx, "/sell/inventory/v1/bulk_update_price_quantity", {
       method: "POST",
       body: JSON.stringify({
         requests: [
           {
-            sku: listing.remoteId,
+            sku: cible.sku,
             offers: [
               {
                 offerId,
@@ -1645,6 +1650,55 @@ export class EbayAdapter implements MarketplaceAdapter {
    * SKU vers offres. Elles répondaient donc « aucune offre à publier » et
    * restaient hors d'atteinte de l'outil, à la publication comme au retrait.
    */
+
+/**
+ * Le SKU et l'offre qui portent une unité donnée.
+ *
+ * Une seule question, posée par le stock comme par le prix : à quoi
+ * correspond ce coloris chez eBay ? La réponse vient de la table écrite à la
+ * création, seule à connaître les SKU FABRIQUÉS. `erreur` est renseignée
+ * quand la question n'a pas de réponse — et il faut alors refuser, jamais
+ * retomber sur le SKU de la variante : eBay créerait un article neuf, hors du
+ * groupe, invisible dans l'annonce et pourtant facturé.
+ */
+  private cibler(
+    listing: Listing,
+    unite?: Variant,
+  ): { sku?: string; offerId?: string; erreur?: string } {
+    if (!listing.marketplaceData?.["inventoryItemGroupKey"]) {
+      return {
+        ...(listing.remoteId ? { sku: listing.remoteId } : {}),
+        ...(listing.marketplaceData?.["offerId"]
+          ? { offerId: listing.marketplaceData["offerId"] as string }
+          : {}),
+      };
+    }
+
+    if (!unite) {
+      return {
+        erreur:
+          "Annonce à déclinaisons : impossible d'écrire sans savoir quel coloris est visé.",
+      };
+    }
+
+    const table = listing.marketplaceData["unites"];
+    const lignes = Array.isArray(table)
+      ? (table as Array<{ optionKey?: string; sku?: string; offerId?: string }>)
+      : [];
+    const ligne =
+      lignes.find((l) => l.optionKey && l.optionKey === unite.optionKey) ??
+      (unite.sku ? lignes.find((l) => l.sku === unite.sku) : undefined);
+
+    if (!ligne?.sku) {
+      return {
+        erreur: `Déclinaison « ${unite.optionKey || unite.sku || unite.id} » introuvable dans l'annonce eBay. Republiez-la pour reconstruire la correspondance.`,
+      };
+    }
+    return {
+      sku: ligne.sku,
+      ...(ligne.offerId ? { offerId: ligne.offerId } : {}),
+    };
+  }
 
   /** La forme de cette annonce chez eBay, telle que la création l'a laissée. */
   private forme(listing: Listing):
