@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "market-hub-vm-staging-control",
+  "main": "apps/worker/src/vm-staging-entry.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // D1 STRICTEMENT séparée de market-hub-db (production).
+  // Créez-la puis remplacez cet identifiant :
+  //   npx wrangler d1 create market-hub-db-staging
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "market-hub-db-staging",
+      "database_id": "REPLACE_WITH_STAGING_D1_ID",
+      "migrations_dir": "apps/worker/migrations"
+    }
+  ],
+
+  // Aucun cron, aucune Queue, aucun Durable Object, aucun asset.
+  // Ce Worker ne peut donc pas remplacer accidentellement la production.
+  "vars": {
+    "VM_CONTROL_PLANE_ENABLED": "true",
+    "VM_SYNC_ACCOUNT_ALLOWLIST": "vm-stage-mock",
+    "VM_ALLOW_CREDENTIAL_PERSIST": "false",
+    "VM_LEASE_TTL_SEC": "900"
+  },
+
+  "observability": { "enabled": true }
+}
