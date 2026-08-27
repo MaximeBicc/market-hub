@@ -7,7 +7,7 @@ import {
   etsyPkce,
 } from "./etsy.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
-import type { Listing, Product } from "../domain/types.js";
+import type { Listing, Product, Variant } from "../domain/types.js";
 
 /**
  * Tests de l'adaptateur Etsy, sur un `fetch` simulé.
@@ -999,5 +999,139 @@ describe("recherche de catégorie", () => {
     // Sans cette précaution, « and » remonterait la moitié du référentiel.
     const { http } = fakeHttp([{ body: ARBRE }]);
     expect(await adapter.searchCategories(ctxWith(http), "and the")).toEqual([]);
+  });
+});
+
+/** Une variante de chez nous, telle que le cœur la transmet au module. */
+function variante(optionKey: string, valeurs: string[], sku?: string): Variant {
+  return {
+    id: `v-${optionKey}`,
+    productId: "p1",
+    ...(sku ? { sku } : {}),
+    optionValues: valeurs,
+    optionKey,
+    price: { amount: 1990, currency: "EUR" },
+    position: 0,
+    status: "active",
+  };
+}
+
+/**
+ * Le corps de l'écriture d'inventaire, quel que soit son rang.
+ *
+ * Le journal des requêtes garde le corps en BRUT ; le repérer par sa méthode
+ * plutôt que par sa position évite qu'un appel ajouté en amont — un
+ * rafraîchissement de jeton, par exemple — casse des tests sans rapport.
+ */
+function corpsPut(
+  sent: Array<{ method: string; raw: string | null }>,
+): any | undefined {
+  const put = sent.find((x) => x.method === "PUT");
+  return put?.raw ? JSON.parse(put.raw) : undefined;
+}
+
+describe("stock d'une déclinaison", () => {
+  /**
+   * L'écriture d'inventaire d'Etsy est un remplacement COMPLET : il faut
+   * relire, modifier une ligne, et tout réécrire. Ces tests vérifient que les
+   * lignes NON visées repartent exactement comme elles sont arrivées — c'est
+   * là que se jouait la panne : les dix-sept coloris passaient à la quantité
+   * du seul qui avait été vendu.
+   */
+  const annonce: Listing = {
+    id: "l1",
+    productId: "p1",
+    accountId: "acc-etsy",
+    remoteId: "5551",
+    status: "active",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 9,
+    marketplaceData: {},
+  };
+
+  const inventaire = {
+    products: [
+      {
+        product_id: 1,
+        sku: "",
+        property_values: [{ property_id: 200, property_name: "Couleur", values: ["Noir"] }],
+        offerings: [{ offering_id: 11, price: { amount: 1990, divisor: 100 }, quantity: 5, is_enabled: true }],
+      },
+      {
+        product_id: 2,
+        sku: "",
+        property_values: [{ property_id: 200, property_name: "Couleur", values: ["Bleu Marine"] }],
+        offerings: [{ offering_id: 12, price: { amount: 1990, divisor: 100 }, quantity: 4, is_enabled: true }],
+      },
+    ],
+  };
+
+  it("ne change que la déclinaison visée", async () => {
+    const { http, sent } = fakeHttp([{ body: inventaire }, { body: {} }]);
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      annonce,
+      3,
+      "k",
+      variante("couleur=bleu-marine", ["Bleu Marine"]),
+    );
+
+    expect(r.status).toBe("success");
+    // L'écriture est repérée par sa NATURE, pas par son rang : l'adaptateur
+    // peut émettre d'autres requêtes avant (rafraîchissement de jeton), et un
+    // index en dur casserait au premier changement sans rapport.
+    const ecrits = corpsPut(sent)?.products;
+    expect(ecrits).toHaveLength(2);
+    // Le noir garde ses cinq. C'est tout l'objet du correctif.
+    expect(ecrits[0].offerings[0].quantity).toBe(5);
+    expect(ecrits[1].offerings[0].quantity).toBe(3);
+  });
+
+  it("compare les valeurs sans se laisser piéger par la casse ni les accents", async () => {
+    const { http, sent } = fakeHttp([{ body: inventaire }, { body: {} }]);
+    // « bleu marine » chez nous, « Bleu Marine » chez Etsy : même couleur.
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      annonce,
+      7,
+      "k",
+      variante("couleur=bleu-marine", ["bleu marine"]),
+    );
+
+    expect(r.status).toBe("success");
+    expect(corpsPut(sent)?.products[1].offerings[0].quantity).toBe(7);
+  });
+
+  it("refuse d'écrire sur une annonce à déclinaisons sans savoir laquelle", async () => {
+    const { http, sent } = fakeHttp([{ body: inventaire }]);
+    const r = await adapter.updateStock(ctxWith(http), annonce, 3, "k");
+
+    expect(r.status).toBe("unsupported");
+    // La lecture a eu lieu, l'écriture non.
+    expect(sent.some((x) => x.method === "PUT")).toBe(false);
+  });
+
+  it("refuse nommément une déclinaison qu'Etsy ne connaît pas", async () => {
+    const { http, sent } = fakeHttp([{ body: inventaire }]);
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      annonce,
+      3,
+      "k",
+      variante("couleur=rouge", ["Rouge"]),
+    );
+
+    expect(r.status).toBe("unsupported");
+    expect(r.message).toContain("Rouge");
+    expect(sent.some((x) => x.method === "PUT")).toBe(false);
+  });
+
+  it("garde le chemin simple pour une annonce sans déclinaison", async () => {
+    const simple = { products: [inventaire.products[0]] };
+    const { http, sent } = fakeHttp([{ body: simple }, { body: {} }]);
+    const r = await adapter.updateStock(ctxWith(http), annonce, 8, "k");
+
+    expect(r.status).toBe("success");
+    expect(corpsPut(sent)?.products[0].offerings[0].quantity).toBe(8);
   });
 });

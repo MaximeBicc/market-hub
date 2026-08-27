@@ -998,31 +998,58 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     listing: Listing,
     stock: number,
     _idempotencyKey?: string,
+    unite?: Variant,
   ): Promise<TargetResult> {
     /*
-     * L'IDENTIFIANT D'INVENTAIRE MÉMORISÉ EST CELUI DE LA PREMIÈRE VARIANTE.
+     * CHAQUE DÉCLINAISON A SON PROPRE ARTICLE D'INVENTAIRE.
      *
-     * Pour une annonce créée avec des déclinaisons, écrire dessus mettrait le
-     * stock sur le premier coloris et laisserait les seize autres à zéro —
-     * sans erreur, sans message, pour toujours. La liste complète existe dans
-     * `marketplaceData.variants`, mais rien ne dit encore QUELLE déclinaison
-     * est visée.
+     * `marketplaceData.inventoryItemId` est celui de la PREMIÈRE variante —
+     * pratique pour une annonce qui n'en a qu'une, faux dès qu'il y en a
+     * dix-sept : le stock du violet irait sur le noir, et les seize autres
+     * resteraient à zéro sans erreur ni message.
      *
-     * On refuse donc, en le disant. Une annonce sans déclinaison — le cas de
-     * tout ce qui tourne aujourd'hui — passe par le chemin normal.
+     * La liste complète vit dans `marketplaceData.variants`. Il suffit d'y
+     * retrouver l'unité que le cœur désigne — par sa clé d'options d'abord,
+     * qui existe toujours, par son SKU ensuite, que Shopify n'impose pas.
      */
     const declinaisons = listing.marketplaceData?.["variants"];
+    let inventoryItemId: string | undefined;
+
     if (Array.isArray(declinaisons) && declinaisons.length > 1) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "unsupported",
-        message:
-          "Annonce à déclinaisons : la mise à jour coloris par coloris n'est pas encore branchée. Modifiez depuis l'admin Shopify en attendant.",
-      };
+      if (!unite) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message:
+            "Annonce à déclinaisons : impossible d'écrire un stock sans savoir quel coloris est visé.",
+        };
+      }
+
+      const lignes = declinaisons as Array<{
+        optionKey?: string;
+        sku?: string;
+        inventoryItemId?: string;
+      }>;
+      const trouvee =
+        lignes.find((l) => l.optionKey && l.optionKey === unite.optionKey) ??
+        (unite.sku ? lignes.find((l) => l.sku === unite.sku) : undefined);
+
+      if (!trouvee?.inventoryItemId) {
+        // Refuser nommément vaut mieux qu'écrire sur la première venue : une
+        // déclinaison ajoutée chez Shopify après la création n'est pas dans
+        // cette liste, et l'inventer serait pire que de le dire.
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message: `Déclinaison « ${unite.optionKey || unite.sku || unite.id} » introuvable dans l'annonce Shopify. Relancez une synchronisation du catalogue.`,
+        };
+      }
+      inventoryItemId = trouvee.inventoryItemId;
     }
 
-    let inventoryItemId = listing.marketplaceData?.["inventoryItemId"] as
+    inventoryItemId ??= listing.marketplaceData?.["inventoryItemId"] as
       | string
       | undefined;
 

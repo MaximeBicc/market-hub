@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EbayAdapter, ebayConsentUrl } from "./ebay.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
-import type { Listing, Product } from "../domain/types.js";
+import type { Listing, Product, Variant } from "../domain/types.js";
 
 /**
  * Tests de l'adaptateur eBay, sur un `fetch` simulé.
@@ -656,5 +656,117 @@ describe("annonces à déclinaisons", () => {
 
     expect(r.status).toBe("unsupported");
     expect(sent).toHaveLength(0);
+  });
+});
+
+/** Une variante de chez nous, telle que le cœur la transmet au module. */
+function variante(optionKey: string, valeurs: string[], sku?: string): Variant {
+  return {
+    id: `v-${optionKey}`,
+    productId: "p1",
+    ...(sku ? { sku } : {}),
+    optionValues: valeurs,
+    optionKey,
+    price: { amount: 1990, currency: "EUR" },
+    position: 0,
+    status: "active",
+  };
+}
+
+describe("stock d'une déclinaison", () => {
+  /**
+   * eBay tient son stock PAR ARTICLE D'INVENTAIRE, donc par SKU, même à
+   * l'intérieur d'un groupe. Toute la difficulté est de savoir quel SKU eBay
+   * correspond à quelle déclinaison de chez nous — la réponse n'est pas
+   * devinable, parce que le SKU a pu être FABRIQUÉ à la création.
+   */
+  const groupe: Listing = {
+    id: "l-grp",
+    productId: "p1",
+    accountId: "acc-ebay",
+    remoteId: "GRP-CASE",
+    status: "active",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 34,
+    marketplaceData: {
+      inventoryItemGroupKey: "GRP-CASE",
+      offers: { "grp-case-couleur-noir": "off-1", "grp-case-couleur-blanc": "off-2" },
+      unites: [
+        { optionKey: "couleur=noir", sku: "grp-case-couleur-noir", offerId: "off-1" },
+        { optionKey: "couleur=blanc", sku: "grp-case-couleur-blanc", offerId: "off-2" },
+      ],
+    },
+  };
+
+  it("écrit sur le SKU du coloris visé, et sur son offre", async () => {
+    const { http, sent } = fakeHttp([{ status: 204, body: {} }]);
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      groupe,
+      12,
+      "k",
+      variante("couleur=blanc", ["Blanc"]),
+    );
+
+    expect(r.status).toBe("success");
+    const req = sent[0]?.body.requests[0];
+    // Le SKU d'eBay, pas celui de la variante : il a été fabriqué.
+    expect(req.sku).toBe("grp-case-couleur-blanc");
+    expect(req.shipToLocationAvailability.quantity).toBe(12);
+    // L'offre du BLANC. Celle du noir garderait sa quantité d'avant.
+    expect(req.offers[0].offerId).toBe("off-2");
+    expect(req.offers[0].availableQuantity).toBe(12);
+  });
+
+  it("refuse d'écrire sur un groupe sans savoir quel coloris", async () => {
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.updateStock(ctxWith(http), groupe, 12, "k");
+
+    expect(r.status).toBe("unsupported");
+    expect(sent).toHaveLength(0);
+  });
+
+  it("refuse plutôt que de créer un article hors du groupe", async () => {
+    /*
+     * Le piège que ce test verrouille : sans correspondance, la tentation est
+     * d'utiliser le SKU de la variante. Mais si eBay a reçu un SKU fabriqué,
+     * écrire sur celui-là créerait un article d'inventaire NEUF, hors du
+     * groupe, invisible dans l'annonce et pourtant facturé.
+     */
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      groupe,
+      12,
+      "k",
+      variante("couleur=rouge", ["Rouge"], "SKU-ROUGE"),
+    );
+
+    expect(r.status).toBe("unsupported");
+    expect(r.message).toContain("rouge");
+    expect(sent).toHaveLength(0);
+  });
+
+  it("laisse une annonce sans déclinaison sur son chemin d'origine", async () => {
+    const { http, sent } = fakeHttp([{ status: 204, body: {} }]);
+    await adapter.updateStock(
+      ctxWith(http),
+      {
+        id: "l1",
+        productId: "p2",
+        accountId: "acc-ebay",
+        remoteId: "AvionBBR",
+        status: "active",
+        price: { amount: 450, currency: "EUR" },
+        stock: 29,
+        marketplaceData: { offerId: "off-9" },
+      },
+      26,
+      "k",
+      variante("", []),
+    );
+
+    expect(sent[0]?.body.requests[0].sku).toBe("AvionBBR");
+    expect(sent[0]?.body.requests[0].offers[0].offerId).toBe("off-9");
   });
 });

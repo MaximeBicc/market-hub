@@ -589,6 +589,11 @@ async function syncCatalogue(
     for (const x of lot) {
       const r = await mod.orchestrator.setStock({
         productId: x.productId,
+        // L'unité voyage avec la valeur. Sans elle, l'adaptateur refuse une
+        // annonce déclinée plutôt que d'écrire sur un coloris au hasard — et
+        // le rapprochement échouerait sur tout produit à plusieurs coloris,
+        // c'est-à-dire la moitié du catalogue.
+        variantId: x.variantId,
         accountIds: [task.shopId],
         stock: x.stock,
         idempotencyKey: `rapprochement:${task.shopId}:${x.productId}:${x.stock}`,

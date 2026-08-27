@@ -234,6 +234,16 @@ const TITRE_MAX = 80;
 /** Une unité vendable, réduite à ce que la création d'annonce exige. */
 interface UniteEbay {
   sku: string;
+  /**
+   * La clé d'options de NOTRE variante — « couleur=violet ».
+   *
+   * eBay ne la connaît pas et ne la stockera jamais : elle sert à retrouver,
+   * plus tard, quel SKU eBay correspond à quelle déclinaison de chez nous.
+   * Sans elle, une variante sans SKU propre serait irrattachable — son SKU
+   * eBay ayant été FABRIQUÉ, rien ne permettrait de refaire le chemin
+   * inverse.
+   */
+  optionKey: string;
   /** Vrai quand le SKU a été FABRIQUÉ faute d'en trouver un sur la variante. */
   skuFabrique: boolean;
   prix: Money;
@@ -479,6 +489,7 @@ function preparerUnites(product: Product, variantes: Variant[]): Preparation {
 
     unites.push({
       sku,
+      optionKey: v.optionKey,
       skuFabrique: skuPropre.length === 0,
       prix: v.price,
       quantite: quantite ?? 0,
@@ -1148,6 +1159,23 @@ export class EbayAdapter implements MarketplaceAdapter {
       marketplaceData: {
         inventoryItemGroupKey: cle,
         offers,
+        /*
+         * LA CORRESPONDANCE ENTRE NOS DÉCLINAISONS ET LES SKU D'EBAY.
+         *
+         * `offers` est indexé par SKU eBay, et ce SKU est parfois FABRIQUÉ à
+         * partir du SKU parent quand la variante n'en portait pas. Retrouver
+         * plus tard « quel SKU pour le violet » exigerait alors de refaire la
+         * dérivation à l'identique, avec le produit sous la main — que la
+         * mise à jour du stock n'a pas.
+         *
+         * On écrit donc la table une fois, à la création, là où les deux
+         * identités se rencontrent.
+         */
+        unites: prep.unites.map((u) => ({
+          optionKey: u.optionKey,
+          sku: u.sku,
+          ...(offers[u.sku] ? { offerId: offers[u.sku] } : {}),
+        })),
         categoryId: commun.categoryId,
       },
       message:
@@ -1477,30 +1505,61 @@ export class EbayAdapter implements MarketplaceAdapter {
     listing: Listing,
     stock: number,
     _idempotencyKey?: string,
+    unite?: Variant,
   ): Promise<TargetResult> {
     /*
      * UNE ANNONCE GROUPÉE NE SE MET PAS À JOUR PAR SON GROUPE.
      *
-     * Quand l'annonce a été créée avec des déclinaisons, `remoteId` porte la
-     * clé du GROUPE d'articles d'inventaire — pas un SKU. La passer telle
-     * quelle à `bulk_update_price_quantity` produit un 400 chez eBay, et le
-     * stock ne se propage jamais. Pire : si la clé ressemblait par accident à
-     * un SKU existant, on écrirait sur le mauvais article.
+     * `remoteId` porte alors la clé du GROUPE d'articles, pas un SKU. La
+     * passer à `bulk_update_price_quantity` produit un 400 — et si la clé
+     * ressemblait par accident à un SKU existant, on écrirait sur le mauvais
+     * article.
      *
-     * Tant que chaque déclinaison n'a pas sa propre ligne locale, on refuse
-     * en le disant. Un refus visible vaut mieux qu'une écriture au hasard.
+     * eBay tient son stock PAR ARTICLE D'INVENTAIRE, donc par SKU, même à
+     * l'intérieur d'un groupe. Écrire la quantité d'une déclinaison revient
+     * donc à écrire sur SON SKU — reste à savoir lequel, ce que la table
+     * mémorisée à la création permet enfin.
      */
+    let sku = listing.remoteId;
+    let offerId = listing.marketplaceData?.["offerId"] as string | undefined;
+
     if (listing.marketplaceData?.["inventoryItemGroupKey"]) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "unsupported",
-        message:
-          "Annonce à déclinaisons : la mise à jour coloris par coloris n'est pas encore branchée. Modifiez depuis eBay en attendant.",
-      };
+      if (!unite) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message:
+            "Annonce à déclinaisons : impossible d'écrire un stock sans savoir quel coloris est visé.",
+        };
+      }
+
+      const table = listing.marketplaceData["unites"];
+      const lignes = Array.isArray(table)
+        ? (table as Array<{ optionKey?: string; sku?: string; offerId?: string }>)
+        : [];
+      const ligne =
+        lignes.find((l) => l.optionKey && l.optionKey === unite.optionKey) ??
+        (unite.sku ? lignes.find((l) => l.sku === unite.sku) : undefined);
+
+      if (!ligne?.sku) {
+        /*
+         * Sans correspondance, on REFUSE. La tentation serait d'utiliser le
+         * SKU de la variante : mais si eBay a reçu un SKU fabriqué, écrire
+         * sur celui de la variante créerait un article d'inventaire NEUF,
+         * hors du groupe, invisible dans l'annonce et pourtant facturé.
+         */
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message: `Déclinaison « ${unite.optionKey || unite.sku || unite.id} » introuvable dans l'annonce eBay. Republiez-la pour reconstruire la correspondance.`,
+        };
+      }
+      sku = ligne.sku;
+      offerId = ligne.offerId;
     }
 
-    const sku = listing.remoteId;
     if (!sku) throw new Error("eBay : SKU manquant sur l'annonce");
 
     // `bulk_update_price_quantity` met à jour l'article ET son offre en un
@@ -1513,15 +1572,10 @@ export class EbayAdapter implements MarketplaceAdapter {
           {
             sku,
             shipToLocationAvailability: { quantity: stock },
-            ...(listing.marketplaceData?.["offerId"]
-              ? {
-                  offers: [
-                    {
-                      offerId: listing.marketplaceData["offerId"],
-                      availableQuantity: stock,
-                    },
-                  ],
-                }
+            // L'offre est celle de CETTE déclinaison, pas celle de l'annonce :
+            // sur un groupe, chaque SKU a la sienne.
+            ...(offerId
+              ? { offers: [{ offerId, availableQuantity: stock }] }
               : {}),
           },
         ],

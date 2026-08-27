@@ -1,4 +1,5 @@
 import type {
+  Variant,
   CapabilitySet,
   CanonicalOrderEvent,
   FulfillmentInput,
@@ -79,11 +80,25 @@ export interface MarketplaceAdapter {
     idempotencyKey: string,
   ): Promise<TargetResult>;
 
+  /**
+   * Écrire le stock d'une unité vendable.
+   *
+   * `unite` porte l'identité de la déclinaison visée — son SKU, ses valeurs
+   * d'option, sa clé normalisée. Le cœur ne sait pas comment chaque
+   * plateforme désigne une déclinaison ; il dit simplement LAQUELLE, et le
+   * module traduit.
+   *
+   * Elle est facultative parce qu'un produit sans déclinaison n'en a pas
+   * besoin. Un module qui reçoit une annonce à plusieurs unités SANS elle
+   * doit refuser plutôt que d'en choisir une : c'est ainsi qu'on écrit la
+   * quantité du violet sur l'annonce du noir.
+   */
   updateStock(
     ctx: MarketplaceContext,
     listing: Listing,
     stock: number,
     idempotencyKey: string,
+    unite?: Variant,
   ): Promise<TargetResult>;
 
   activateListing(

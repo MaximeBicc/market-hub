@@ -160,6 +160,8 @@ engine.post("/price", async (c) => {
 engine.post("/stock", async (c) => {
   const body = await c.req.json<{
     productId: string;
+    /** La déclinaison visée. Obligatoire dès que le produit en a plusieurs. */
+    variantId?: string;
     accountIds: string[];
     stock: number;
     idempotencyKey?: string;
@@ -169,6 +171,7 @@ engine.post("/stock", async (c) => {
   const mod = buildEngine(c.env);
   const outcome = await mod.orchestrator.setStock({
     productId: body.productId,
+    ...(body.variantId ? { variantId: body.variantId } : {}),
     accountIds: body.accountIds,
     stock: body.stock,
     idempotencyKey: key,

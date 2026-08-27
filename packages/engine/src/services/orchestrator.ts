@@ -405,11 +405,25 @@ export class MarketplaceOrchestrator {
           message: "Aucune annonce pour ce produit sur ce compte",
         };
       }
+      /*
+       * L'unité voyage avec la commande.
+       *
+       * Le cœur sait QUELLE déclinaison a bougé ; les modules savent comment
+       * leur plateforme la désigne — un SKU chez eBay, un identifiant
+       * d'inventaire chez Shopify, une combinaison de propriétés chez Etsy.
+       * Transmettre l'identité plutôt que la traduire ici est ce qui garde
+       * ces trois façons de faire hors du cœur.
+       */
+      const unite = input.variantId
+        ? await this.variants.get(input.variantId)
+        : undefined;
+
       const r = await adapter.updateStock(
         ctx,
         listing,
         input.stock,
         `${input.idempotencyKey}:${ctx.account.id}`,
+        unite,
       );
       if (r.status === "success") {
         await this.listings.put({ ...listing, stock: input.stock });

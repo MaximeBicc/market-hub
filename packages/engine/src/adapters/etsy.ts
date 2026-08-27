@@ -387,6 +387,64 @@ function toMinor(m: EtsyMoney | number | undefined, fallback = 0): number {
  * désigne pas le champ fautif. Et le prix doit repasser en décimal : la forme
  * `{amount, divisor}` de la lecture n'est pas acceptée en écriture.
  */
+/**
+ * Retrouve, dans l'inventaire d'Etsy, la ligne qui correspond à notre unité.
+ *
+ * Deux voies, dans cet ordre :
+ *
+ *   1. le SKU, quand les deux côtés en portent un — c'est l'identité la plus
+ *      sûre, insensible à la traduction et à la casse ;
+ *   2. les VALEURS d'options. Etsy les rend dans `property_values`, une entrée
+ *      par propriété, chacune avec ses valeurs. On compare des ensembles
+ *      normalisés : l'ordre des propriétés n'est pas garanti d'un appel à
+ *      l'autre, et « Bleu Marine » chez nous peut être « bleu marine » chez
+ *      Etsy sans que ce soit une autre couleur.
+ */
+function trouverProduit(
+  produits: EtsyInventoryProduct[],
+  unite: Variant,
+): EtsyInventoryProduct | undefined {
+  const sku = unite.sku?.trim();
+  if (sku) {
+    const parSku = produits.find((p) => (p.sku ?? "").trim() === sku);
+    if (parSku) return parSku;
+  }
+
+  const attendues = ensembleNormalise(unite.optionValues);
+  if (attendues.size === 0) return undefined;
+
+  return produits.find((p) => {
+    const siennes = ensembleNormalise(valeursEtsy(p));
+    if (siennes.size !== attendues.size) return false;
+    for (const v of attendues) if (!siennes.has(v)) return false;
+    return true;
+  });
+}
+
+/** Les valeurs d'options d'une ligne d'inventaire, à plat. */
+function valeursEtsy(p: EtsyInventoryProduct): string[] {
+  return (p.property_values ?? []).flatMap((pv) => {
+    const v = (pv as { values?: unknown }).values;
+    return Array.isArray(v) ? v.map((x) => String(x)) : [];
+  });
+}
+
+/** Minuscules, accents pliés, espaces réduits — pour comparer, pas pour écrire. */
+function ensembleNormalise(valeurs: string[]): Set<string> {
+  return new Set(
+    valeurs
+      .map((v) =>
+        v
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, " "),
+      )
+      .filter(Boolean),
+  );
+}
+
 function cleanProduct(
   p: EtsyInventoryProduct,
   patch: { quantity?: number; priceMinor?: number },
@@ -1209,8 +1267,14 @@ export class EtsyAdapter implements MarketplaceAdapter {
     listing: Listing,
     stock: number,
     _idempotencyKey?: string,
+    unite?: Variant,
   ): Promise<TargetResult> {
-    return this.writeInventory(ctx, listing, { quantity: Math.max(0, stock) });
+    return this.writeInventory(
+      ctx,
+      listing,
+      { quantity: Math.max(0, stock) },
+      unite,
+    );
   }
 
   /**
@@ -1225,6 +1289,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
     ctx: MarketplaceContext,
     listing: Listing,
     patch: { quantity?: number; priceMinor?: number },
+    unite?: Variant,
   ): Promise<TargetResult> {
     const id = listing.remoteId;
     if (!id) throw new Error("Etsy : annonce sans identifiant distant");
@@ -1232,34 +1297,54 @@ export class EtsyAdapter implements MarketplaceAdapter {
     const inv = await this.call<EtsyInventory>(ctx, `/listings/${id}/inventory`);
 
     /*
-     * NE PAS APPLIQUER UNE VALEUR À TOUTES LES DÉCLINAISONS.
+     * ON RELIT TOUT, ON NE CHANGE QU'UNE LIGNE, ON RÉÉCRIT TOUT.
      *
-     * L'écriture d'inventaire d'Etsy est un remplacement COMPLET : on relit,
-     * on modifie, on réécrit le tout. Le code appliquait la nouvelle quantité
-     * à chaque offering. Inoffensif tant qu'une annonce n'avait qu'un produit
-     * d'inventaire ; dès qu'elle a dix-sept coloris, une vente de trois
-     * violets mettait les dix-sept à trois.
+     * L'écriture d'inventaire d'Etsy est un remplacement COMPLET : il n'existe
+     * pas de modification partielle. Le code appliquait donc la nouvelle
+     * quantité à CHAQUE déclinaison — inoffensif sur une annonce simple,
+     * désastreux dès qu'elle a dix-sept coloris : une vente de trois violets
+     * mettait les dix-sept à trois.
      *
-     * Tant que l'identité de la déclinaison n'est pas transmise jusqu'ici, on
-     * refuse. Le stock faux se voit des jours plus tard, à la survente.
+     * Maintenant que le cœur dit quelle unité a bougé, on retrouve SA ligne et
+     * on laisse les seize autres exactement comme Etsy les rend. Le
+     * remplacement reste complet ; c'est son contenu qui devient juste.
      */
-    if ((inv.products ?? []).filter((p) => !p.is_deleted).length > 1) {
-      return {
-        accountId: ctx.account.id,
-        marketplace: ctx.account.marketplace,
-        status: "unsupported",
-        message:
-          "Annonce à déclinaisons : appliquer cette valeur écraserait tous les coloris. Modifiez depuis Etsy en attendant.",
-      };
-    }
-
-    const products = (inv.products ?? [])
-      .filter((p) => !p.is_deleted)
-      .map((p) => cleanProduct(p, patch));
-
-    if (products.length === 0) {
+    const vivants = (inv.products ?? []).filter((p) => !p.is_deleted);
+    if (vivants.length === 0) {
       throw new Error("Etsy : cette annonce n'a aucun produit d'inventaire");
     }
+
+    let cible: EtsyInventoryProduct | undefined;
+    if (vivants.length > 1) {
+      if (!unite) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message:
+            "Annonce à déclinaisons : impossible d'écrire sans savoir quel coloris est visé.",
+        };
+      }
+      cible = trouverProduit(vivants, unite);
+      if (!cible) {
+        // Nommer l'échec plutôt que d'écrire sur la première venue : une
+        // déclinaison ajoutée chez Etsy après la création n'est pas connue de
+        // notre côté, et deviner mettrait la quantité sur le mauvais coloris.
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message: `Déclinaison « ${unite.optionValues.join(" / ") || unite.optionKey} » introuvable dans l'annonce Etsy. Relancez une synchronisation du catalogue.`,
+        };
+      }
+    }
+
+    const products = vivants.map((p) =>
+      // Un patch vide laisse la ligne telle qu'Etsy la rend : même prix, même
+      // quantité. C'est ce qui permet de réécrire l'inventaire entier sans
+      // toucher aux déclinaisons que la commande ne vise pas.
+      cleanProduct(p, !cible || p === cible ? patch : {}),
+    );
 
     await this.call(ctx, `/listings/${id}/inventory`, {
       method: "PUT",

@@ -5,7 +5,7 @@ import {
   shopifyEnsureWebhooks,
 } from "./shopify.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
-import type { Listing, Product } from "../domain/types.js";
+import type { Listing, Product, Variant } from "../domain/types.js";
 
 /**
  * Tests de l'adaptateur Shopify, sur un `fetch` simulé.
@@ -1010,6 +1010,92 @@ describe("création avec déclinaisons", () => {
     );
     expect(r.status).toBe("unsupported");
     expect(r.message).toMatch(/déclinaisons/);
+    expect(sent).toHaveLength(0);
+  });
+});
+
+/** Une variante de chez nous, telle que le cœur la transmet au module. */
+function variante(optionKey: string, valeurs: string[], sku?: string): Variant {
+  return {
+    id: `v-${optionKey}`,
+    productId: "p1",
+    ...(sku ? { sku } : {}),
+    optionValues: valeurs,
+    optionKey,
+    price: { amount: 1990, currency: "EUR" },
+    position: 0,
+    status: "active",
+  };
+}
+
+describe("stock d'une déclinaison", () => {
+  /**
+   * Chaque variante Shopify a son propre article d'inventaire.
+   * `marketplaceData.inventoryItemId` est celui de la PREMIÈRE — pratique
+   * pour une annonce simple, faux dès qu'il y en a dix-sept.
+   */
+  const groupe: Listing = {
+    id: "l-grp",
+    productId: "p1",
+    accountId: "acc-shopify",
+    remoteId: "gid://shopify/ProductVariant/1",
+    status: "active",
+    price: { amount: 1990, currency: "EUR" },
+    stock: 9,
+    marketplaceData: {
+      productId: "gid://shopify/Product/9",
+      inventoryItemId: "gid://shopify/InventoryItem/1",
+      variants: [
+        { id: "gid://shopify/ProductVariant/1", optionKey: "couleur=noir", inventoryItemId: "gid://shopify/InventoryItem/1" },
+        { id: "gid://shopify/ProductVariant/2", optionKey: "couleur=blanc", inventoryItemId: "gid://shopify/InventoryItem/2" },
+      ],
+    },
+  };
+
+  it("écrit sur l'article d'inventaire du coloris visé", async () => {
+    // Le journal de ce fichier prend les réponses telles quelles, et le
+    // contexte fournit déjà l'emplacement : un seul appel suffit.
+    const { http, sent } = fakeHttp([
+      { data: { inventorySetQuantities: { userErrors: [] } } },
+    ]);
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      groupe,
+      6,
+      "k",
+      variante("couleur=blanc", ["Blanc"]),
+    );
+
+    expect(r.status).toBe("success");
+    const mutation = sent.find((x) =>
+      String(x.body?.query ?? "").includes("inventorySetQuantities"),
+    );
+    const q = mutation?.body.variables.input.quantities[0];
+    // Le BLANC. Sans ciblage, la quantité partait sur le noir.
+    expect(q.inventoryItemId).toBe("gid://shopify/InventoryItem/2");
+    expect(q.quantity).toBe(6);
+  });
+
+  it("refuse d'écrire sur un produit décliné sans savoir quel coloris", async () => {
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.updateStock(ctxWith(http), groupe, 6, "k");
+
+    expect(r.status).toBe("unsupported");
+    expect(sent).toHaveLength(0);
+  });
+
+  it("refuse nommément une déclinaison absente de l'annonce", async () => {
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.updateStock(
+      ctxWith(http),
+      groupe,
+      6,
+      "k",
+      variante("couleur=rouge", ["Rouge"]),
+    );
+
+    expect(r.status).toBe("unsupported");
+    expect(r.message).toContain("rouge");
     expect(sent).toHaveLength(0);
   });
 });
