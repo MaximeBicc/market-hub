@@ -738,7 +738,9 @@ describe("webhooks", () => {
     // On ne parse pas le corps : sa forme n'est pas documentée de façon
     // fiable, et deviner la structure d'une vente décrémente un stock deux
     // fois. Le webhook dit « ça a bougé », le relevé va lire quoi.
-    expect(adapter.webhookResync()).toEqual(["orders"]);
+    expect(adapter.webhookSignaux()).toEqual([
+      { type: "relire", resource: "orders" },
+    ]);
   });
 });
 

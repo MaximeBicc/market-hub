@@ -276,6 +276,32 @@ export interface CanonicalOrderEvent {
  * sur certains objets. Déclarer les capacités permet à l'interface de griser
  * une action au lieu de la proposer puis d'échouer.
  */
+/**
+ * CE QU'UN WEBHOOK APPREND, UNE FOIS TRADUIT.
+ *
+ * Une notification est un texte propre à sa plateforme. Le cœur n'en veut
+ * rien savoir : il veut la SUBSTANCE. Deux formes seulement, parce qu'il n'y
+ * a que deux situations.
+ *
+ * `stock` est celle qui compte. Shopify dit exactement quel article
+ * d'inventaire a changé et à combien : tout est déjà là, il n'y a rien à
+ * relire. Le traduire en « relis ton inventaire » revenait à recevoir une
+ * adresse précise et repartir fouiller la ville — mille variantes relues
+ * pour une seule qui a bougé.
+ *
+ * `relire` reste pour ce qui n'est pas exploitable directement : Etsy ne
+ * pousse qu'un identifiant de commande sans forme documentée, et un
+ * changement de titre chez Shopify n'a pas de raccourci.
+ */
+export type SignalWebhook =
+  | {
+      type: "stock";
+      /** L'identité de l'unité chez la plateforme — pas chez nous. */
+      refDistante: string;
+      disponible: number;
+    }
+  | { type: "relire"; resource: "orders" | "inventory" | "listings" };
+
 export interface CapabilitySet {
   listingCreate: boolean;
   listingUpdate: boolean;

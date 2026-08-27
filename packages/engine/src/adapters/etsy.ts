@@ -11,6 +11,7 @@ import type {
   RemoteSetting,
   TargetResult,
   Variant,
+  SignalWebhook,
 } from "../domain/types.js";
 import type {
   MarketplaceAdapter,
@@ -1792,8 +1793,18 @@ export class EtsyAdapter implements MarketplaceAdapter {
    * webhook dit « une commande a bougé » ; le relevé, déjà éprouvé, va lire
    * laquelle. Quelques secondes au lieu de quinze minutes, sans rien inventer.
    */
-  webhookResync(): string[] {
-    return ["orders"];
+  webhookSignaux(): SignalWebhook[] {
+    /*
+     * Etsy ne pousse qu'un identifiant de commande, dans une forme que sa
+     * documentation ne fige pas. Il n'y a donc rien à exploiter directement :
+     * le signal dit « va relire les ventes », et c'est déjà l'essentiel — la
+     * détection passe de deux minutes à quelques secondes.
+     *
+     * La notification porte pourtant un `resource_url` qui désigne la
+     * commande exacte. L'exploiter ferait tomber le relevé à UN appel au lieu
+     * d'une page complète ; c'est le prochain gain sur cette plateforme.
+     */
+    return [{ type: "relire", resource: "orders" }];
   }
 
   /**

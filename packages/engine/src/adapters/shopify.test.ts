@@ -703,31 +703,72 @@ describe("emplacement de stock", () => {
 });
 
 describe("temps réel", () => {
-  it("relit l'inventaire sur un changement de stock", () => {
-    const r = (topic: string) =>
-      adapter.webhookResync(
-        new Request("https://x/", { headers: { "X-Shopify-Topic": topic } }),
-      );
-    // Le sujet qui fait toute la différence : Shopify le pousse même quand la
-    // quantité est saisie à la main dans l'administration.
-    expect(r("inventory_levels/update")).toEqual(["inventory"]);
-    expect(r("products/update")).toEqual(["inventory"]);
-    expect(r("inventory_items/update")).toEqual(["inventory"]);
+  const signal = (topic: string, corps: unknown = {}) =>
+    adapter.webhookSignaux(
+      new Request("https://x/", { headers: { "X-Shopify-Topic": topic } }),
+      JSON.stringify(corps),
+    );
+
+  it("lit la variante et sa quantité DANS le webhook, sans rien relire", () => {
+    /*
+     * Le gain de cette étape tient dans cette assertion. Shopify envoie
+     * l'article d'inventaire exact et sa nouvelle quantité : tout est là. La
+     * version précédente répondait « relis ton inventaire », ce qui déclenchait
+     * la lecture du catalogue entier — mille variantes pour une qui a bougé.
+     */
+    expect(signal("inventory_levels/update", {
+      inventory_item_id: 56365219053906,
+      available: 12,
+      location_id: 1,
+    })).toEqual([
+      {
+        type: "stock",
+        refDistante: "gid://shopify/InventoryItem/56365219053906",
+        disponible: 12,
+      },
+    ]);
+  });
+
+  it("rend l'identifiant sous sa forme longue, la seule qu'on mémorise", () => {
+    // Shopify envoie un nombre dans ses webhooks et un identifiant GraphQL
+    // partout ailleurs. Sans cette conversion, la correspondance ne se ferait
+    // jamais et le signal serait perdu en silence.
+    const [s] = signal("inventory_levels/update", {
+      inventory_item_id: 7,
+      available: 0,
+    });
+    expect(s).toMatchObject({ refDistante: "gid://shopify/InventoryItem/7" });
+  });
+
+  it("retombe sur la relecture si le corps est illisible", () => {
+    const r = adapter.webhookSignaux(
+      new Request("https://x/", {
+        headers: { "X-Shopify-Topic": "inventory_levels/update" },
+      }),
+      "ceci n'est pas du JSON",
+    );
+    // Une relecture coûte cher mais marche toujours : mieux vaut ça qu'un
+    // stock qui ne bouge pas parce qu'un champ a changé de nom.
+    expect(r).toEqual([{ type: "relire", resource: "inventory" }]);
+  });
+
+  it("relit le catalogue sur un changement de fiche, qui n'a pas de raccourci", () => {
+    expect(signal("products/update")).toEqual([
+      { type: "relire", resource: "inventory" },
+    ]);
+    expect(signal("inventory_items/update")).toEqual([
+      { type: "relire", resource: "inventory" },
+    ]);
   });
 
   it("ne relit rien sur une commande, déjà traduite en événement", () => {
-    const r = adapter.webhookResync(
-      new Request("https://x/", {
-        headers: { "X-Shopify-Topic": "orders/create" },
-      }),
-    );
     // Une vente porte déjà toute son information : relire serait un
     // aller-retour pour rien, et retarderait la propagation.
-    expect(r).toEqual([]);
+    expect(signal("orders/create")).toEqual([]);
   });
 
   it("ne relit rien sans en-tête de sujet", () => {
-    expect(adapter.webhookResync(new Request("https://x/"))).toEqual([]);
+    expect(adapter.webhookSignaux(new Request("https://x/"), "{}")).toEqual([]);
   });
 
   it("accepte un webhook signé avec le secret client", async () => {

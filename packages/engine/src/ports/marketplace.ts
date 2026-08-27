@@ -1,5 +1,6 @@
 import type {
   Variant,
+  SignalWebhook,
   CapabilitySet,
   CanonicalOrderEvent,
   FulfillmentInput,
@@ -196,7 +197,14 @@ export interface MarketplaceAdapter {
    * N'est appelé QU'APRÈS vérification de la signature — sinon n'importe qui
    * pourrait déclencher des synchronisations et vider les quotas.
    */
-  webhookResync?(request: Request): string[];
+  /**
+   * Ce qu'une notification apprend, traduit en signaux normalisés.
+   *
+   * Le corps BRUT est passé plutôt que l'objet analysé : la vérification de
+   * signature s'est déjà faite dessus, et le réanalyser deux fois pour deux
+   * usages coûterait autant qu'un appel réseau.
+   */
+  webhookSignaux?(request: Request, rawBody: string): SignalWebhook[];
 
   /**
    * Vérifie la signature d'un webhook et le traduit en événements canoniques.

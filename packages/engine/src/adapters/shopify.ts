@@ -9,6 +9,7 @@ import type {
   RemoteListing,
   TargetResult,
   Variant,
+  SignalWebhook,
 } from "../domain/types.js";
 import type {
   MarketplaceAdapter,
@@ -1460,14 +1461,54 @@ export class ShopifyAdapter implements MarketplaceAdapter {
    * main dans l'administration. C'est ce qui fait passer la détection de
    * quinze minutes à quelques secondes.
    */
-  webhookResync(request: Request): string[] {
+  webhookSignaux(request: Request, rawBody: string): SignalWebhook[] {
     const topic = request.headers.get("X-Shopify-Topic") ?? "";
-    if (
-      topic.startsWith("inventory_levels/") ||
-      topic.startsWith("inventory_items/") ||
-      topic.startsWith("products/")
-    ) {
-      return ["inventory"];
+
+    /*
+     * `inventory_levels/update` PORTE DÉJÀ LA RÉPONSE.
+     *
+     * Shopify envoie l'article d'inventaire exact et sa nouvelle quantité :
+     *
+     *   { "inventory_item_id": 56365219053906, "available": 12, ... }
+     *
+     * Le traduire en « relis ton inventaire » revenait à recevoir une adresse
+     * précise et repartir fouiller la ville — un catalogue entier relu, page
+     * par page, pour une variante qui a bougé de deux unités.
+     */
+    if (topic.startsWith("inventory_levels/")) {
+      try {
+        const corps = JSON.parse(rawBody) as {
+          inventory_item_id?: number | string;
+          available?: number;
+        };
+        const ref = corps.inventory_item_id;
+        const dispo = corps.available;
+        if (ref !== undefined && typeof dispo === "number") {
+          return [
+            {
+              type: "stock",
+              /*
+               * Shopify envoie l'identifiant NUMÉRIQUE dans ses webhooks et
+               * l'identifiant GraphQL partout ailleurs. On rend la forme
+               * longue, la seule mémorisée de notre côté — sans quoi la
+               * correspondance ne se ferait jamais et le signal serait perdu
+               * en silence.
+               */
+              refDistante: `gid://shopify/InventoryItem/${ref}`,
+              disponible: Math.max(0, dispo),
+            },
+          ];
+        }
+      } catch {
+        // Corps illisible : on retombe sur la relecture, qui marche toujours.
+      }
+      return [{ type: "relire", resource: "inventory" }];
+    }
+
+    // Un changement de titre, de photo ou de prix n'a pas de raccourci : il
+    // touche la fiche entière, et c'est le catalogue qu'il faut relire.
+    if (topic.startsWith("products/") || topic.startsWith("inventory_items/")) {
+      return [{ type: "relire", resource: "inventory" }];
     }
     return [];
   }

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
+import { appliquerStockDistant } from "../lib/stock-distant.js";
 import { eq } from "drizzle-orm";
 import type { CanonicalOrderEvent } from "@hub/engine";
 import { shop } from "../db/schema.js";
@@ -93,7 +94,35 @@ webhooks.post("/:platform", async (c) => {
    * Après vérification, jamais avant : sans cela, n'importe qui pourrait
    * déclencher des synchronisations en boucle et vider les quotas.
    */
-  for (const resource of adapter.webhookResync?.(c.req.raw) ?? []) {
+  for (const signal of adapter.webhookSignaux?.(c.req.raw, rawBody) ?? []) {
+    /*
+     * UN SIGNAL PRÉCIS SE TRAITE ICI, PAS DANS UNE FILE.
+     *
+     * Shopify nomme l'article d'inventaire et sa nouvelle quantité : il n'y a
+     * rien à relire, et donc rien à empiler. Écrire directement économise
+     * trois opérations de file ET la lecture du catalogue entier — mille
+     * variantes pour une qui a bougé de deux unités.
+     *
+     * C'est aussi plus rapide : le stock est à jour avant même que Shopify
+     * n'ait fini d'attendre notre réponse.
+     */
+    if (signal.type === "stock") {
+      const applique = await appliquerStockDistant(
+        c.env,
+        accountId,
+        signal.refDistante,
+        signal.disponible,
+      );
+      if (applique) continue;
+      /*
+       * Faute de correspondance — une variante créée chez Shopify que nous
+       * n'avons pas encore vue — on retombe sur la relecture. Perdre le
+       * signal laisserait un stock faux jusqu'au filet horaire.
+       */
+    }
+
+    const resource =
+      signal.type === "relire" ? signal.resource : ("inventory" as const);
     await c.env.SYNC_QUEUE.send({
       kind: "sync",
       shopId: accountId,
