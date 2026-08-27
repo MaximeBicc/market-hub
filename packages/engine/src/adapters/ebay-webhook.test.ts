@@ -484,3 +484,82 @@ describe("mise en place des abonnements", () => {
     expect(r.crees).not.toContain("ORDER_CONFIRMATION");
   });
 });
+
+describe("rafraîchissement du jeton", () => {
+  /**
+   * LA RÉGRESSION QUE CES TESTS VERROUILLENT.
+   *
+   * Un rafraîchissement ne peut demander qu'un SOUS-ENSEMBLE de ce que le
+   * vendeur a accordé. Envoyer la liste courante des portées revient à exiger
+   * que le consentement d'hier contienne celles d'aujourd'hui : le jour où
+   * l'on en ajoute une, TOUS les jetons existants cessent de se renouveler.
+   *
+   * C'est exactement ce qui est arrivé en ajoutant la portée des
+   * notifications. eBay répondait 400, et le message parlait de compte à
+   * relier — la vraie cause était invisible.
+   */
+  function fetchJeton(reponse: unknown, status = 200) {
+    const corps: Array<Record<string, string>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        corps.push(
+          Object.fromEntries(new URLSearchParams(String(init?.body ?? ""))),
+        );
+        return new Response(JSON.stringify(reponse), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    return corps;
+  }
+
+  /** Un contexte dont le jeton d'accès est périmé : le renouvellement part. */
+  const perime = (): MarketplaceContext => ({
+    ...ctx(),
+    credentials: {
+      clientId: "cid",
+      clientSecret: "csec",
+      refreshToken: "rtok",
+      accessToken: "vieux",
+      accessTokenExpiresAt: String(Math.floor(Date.now() / 1000) - 10),
+      marketplaceId: "EBAY_FR",
+    },
+    http: async () => new Response("{}", { status: 200 }),
+    saveCredentials: async () => {},
+  });
+
+  it("ne demande AUCUNE portée en se renouvelant", async () => {
+    const corps = fetchJeton({ access_token: "neuf", expires_in: 7200 });
+    await adapter.testConnection(perime());
+
+    const renouvellement = corps.find((b) => b["grant_type"] === "refresh_token");
+    expect(renouvellement).toBeDefined();
+    expect(renouvellement!["refresh_token"]).toBe("rtok");
+    // Le champ absent, et non vide : eBay renvoie alors les portées d'origine.
+    expect(renouvellement!["scope"]).toBeUndefined();
+  });
+
+  it("nomme un défaut de portée comme venant de l'outil, pas du compte", async () => {
+    fetchJeton(
+      { error: "invalid_scope", error_description: "scope not authorized" },
+      400,
+    );
+    // Sans cette distinction, on ferait reconnecter le vendeur en boucle pour
+    // un problème que la reconnexion ne corrige pas durablement.
+    await expect(adapter.testConnection(perime())).rejects.toThrow(
+      /défaut de l'outil/,
+    );
+  });
+
+  it("dit « à relier » seulement quand le jeton est vraiment mort", async () => {
+    fetchJeton(
+      { error: "invalid_grant", error_description: "refresh token expired" },
+      400,
+    );
+    await expect(adapter.testConnection(perime())).rejects.toThrow(
+      /périmé ou révoqué/,
+    );
+  });
+});

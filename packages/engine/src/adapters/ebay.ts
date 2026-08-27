@@ -853,21 +853,43 @@ export class EbayAdapter implements MarketplaceAdapter {
         "Content-Type": "application/x-www-form-urlencoded",
         Authorization: `Basic ${basic(clientId, clientSecret)}`,
       },
+      /*
+       * AUCUNE PORTÉE DEMANDÉE ICI, ET C'EST DÉLIBÉRÉ.
+       *
+       * Un rafraîchissement ne peut demander qu'un SOUS-ENSEMBLE de ce que le
+       * vendeur a accordé. Envoyer la liste courante revient à exiger que le
+       * consentement d'hier contienne les portées d'aujourd'hui — et le jour
+       * où l'on en ajoute une, TOUS les jetons existants cessent de se
+       * renouveler. eBay répond alors 400, et le message parle de compte à
+       * relier : la vraie cause est invisible.
+       *
+       * C'est exactement ce qui vient d'arriver en ajoutant la portée des
+       * notifications. Omettre le champ rend le jeton conservé : eBay renvoie
+       * les portées d'origine, et une portée nouvelle n'arrive que par une
+       * réautorisation — ce qui est le comportement correct.
+       */
       body: new URLSearchParams({
         grant_type: "refresh_token",
         refresh_token: refreshToken,
-        scope: EBAY_SCOPES,
       }),
       },
     );
 
     if (!res.ok) {
-      // 400 ici signifie presque toujours un jeton de rafraîchissement périmé
-      // (18 mois) ou révoqué : seule une réautorisation manuelle le rétablit.
+      /*
+       * Le corps d'eBay porte la vraie cause ; le code seul ne la donne pas.
+       * `invalid_grant` = jeton périmé ou révoqué, réautorisation obligatoire.
+       * `invalid_scope` = on a demandé plus que ce qui a été accordé — un
+       * défaut de NOTRE côté, qu'aucune reconnexion ne corrigerait durablement.
+       */
+      const detail = await res.text().catch(() => "");
+      const portee = /invalid_scope/i.test(detail);
       throw new Error(
-        res.status === 400
-          ? "eBay a refusé le rafraîchissement. Le compte doit être relié à nouveau."
-          : `eBay : rafraîchissement refusé (${res.status})`,
+        portee
+          ? "eBay refuse la portée demandée : la requête réclame plus que ce que le vendeur a accordé. C'est un défaut de l'outil, pas du compte."
+          : res.status === 400
+            ? "eBay a refusé le rafraîchissement. Le jeton est périmé ou révoqué : le compte doit être relié à nouveau."
+            : `eBay : rafraîchissement refusé (${res.status})`,
       );
     }
 
