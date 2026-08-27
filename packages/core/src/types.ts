@@ -86,6 +86,33 @@ export interface SyncTask {
   depth: number;
 }
 
+/**
+ * PLUSIEURS TÂCHES DANS UN SEUL MESSAGE.
+ *
+ * Cloudflare facture l'écriture, la lecture ET la suppression de chaque
+ * message : trois opérations, quel que soit son contenu. `sendBatch` groupe
+ * l'ENVOI mais pas la facturation — dix messages restent trente opérations.
+ *
+ * Un message qui PORTE dix tâches, lui, en coûte trois. C'est le seul
+ * regroupement qui compte, et il divise la consommation par autant de tâches
+ * qu'on ose mettre dedans.
+ *
+ * Ce qu'on n'ose pas : en mettre trop. Les tâches d'un lot partagent le
+ * budget de sous-requêtes de l'invocation ; une seule tâche gourmande
+ * affamerait les suivantes. Le consommateur reporte donc ce qu'il n'a pas pu
+ * faire plutôt que de le perdre.
+ */
+export interface LotTask {
+  kind: "lot";
+  taches: SyncTask[];
+  /**
+   * Nombre de reports déjà subis. Borné : sans lui, un lot dont la première
+   * tâche épuise systématiquement le budget se reporterait à l'infini, en
+   * consommant trois opérations à chaque tour.
+   */
+  reports: number;
+}
+
 export interface WebhookTask {
   kind: "webhook";
   shopId: string;
@@ -115,7 +142,12 @@ export interface AiTask {
   jobId: string;
 }
 
-export type QueueTask = SyncTask | WebhookTask | WriteTask | AiTask;
+export type QueueTask =
+  | SyncTask
+  | LotTask
+  | WebhookTask
+  | WriteTask
+  | AiTask;
 
 /** Erreur métier qui distingue « réessayable » de « définitivement cassé ». */
 export class ConnectorError extends Error {

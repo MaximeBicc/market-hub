@@ -90,3 +90,33 @@ export function coutQuotidien(plan: Releve[]): {
     .reduce((n, r) => n + Math.floor(86400 / r.intervalSec), 0);
   return { taches, operations: taches * 3 };
 }
+
+/**
+ * Découpe des tâches en lots transportables par un seul message.
+ *
+ * Cloudflare facture l'écriture, la lecture et la suppression de CHAQUE
+ * message : trois opérations, quel que soit son contenu. Grouper l'envoi ne
+ * change rien — c'est le contenu qu'il faut grouper.
+ *
+ * La taille n'est pas libre : les tâches d'un lot partagent le budget de
+ * sous-requêtes de l'invocation. Trop grand, le lot se fait interrompre et
+ * chaque report coûte à nouveau un message.
+ */
+export function decouperEnLots<T>(taches: T[], taille: number): T[][] {
+  if (taille < 1) throw new Error("La taille d'un lot vaut au moins un");
+  const lots: T[][] = [];
+  for (let i = 0; i < taches.length; i += taille) {
+    lots.push(taches.slice(i, i + taille));
+  }
+  return lots;
+}
+
+/**
+ * Ce que coûtent des tâches une fois groupées.
+ *
+ * La comparaison avec `coutQuotidien` — trois opérations par tâche — donne le
+ * facteur d'économie réel.
+ */
+export function coutGroupe(taches: number, taille: number): number {
+  return decouperEnLots(new Array(taches).fill(0), taille).length * 3;
+}

@@ -70,6 +70,8 @@ async function handleTask(
   switch (task.kind) {
     case "sync":
       return runSync(env, task, counter);
+    case "lot":
+      return runLot(env, task, counter);
     case "webhook":
       return runWebhook(env, task, counter);
     case "write":
@@ -77,6 +79,135 @@ async function handleTask(
     case "ai":
       return runAi(env, task, counter);
   }
+}
+
+/**
+ * Nombre maximal de reports d'un même lot.
+ *
+ * Sans borne, un lot dont la première tâche épuise systématiquement le budget
+ * se reporterait indéfiniment, à trois opérations le tour — l'inverse exact
+ * de l'économie recherchée. Au-delà, les tâches restantes sont abandonnées
+ * pour ce passage : l'ordonnanceur les rendra dues au prochain tick, ce qui
+ * est le comportement d'avant le regroupement.
+ */
+const MAX_REPORTS_LOT = 3;
+
+/**
+ * Seuil au-delà duquel on n'entame plus une tâche.
+ *
+ * Le budget est de quarante sous-requêtes, comptées deux par appel externe.
+ * En dessous de dix restantes, une tâche a toutes les chances de se faire
+ * couper en chemin — mieux vaut la reporter entière que la laisser mourir à
+ * mi-parcours et devoir tout recommencer.
+ */
+const SEUIL_TACHE = 30;
+
+/**
+ * PLUSIEURS TÂCHES, UN SEUL MESSAGE.
+ *
+ * Le gain tient dans la facturation : trois opérations pour le lot entier au
+ * lieu de trois par tâche. Tout le soin est dans ce qui suit — un lot ne doit
+ * ni perdre de tâches, ni rejouer celles qui ont abouti.
+ *
+ * D'où deux règles :
+ *
+ *   - une tâche qui échoue n'interrompt PAS le lot. Rejeter le message entier
+ *     ferait rejouer les tâches déjà faites à chaque tentative, et une seule
+ *     boutique en panne bloquerait les sept autres.
+ *
+ *   - ce qui n'a pas pu être fait est REPORTÉ dans un nouveau lot, pas perdu.
+ *     Un report coûte trois opérations — le prix d'un message — et reste
+ *     très inférieur au coût d'une tâche par message.
+ */
+async function runLot(
+  env: Env,
+  task: Extract<QueueTask, { kind: "lot" }>,
+  counter: { used: number },
+): Promise<void> {
+  const restantes = [...task.taches];
+
+  while (restantes.length > 0) {
+    if (counter.used >= SEUIL_TACHE) {
+      await reporterLot(env, restantes, task.reports);
+      return;
+    }
+
+    const tache = restantes.shift()!;
+    try {
+      await runSync(env, tache, counter);
+    } catch (err) {
+      /*
+       * Le budget épuisé n'est pas une erreur : c'est une pause. La tâche
+       * interrompue repart avec les suivantes, et l'invocation s'arrête là.
+       */
+      if (err instanceof SubrequestBudgetExceeded) {
+        await reporterLot(env, [tache, ...restantes], task.reports);
+        return;
+      }
+      await noterEchecTache(env, tache, err);
+    }
+  }
+}
+
+/**
+ * Renvoie dans la file ce qui n'a pas pu être fait.
+ *
+ * Un seul message pour tout le reste : c'est ce qui garde le report bon
+ * marché. Le délai laisse à l'invocation suivante un budget neuf.
+ */
+async function reporterLot(
+  env: Env,
+  restantes: SyncTask[],
+  reports: number,
+): Promise<void> {
+  if (restantes.length === 0) return;
+  if (reports >= MAX_REPORTS_LOT) {
+    await log(
+      env,
+      "warn",
+      "sync",
+      restantes[0]?.shopId ?? null,
+      `${restantes.length} relevé(s) abandonné(s) après ${reports} reports — repris au prochain passage`,
+    );
+    return;
+  }
+  await env.SYNC_QUEUE.send(
+    { kind: "lot", taches: restantes, reports: reports + 1 } satisfies QueueTask,
+    { delaySeconds: 5 },
+  );
+}
+
+/**
+ * Applique à UNE tâche d'un lot les conséquences de son échec.
+ *
+ * Reprend les décisions de `onTaskError`, à ceci près qu'il n'y a pas de
+ * message à rejeter : le lot continue. Une autorisation morte coupe la
+ * boutique, une panne passagère se recompte, et le reste du lot avance.
+ */
+async function noterEchecTache(
+  env: Env,
+  tache: SyncTask,
+  err: unknown,
+): Promise<void> {
+  const db = drizzle(env.DB);
+
+  if (err instanceof ConnectorError && err.kind === "auth_expired") {
+    await db
+      .update(shop)
+      .set({ status: "reauth_required" })
+      .where(eq(shop.id, tache.shopId));
+    await log(env, "error", "auth", tache.shopId, err.message);
+    return;
+  }
+
+  const message = err instanceof Error ? err.message : String(err);
+  await log(env, "error", "sync", tache.shopId, message);
+  /*
+   * Le compteur d'échecs porte l'espacement progressif : une boutique en
+   * panne se fait relever de moins en moins souvent, au lieu de consommer du
+   * quota toutes les deux minutes pour échouer à l'identique.
+   */
+  await bumpFailure(env, tache);
 }
 
 /** Le stub du Durable Object qui régule cette boutique. */

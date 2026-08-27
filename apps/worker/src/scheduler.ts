@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/d1";
 import { and, eq, inArray, lte, sql, isNotNull, isNull, lt } from "drizzle-orm";
-import type { QueueTask, SyncResource } from "@hub/core";
+import type { QueueTask, SyncResource, SyncTask} from "@hub/core";
+import { decouperEnLots } from "@hub/engine";
 import {
   aiCache,
   aiEvidence,
@@ -50,6 +51,21 @@ import { sendPushToUser } from "./lib/push.js";
  * deviennent dues en même temps.
  */
 const MAX_TASKS_PER_TICK = 20;
+
+/**
+ * COMBIEN DE TÂCHES DANS UN MESSAGE.
+ *
+ * Chaque message coûte trois opérations, quel que soit son contenu : huit
+ * tâches groupées reviennent donc à 0,375 opération l'unité au lieu de trois.
+ *
+ * Pourquoi huit et pas cinquante : les tâches d'un lot partagent le budget de
+ * sous-requêtes de l'invocation — quarante, dont deux par appel externe. Un
+ * lot trop gros se ferait interrompre en chemin, et chaque report coûte à
+ * nouveau trois opérations. Huit tient confortablement pour des relevés
+ * ordinaires, et le consommateur reporte proprement le reste quand une
+ * boutique se révèle gourmande.
+ */
+const TAILLE_LOT = 8;
 
 export async function handleScheduled(
   event: ScheduledController,
@@ -117,17 +133,28 @@ async function enqueueDueJobs(env: Env, force = false): Promise<void> {
 
   if (due.length === 0) return;
 
-  // sendBatch = UNE sous-requête pour jusqu'à 100 messages.
-  const messages = due.map((j) => ({
-    body: {
-      kind: "sync",
-      shopId: j.shopId,
-      resource: j.resource as SyncResource,
-      cursor: j.cursor,
-      depth: 0,
-    } satisfies QueueTask,
+  /*
+   * `sendBatch` groupe l'ENVOI, pas la facturation.
+   *
+   * C'est le contresens qui coûtait le plus cher : dix messages envoyés d'un
+   * coup restent dix écritures, dix lectures et dix suppressions. Trente
+   * opérations. Le seul regroupement qui compte est celui du CONTENU — un
+   * message qui porte dix tâches en coûte trois.
+   */
+  const taches: SyncTask[] = due.map((j) => ({
+    kind: "sync",
+    shopId: j.shopId,
+    resource: j.resource as SyncResource,
+    cursor: j.cursor,
+    depth: 0,
   }));
-  await env.SYNC_QUEUE.sendBatch(messages);
+
+  const lots: QueueTask[] = decouperEnLots(taches, TAILLE_LOT).map((t) => ({
+    kind: "lot",
+    taches: t,
+    reports: 0,
+  }));
+  await env.SYNC_QUEUE.sendBatch(lots.map((body) => ({ body })));
 
   // Replanification immédiate : si le traitement échoue, le consommateur
   // ramènera nextRunAt en arrière. On évite ainsi d'empiler deux fois la même

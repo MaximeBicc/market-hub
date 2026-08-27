@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { coutQuotidien, planReleves } from "./releves.js";
+import {
+  coutGroupe,
+  coutQuotidien,
+  decouperEnLots,
+  planReleves,
+} from "./releves.js";
 import { ShopifyAdapter } from "../adapters/shopify.js";
 import { EtsyAdapter } from "../adapters/etsy.js";
 import { EbayAdapter } from "../adapters/ebay.js";
@@ -139,5 +144,61 @@ describe("appels eBay par jour", () => {
       parJour(allege(100), 900) + parJour(1, 900) + complet(100);
     expect(total).toBe(875);
     expect(total).toBeLessThan(PLAFOND_EBAY / 4);
+  });
+});
+
+describe("regroupement des tâches", () => {
+  /**
+   * L'économie qui ne dépend d'aucune plateforme, et donc la seule qui agisse
+   * quand le quota est déjà épuisé.
+   */
+  it("découpe sans rien perdre ni dupliquer", () => {
+    const taches = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const lots = decouperEnLots(taches, 8);
+
+    expect(lots).toHaveLength(2);
+    expect(lots[0]).toHaveLength(8);
+    expect(lots[1]).toHaveLength(2);
+    // Rien ne se perd, rien ne se répète : c'est la seule chose qui compte.
+    expect(lots.flat()).toEqual(taches);
+  });
+
+  it("rend un lot vide plutôt qu'un lot de rien", () => {
+    expect(decouperEnLots([], 8)).toEqual([]);
+  });
+
+  it("refuse une taille absurde au lieu de boucler à l'infini", () => {
+    // Une taille nulle ferait tourner la découpe sans jamais avancer.
+    expect(() => decouperEnLots([1, 2], 0)).toThrow();
+  });
+
+  it("divise la facture par la taille du lot", () => {
+    // 193 tâches par boutique et par jour, une fois en temps réel.
+    const parBoutique = 193;
+    expect(coutGroupe(parBoutique, 1)).toBe(579); // l'état d'avant
+    expect(coutGroupe(parBoutique, 8)).toBe(75);
+    // Presque huit fois moins, sans toucher à la fraîcheur ni aux quotas des
+    // plateformes : c'est de la pure comptabilité Cloudflare.
+    expect(coutGroupe(parBoutique, 8) / coutGroupe(parBoutique, 1)).toBeLessThan(0.14);
+  });
+
+  it("fait tenir la flotte actuelle très en dessous du quota, sans temps réel", () => {
+    /*
+     * Le cas qui compte aujourd'hui : le quota est épuisé, et les webhooks
+     * Shopify ne sont pas encore activés. Le regroupement agit seul.
+     */
+    const tachesParBoutique = 1441; // relevé toutes les deux minutes
+    const flotte = tachesParBoutique * 3; // Shopify, eBay, Etsy
+
+    expect(coutGroupe(flotte, 1)).toBe(12_969); // au-dessus des 10 000
+    const groupe = coutGroupe(flotte, 8);
+    expect(groupe).toBe(1_623);
+    expect(groupe).toBeLessThan(10_000 / 5);
+  });
+
+  it("un report coûte un message, pas une tâche", () => {
+    // Sept tâches reportées repartent dans UN lot : trois opérations, pas
+    // vingt et une. C'est ce qui rend le report acceptable.
+    expect(coutGroupe(7, 8)).toBe(3);
   });
 });
