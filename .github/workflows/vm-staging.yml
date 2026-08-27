@@ -1,0 +1,58 @@
+name: VM Staging
+
+on:
+  push:
+    branches: [vm-staging]
+  workflow_dispatch:
+
+concurrency:
+  group: vm-staging
+  cancel-in-progress: true
+
+jobs:
+  deploy-vm-staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Le workspace vm-sync n'est pas encore dans le lockfile de production.
+      # En staging on régénère uniquement le lock local du runner ; aucun fichier
+      # n'est commité par ce workflow.
+      - name: Dépendances staging
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Vérification TypeScript Worker
+        run: pnpm exec tsc -p apps/worker/tsconfig.json --noEmit
+
+      - name: Migrations D1 staging
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.124.0"
+          command: d1 migrations apply market-hub-db-staging --remote --config wrangler.vm-staging.jsonc
+
+      - name: Seed mock staging
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.124.0"
+          command: d1 execute market-hub-db-staging --remote --config wrangler.vm-staging.jsonc --file apps/worker/staging/seed-vm-mock.sql
+
+      - name: Déployer le Worker staging
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.124.0"
+          command: deploy --config wrangler.vm-staging.jsonc
