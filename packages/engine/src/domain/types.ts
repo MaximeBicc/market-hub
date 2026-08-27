@@ -444,6 +444,20 @@ export interface RemoteListing {
   price: Money;
   stock: number;
   status: Listing["status"];
+  /**
+   * Vrai quand SEUL le stock est fiable dans cette ligne.
+   *
+   * Certaines plateformes rendent la quantité dans la liste, mais le prix et
+   * le statut un appel par article — chez eBay, quinze articles coûtent seize
+   * requêtes. Sur un relevé qui tourne toutes les deux minutes, c'est le
+   * plafond quotidien franchi avec cinq articles au catalogue.
+   *
+   * Le relevé de stock demande donc à ne pas payer ce qu'il ne regarde pas.
+   * Les champs non fiables portent alors des valeurs de remplissage, et
+   * l'appelant DOIT conserver ce qu'il a déjà : les écrire remettrait tous
+   * les prix à zéro.
+   */
+  stockSeul?: boolean | undefined;
   url?: string | undefined;
   imageUrl?: string | undefined;
 

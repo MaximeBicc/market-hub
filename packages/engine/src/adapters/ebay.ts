@@ -699,9 +699,27 @@ export class EbayAdapter implements MarketplaceAdapter {
    * supplémentaire pour son offre, et une invocation ne dispose que de
    * cinquante sous-requêtes.
    */
+  /**
+   * UN APPEL PAR ARTICLE, ET C'EST LE PLAFOND QUI SAUTE.
+   *
+   * La page d'articles d'inventaire rend déjà les QUANTITÉS. Le prix, le
+   * statut et l'identifiant d'annonce, eux, vivent sur l'offre — et eBay ne
+   * sait les rendre que SKU par SKU : quinze articles coûtent seize requêtes.
+   *
+   * Sur un relevé qui tourne toutes les deux minutes, cinq articles au
+   * catalogue suffisent à franchir le plafond quotidien que nous nous
+   * imposons — 6 × 720 + 720 = 5 040 appels contre 5 000 autorisés. Avec
+   * quinze articles, on en est à douze mille.
+   *
+   * `stockSeul` supprime donc les appels d'offre : UNE requête par page, quel
+   * que soit le nombre d'articles. Le prix et le statut restent lus une fois
+   * par jour, par le relevé de catalogue — ils ne bougent pas d'une heure à
+   * l'autre, et personne ne les change sans le savoir.
+   */
   async fetchListings(
     ctx: MarketplaceContext,
     cursor?: string,
+    options?: { stockSeul?: boolean },
   ): Promise<{ items: RemoteListing[]; cursor?: string | undefined }> {
     const offset = cursor ? Number(cursor) : 0;
     const limit = 15;
@@ -726,6 +744,24 @@ export class EbayAdapter implements MarketplaceAdapter {
       let status: RemoteListing["status"] = "draft";
       let offerId: string | undefined;
       let listingId: string | undefined;
+
+      if (options?.stockSeul) {
+        /*
+         * Prix et statut restent aux valeurs de remplissage : `stockSeul` dit
+         * à l'appelant de conserver ce qu'il a déjà. Les écrire remettrait
+         * tous les prix à zéro — c'est le seul vrai danger de ce chemin.
+         */
+        items.push({
+          remoteId: it.sku,
+          sku: it.sku,
+          title: it.product?.title ?? it.sku,
+          price,
+          stock,
+          status,
+          stockSeul: true,
+        });
+        continue;
+      }
 
       try {
         const offers = await this.call<{

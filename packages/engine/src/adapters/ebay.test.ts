@@ -856,3 +856,60 @@ describe("prix d'une déclinaison", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("relevé de stock allégé", () => {
+  /**
+   * Le point qui casse un plafond, pas seulement un quota.
+   *
+   * La page d'articles rend déjà les quantités ; le prix et le statut coûtent
+   * un appel PAR ARTICLE. Sur un relevé de deux minutes, cinq articles au
+   * catalogue suffisaient à franchir les 5 000 appels quotidiens qu'on
+   * s'impose — 6 × 720 + 720 = 5 040.
+   */
+  const pageInventaire = {
+    total: 2,
+    inventoryItems: [
+      {
+        sku: "A1",
+        product: { title: "Article un" },
+        availability: { shipToLocationAvailability: { quantity: 7 } },
+      },
+      {
+        sku: "A2",
+        product: { title: "Article deux" },
+        availability: { shipToLocationAvailability: { quantity: 0 } },
+      },
+    ],
+  };
+
+  it("ne fait plus qu'UN appel par page, quel que soit le nombre d'articles", async () => {
+    const { http, sent } = fakeHttp([{ body: pageInventaire }]);
+    const r = await adapter.fetchListings(ctxWith(http), undefined, {
+      stockSeul: true,
+    });
+
+    // Un seul appel : la page. Zéro appel d'offre.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toContain("inventory_item?limit=");
+    expect(sent.some((x) => x.url.includes("/offer?sku="))).toBe(false);
+
+    expect(r.items.map((i) => i.stock)).toEqual([7, 0]);
+    // Le drapeau qui interdit à l'appelant d'écrire prix et statut.
+    expect(r.items.every((i) => i.stockSeul)).toBe(true);
+  });
+
+  it("garde le relevé complet quand on ne demande rien", async () => {
+    const { http, sent } = fakeHttp([
+      { body: pageInventaire },
+      { body: { offers: [{ offerId: "o1", status: "PUBLISHED", pricingSummary: { price: { value: "12.50", currency: "EUR" } } }] } },
+      { body: { offers: [{ offerId: "o2", status: "PUBLISHED", pricingSummary: { price: { value: "9.90", currency: "EUR" } } }] } },
+    ]);
+    const r = await adapter.fetchListings(ctxWith(http));
+
+    // Trois appels pour deux articles : c'est le N+1, assumé une fois par
+    // jour parce que le prix et le statut n'existent que sur l'offre.
+    expect(sent).toHaveLength(3);
+    expect(r.items[0]?.price.amount).toBe(1250);
+    expect(r.items[0]?.stockSeul).toBeUndefined();
+  });
+});

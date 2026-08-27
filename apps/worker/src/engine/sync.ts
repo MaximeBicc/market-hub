@@ -1,9 +1,8 @@
 import { drizzle } from "drizzle-orm/d1";
 import { and, eq, sql } from "drizzle-orm";
 import type { SyncTask } from "@hub/core";
-import { reconcileStock,
-  planReleves,
-} from "@hub/engine";
+import { reconcileStock, planReleves } from "@hub/engine";
+import type { RemoteListing } from "@hub/engine";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { normaliserValeur } from "../lib/variantes.js";
 import {
@@ -204,7 +203,16 @@ async function syncCatalogue(
   }> = [];
 
   while (pages < MAX_PAGES_PER_RUN) {
-    const page = await adapter.fetchListings(ctx, cursor);
+    /*
+     * Le relevé d'inventaire ne regarde que les quantités : il n'a aucune
+     * raison de payer les appels dédiés au prix et au statut. Chez eBay, ce
+     * seul drapeau fait passer une page de seize requêtes à une.
+     *
+     * Le catalogue complet, lui, lit tout — une fois par jour.
+     */
+    const page = await adapter.fetchListings(ctx, cursor, {
+      stockSeul: task.resource === "inventory",
+    });
     pages++;
 
     const existing = await db
@@ -216,6 +224,11 @@ async function syncCatalogue(
         groupId: listing.groupId,
         quantity: listing.quantity,
         marketplaceData: listing.marketplaceData,
+        // Relus pour être PRÉSERVÉS quand le relevé ne les a pas lus.
+        priceAmount: listing.priceAmount,
+        priceCurrency: listing.priceCurrency,
+        status: listing.status,
+        title: listing.title,
       })
       .from(listing)
       .where(eq(listing.shopId, task.shopId));
@@ -224,13 +237,34 @@ async function syncCatalogue(
     const writes = [];
 
     for (const item of page.items) {
-      const hash = await contentHash({
-        p: item.price.amount,
-        q: item.stock,
-        s: item.status,
-        t: item.title,
-      });
       const prev = known.get(item.remoteId);
+
+      /*
+       * CE QU'ON N'A PAS LU, ON NE L'ÉCRIT PAS.
+       *
+       * En relevé de stock, le module ne rend que les quantités : prix,
+       * statut et titre portent des valeurs de remplissage. Les écrire
+       * remettrait TOUS LES PRIX À ZÉRO, silencieusement, à chaque passage.
+       *
+       * L'empreinte porte sur ce qu'on s'apprête à écrire, pas sur ce qu'on a
+       * reçu. Sinon un relevé de stock ferait basculer l'empreinte à chaque
+       * fois — les valeurs de remplissage différant des vraies — et
+       * réécrirait la ligne entière à chaque passage, pour rien.
+       */
+      const garder = Boolean(item.stockSeul && prev);
+      const prix = garder ? prev!.priceAmount : item.price.amount;
+      const devise = garder ? prev!.priceCurrency : item.price.currency;
+      const statut = garder
+        ? (prev!.status as RemoteListing["status"])
+        : item.status;
+      const titre = garder ? prev!.title : item.title;
+
+      const hash = await contentHash({
+        p: prix,
+        q: item.stock,
+        s: statut,
+        t: titre,
+      });
 
       /*
        * ══ DU PLAT AU GROUPÉ ══
@@ -292,8 +326,10 @@ async function syncCatalogue(
           sku: item.sku ?? `auto:${cleGroupe.slice(-40)}`,
           title: item.groupTitle ?? item.title,
           description: null,
-          priceAmount: item.price.amount,
-          priceCurrency: item.price.currency,
+          // Les mêmes valeurs préservées : un relevé de stock ne connaît pas
+          // le prix, et l'écrire ici mettrait le produit maître à zéro.
+          priceAmount: prix,
+          priceCurrency: devise,
           stock: 0,
           images: JSON.stringify(item.imageUrl ? [item.imageUrl] : []),
           tags: "[]",
@@ -394,8 +430,8 @@ async function syncCatalogue(
             optionValues: JSON.stringify(
               (item.optionValues ?? []).map((o) => o.value),
             ),
-            priceAmount: item.price.amount,
-            priceCurrency: item.price.currency,
+            priceAmount: prix,
+            priceCurrency: devise,
             imageUrl: item.imageUrl ?? null,
             position: 0,
             status: "active",
@@ -405,7 +441,7 @@ async function syncCatalogue(
           })
           .onConflictDoUpdate({
             target: [variant.productId, variant.optionKey],
-            set: { sku: item.sku, priceAmount: item.price.amount, updatedAt: now },
+            set: { sku: item.sku, priceAmount: prix, updatedAt: now },
           });
 
         // Variante inconnue : sa valeur distante initialise le stock central.
@@ -506,11 +542,11 @@ async function syncCatalogue(
             optionValues: JSON.stringify(item.optionValues ?? []),
             externalId: item.remoteId,
             sku: item.sku,
-            title: item.title,
-            priceAmount: item.price.amount,
-            priceCurrency: item.price.currency,
+            title: titre,
+            priceAmount: prix,
+            priceCurrency: devise,
             quantity: item.stock,
-            status: item.status,
+            status: statut,
             url: item.url ?? null,
             imageUrl: item.imageUrl ?? null,
             marketplaceData: JSON.stringify({
@@ -530,11 +566,15 @@ async function syncCatalogue(
               groupId,
               optionValues: JSON.stringify(item.optionValues ?? []),
               sku: item.sku,
-              title: item.title,
-              priceAmount: item.price.amount,
-              priceCurrency: item.price.currency,
+              // Les mêmes valeurs qu'à l'insertion : c'est la branche qui
+              // s'exécute en pratique, l'annonce existant presque toujours.
+              // L'oublier ici aurait remis les prix à zéro à chaque relevé,
+              // en laissant croire le contraire à la lecture de l'insertion.
+              title: titre,
+              priceAmount: prix,
+              priceCurrency: devise,
               quantity: item.stock,
-              status: item.status,
+              status: statut,
               imageUrl: item.imageUrl ?? null,
               marketplaceData: JSON.stringify({
                 ...(item.marketplaceData ?? {}),

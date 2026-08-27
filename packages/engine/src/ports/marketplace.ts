@@ -168,9 +168,16 @@ export interface MarketplaceAdapter {
    * presque toujours déjà des produits, et c'est précisément leur stock qu'on
    * veut surveiller.
    */
+  /**
+   * @param options `stockSeul` autorise le module à ne rendre QUE les
+   * quantités, en économisant les appels dédiés au prix et au statut. Le
+   * module reste libre de tout rendre : le drapeau est une permission, pas
+   * un ordre, et un module qui l'ignore reste correct.
+   */
   fetchListings?(
     ctx: MarketplaceContext,
     cursor?: string,
+    options?: { stockSeul?: boolean },
   ): Promise<{ items: RemoteListing[]; cursor?: string | undefined }>;
 
   /** Relevé des ventes, pour les plateformes sans webhook fiable. */
