@@ -14,6 +14,7 @@ import type {
 } from "../domain/types.js";
 import {
   importerClePublique,
+  jetonVerificationValide,
   lireEnTeteSignature,
   verifierSignatureEbay,
 } from "./ebay-notifications.js";
@@ -79,6 +80,17 @@ export const EBAY_SCOPES = [
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+  /*
+   * Créer un abonnement aux notifications exige SA PROPRE portée, en plus de
+   * celles du sujet. Un jeton applicatif ne suffit pas : `ORDER_CONFIRMATION`
+   * est un sujet à portée UTILISATEUR, donc un abonnement par vendeur, créé
+   * avec le jeton de ce vendeur.
+   *
+   * CONSÉQUENCE : une boutique eBay connectée AVANT cette ligne n'a pas cette
+   * portée. Il faudra la reconnecter avant de pouvoir l'abonner — et le dire,
+   * parce que rien d'autre ne l'expliquerait.
+   */
+  "https://api.ebay.com/oauth/api_scope/commerce.notification.subscription",
 ].join(" ");
 
 function basic(clientId: string, clientSecret: string): string {
@@ -566,6 +578,194 @@ const GENRE_PAR_SUJET: Record<string, "paid" | "cancelled" | "returned"> = {
   ORDER_RETURN_ACTIVITY: "returned",
 };
 
+/** Ce que la mise en place des notifications a produit. */
+export interface RapportNotificationsEbay {
+  /** L'adresse enregistrée chez eBay. */
+  destination: string;
+  /** Sujets nouvellement abonnés. */
+  crees: string[];
+  /** Sujets déjà abonnés — un second passage se contente de le constater. */
+  dejaLa: string[];
+  echecs: Array<{ topic: string; message: string }>;
+}
+
+/**
+ * Les sujets qu'on demande à eBay de pousser.
+ *
+ * Seuls ceux qu'on sait traduire : demander un sujet qu'on ignore ferait
+ * arriver des notifications qu'on jetterait, en consommant du quota pour rien.
+ */
+const SUJETS_VOULUS = [
+  "ORDER_CONFIRMATION",
+  "ORDER_CANCELLATION_ACTIVITY",
+] as const;
+
+/**
+ * ABONNE UN COMPTE EBAY AUX NOTIFICATIONS DE VENTE.
+ *
+ * eBay demande trois choses, dans cet ordre, et refuse sèchement si l'ordre
+ * n'est pas respecté :
+ *
+ *   1. une CONFIGURATION D'ALERTE — une adresse de courriel où eBay prévient
+ *      quand la livraison échoue. Sans elle, l'enregistrement de la
+ *      destination échoue avec un code qui ne dit pas laquelle des trois
+ *      manque ;
+ *
+ *   2. une DESTINATION — notre adresse de rappel. eBay la vérifie
+ *      immédiatement, en GET, par un défi qu'il faut savoir résoudre. Notre
+ *      route le fait déjà ;
+ *
+ *   3. un ABONNEMENT par sujet, avec le jeton du VENDEUR — `ORDER_CONFIRMATION`
+ *      est à portée utilisateur, pas applicative.
+ *
+ * Idempotent : une destination existante est réutilisée, un abonnement
+ * existant est constaté plutôt que dupliqué.
+ */
+export async function ebayEnsureNotifications(
+  adapter: EbayAdapter,
+  ctx: MarketplaceContext,
+  endpoint: string,
+  verificationToken: string,
+  emailAlerte: string,
+): Promise<RapportNotificationsEbay> {
+  if (!/^https:\/\//i.test(endpoint)) {
+    throw new Error("eBay : l'adresse de rappel doit être en HTTPS");
+  }
+  if (!jetonVerificationValide(verificationToken)) {
+    throw new Error(
+      "eBay : le jeton de vérification doit faire 32 à 80 caractères parmi [A-Za-z0-9_-]. eBay refuse la destination sans dire que c'est la longueur.",
+    );
+  }
+
+  const crees: string[] = [];
+  const dejaLa: string[] = [];
+  const echecs: Array<{ topic: string; message: string }> = [];
+
+  /*
+   * 1. La configuration d'alerte, d'abord.
+   *
+   * Elle est globale à l'application, pas au vendeur. La reposer à chaque fois
+   * ne coûte rien et évite de mémoriser un état de plus.
+   */
+  try {
+    await adapter.appelNotification(ctx, "/config", {
+      method: "PUT",
+      body: JSON.stringify({ alertEmail: emailAlerte }),
+    });
+  } catch (err) {
+    echecs.push({
+      topic: "config",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  /*
+   * 2. La destination. On relit d'abord : eBay accepterait d'en créer une
+   * seconde sur la même adresse, et les notifications arriveraient en double.
+   */
+  let destinationId: string | undefined;
+  try {
+    const liste = await adapter.appelNotification<{
+      destinations?: Array<{
+        destinationId?: string;
+        endpoint?: string;
+        deliveryConfig?: { endpoint?: string };
+      }>;
+    }>(ctx, "/destination?limit=100");
+    destinationId = (liste.destinations ?? []).find(
+      (d) => (d.deliveryConfig?.endpoint ?? d.endpoint) === endpoint,
+    )?.destinationId;
+  } catch {
+    // Pas de liste : on tentera la création, qui dira si elle existe déjà.
+  }
+
+  if (!destinationId) {
+    const creee = await adapter.appelNotification<{ destinationId?: string }>(
+      ctx,
+      "/destination",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: "MarketHub",
+          status: "ENABLED",
+          deliveryConfig: { endpoint, verificationToken },
+        }),
+      },
+    );
+    destinationId = creee.destinationId;
+  }
+
+  if (!destinationId) {
+    throw new Error(
+      "eBay : destination non enregistrée. Vérifiez que l'adresse de rappel répond au défi et qu'elle est identique caractère pour caractère.",
+    );
+  }
+
+  /*
+   * 3. Les abonnements. La version de schéma se LIT, elle ne se devine pas :
+   * une valeur inventée fait échouer la création sans dire laquelle attendre.
+   */
+  const versions = new Map<string, string>();
+  try {
+    const topics = await adapter.appelNotification<{
+      topics?: Array<{
+        topicId?: string;
+        supportedPayloads?: Array<{ schemaVersion?: string }>;
+      }>;
+    }>(ctx, "/topic?limit=100");
+    for (const t of topics.topics ?? []) {
+      const v = t.supportedPayloads?.[0]?.schemaVersion;
+      if (t.topicId && v) versions.set(t.topicId, v);
+    }
+  } catch {
+    // Sans le catalogue, on tentera la valeur usuelle et l'échec le dira.
+  }
+
+  const existants = new Set<string>();
+  try {
+    const abos = await adapter.appelNotification<{
+      subscriptions?: Array<{ topicId?: string; destinationId?: string }>;
+    }>(ctx, "/subscription?limit=100");
+    for (const a of abos.subscriptions ?? []) {
+      if (a.topicId && a.destinationId === destinationId) {
+        existants.add(a.topicId);
+      }
+    }
+  } catch {
+    // Idem : on tentera, et un doublon sera signalé par eBay.
+  }
+
+  for (const topicId of SUJETS_VOULUS) {
+    if (existants.has(topicId)) {
+      dejaLa.push(topicId);
+      continue;
+    }
+    try {
+      await adapter.appelNotification(ctx, "/subscription", {
+        method: "POST",
+        body: JSON.stringify({
+          destinationId,
+          topicId,
+          status: "ENABLED",
+          payload: {
+            deliveryProtocol: "HTTPS",
+            format: "JSON",
+            schemaVersion: versions.get(topicId) ?? "1.0",
+          },
+        }),
+      });
+      crees.push(topicId);
+    } catch (err) {
+      echecs.push({
+        topic: topicId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return { destination: endpoint, crees, dejaLa, echecs };
+}
+
 export class EbayAdapter implements MarketplaceAdapter {
   readonly id = "ebay";
 
@@ -677,6 +877,25 @@ export class EbayAdapter implements MarketplaceAdapter {
       accessTokenExpiresAt: String(now + j.expires_in),
     });
     return j.access_token;
+  }
+
+  /**
+   * Un appel à l'API des notifications, avec le jeton du VENDEUR.
+   *
+   * Public à dessein : la mise en place des abonnements vit hors de la classe
+   * — c'est une séquence de configuration, pas une commande de l'orchestrateur
+   * — mais elle a besoin du même transport, du même jeton et de la même
+   * lecture d'erreur. L'exposer vaut mieux que de recopier tout ça.
+   *
+   * À ne pas confondre avec la récupération de la clé publique, qui utilise un
+   * jeton APPLICATIF : la clé est celle d'eBay, elle ne dépend d'aucun vendeur.
+   */
+  async appelNotification<T>(
+    ctx: MarketplaceContext,
+    chemin: string,
+    init: RequestInit = {},
+  ): Promise<T> {
+    return this.call<T>(ctx, `/commerce/notification/v1${chemin}`, init);
   }
 
   private async call<T>(

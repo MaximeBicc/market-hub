@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EbayAdapter } from "./ebay.js";
+import { EbayAdapter, ebayEnsureNotifications } from "./ebay.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 
 /**
@@ -354,5 +354,133 @@ describe("la capacité dit la vérité", () => {
     expect(
       adapter.capabilities(ctx({ notificationsActives: "1" })).inboundSales,
     ).toBe("both");
+  });
+});
+
+describe("mise en place des abonnements", () => {
+  /**
+   * Trois pièces doivent exister avant qu'eBay pousse quoi que ce soit, et
+   * l'ORDRE compte : sans configuration d'alerte, l'enregistrement de la
+   * destination échoue avec un code qui ne dit pas laquelle des trois manque.
+   */
+  function fetchAbonnement(reponses: Record<string, unknown>) {
+    const appels: Array<{ url: string; methode: string; corps: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        appels.push({
+          url: u,
+          methode: init?.method ?? "GET",
+          corps: init?.body ? JSON.parse(String(init.body)) : null,
+        });
+        const cle = Object.keys(reponses).find((k) => u.includes(k));
+        return new Response(JSON.stringify(cle ? reponses[cle] : {}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    return appels;
+  }
+
+  const c = () => ({ ...ctx(), http: undefined }) as MarketplaceContext;
+
+  it("refuse une adresse qui n'est pas en HTTPS", async () => {
+    await expect(
+      ebayEnsureNotifications(adapter, c(), "http://h/x", "a".repeat(32), "a@b.c"),
+    ).rejects.toThrow(/HTTPS/);
+  });
+
+  it("refuse un jeton de vérification trop court, avant tout appel", async () => {
+    const appels = fetchAbonnement({});
+    await expect(
+      ebayEnsureNotifications(adapter, c(), "https://h/x", "court", "a@b.c"),
+    ).rejects.toThrow(/32 à 80/);
+    // Rien n'est parti : inutile de déranger eBay pour un refus certain.
+    expect(appels).toHaveLength(0);
+  });
+
+  it("pose l'alerte, la destination, puis les abonnements — dans cet ordre", async () => {
+    const appels = fetchAbonnement({
+      "/destination?": { destinations: [] },
+      "/topic?": {
+        topics: [
+          { topicId: "ORDER_CONFIRMATION", supportedPayloads: [{ schemaVersion: "1.0" }] },
+        ],
+      },
+      "/subscription?": { subscriptions: [] },
+      "/destination": { destinationId: "dest-1" },
+    });
+
+    const r = await ebayEnsureNotifications(
+      adapter,
+      c(),
+      "https://h/api/webhooks/ebay",
+      "a".repeat(32),
+      "a@b.c",
+    );
+
+    const chemins = appels.map((a) => `${a.methode} ${a.url.split("/v1")[1]}`);
+    expect(chemins[0]).toBe("PUT /config");
+    expect(chemins.some((x) => x.startsWith("POST /destination"))).toBe(true);
+    expect(r.crees).toContain("ORDER_CONFIRMATION");
+  });
+
+  it("réutilise une destination existante plutôt que d'en créer une seconde", async () => {
+    const appels = fetchAbonnement({
+      "/destination?": {
+        destinations: [
+          {
+            destinationId: "dest-existante",
+            deliveryConfig: { endpoint: "https://h/api/webhooks/ebay" },
+          },
+        ],
+      },
+      "/topic?": { topics: [] },
+      "/subscription?": { subscriptions: [] },
+    });
+
+    await ebayEnsureNotifications(
+      adapter,
+      c(),
+      "https://h/api/webhooks/ebay",
+      "a".repeat(32),
+      "a@b.c",
+    );
+
+    // En créer une seconde ferait arriver chaque notification en double.
+    expect(
+      appels.filter((a) => a.methode === "POST" && a.url.includes("/destination")),
+    ).toHaveLength(0);
+  });
+
+  it("constate un abonnement déjà là au lieu de le dupliquer", async () => {
+    fetchAbonnement({
+      "/destination?": {
+        destinations: [
+          {
+            destinationId: "dest-1",
+            deliveryConfig: { endpoint: "https://h/api/webhooks/ebay" },
+          },
+        ],
+      },
+      "/topic?": { topics: [] },
+      "/subscription?": {
+        subscriptions: [
+          { topicId: "ORDER_CONFIRMATION", destinationId: "dest-1" },
+        ],
+      },
+    });
+
+    const r = await ebayEnsureNotifications(
+      adapter,
+      c(),
+      "https://h/api/webhooks/ebay",
+      "a".repeat(32),
+      "a@b.c",
+    );
+    expect(r.dejaLa).toContain("ORDER_CONFIRMATION");
+    expect(r.crees).not.toContain("ORDER_CONFIRMATION");
   });
 });

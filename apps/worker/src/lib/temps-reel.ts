@@ -1,6 +1,11 @@
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { shopifyEnsureWebhooks, type ShopifyAdapter } from "@hub/engine";
+import {
+  ebayEnsureNotifications,
+  shopifyEnsureWebhooks,
+  type EbayAdapter,
+  type ShopifyAdapter,
+} from "@hub/engine";
 import { shop } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { buildEngine } from "../engine/module.js";
@@ -43,6 +48,7 @@ export async function activerTempsReel(
   const repos = d1Repositories(env.DB, env.MASTER_KEY);
   const account = await repos.accounts.get(accountId);
   if (!account) throw new Error("Boutique inconnue");
+  if (account.marketplace === "ebay") return activerNotificationsEbay(env, accountId);
   if (account.marketplace !== "shopify") {
     throw new Error(
       `${account.marketplace} n'expose pas d'abonnement aux webhooks par l'API.`,
@@ -131,4 +137,69 @@ export async function rattraperTempsReel(env: Env): Promise<{
   }
 
   return { examines: boutiques.length, actives, echecs };
+}
+
+/**
+ * Abonne un compte eBay aux notifications de vente.
+ *
+ * Trois pièces doivent exister avant qu'eBay pousse quoi que ce soit : une
+ * adresse d'alerte, une destination vérifiée, et un abonnement par sujet. La
+ * séquence vit dans l'adaptateur ; ici on lui fournit le décor et on note le
+ * résultat.
+ */
+async function activerNotificationsEbay(
+  env: Env,
+  accountId: string,
+): Promise<RapportTempsReel> {
+  const repos = d1Repositories(env.DB, env.MASTER_KEY);
+  const account = await repos.accounts.get(accountId);
+  if (!account) throw new Error("Boutique inconnue");
+
+  const jeton = env.EBAY_VERIFICATION_TOKEN ?? "";
+  if (!jeton) {
+    throw new Error(
+      "EBAY_VERIFICATION_TOKEN manquant. C'est lui qui prouve à eBay que l'adresse de rappel est bien la nôtre.",
+    );
+  }
+
+  const mod = buildEngine(env);
+  const adaptateur = mod.registry.get("ebay") as EbayAdapter;
+  /*
+   * L'adresse doit être IDENTIQUE, caractère pour caractère, à celle que la
+   * route de défi utilise pour son calcul. Un écart — une barre oblique de
+   * plus — et eBay refuse l'enregistrement sans dire pourquoi.
+   */
+  const rappel = `${env.APP_URL.replace(/\/+$/, "")}/api/webhooks/ebay`;
+
+  const credentials = { ...(await repos.credentials.get(accountId)) };
+  const rapport = await ebayEnsureNotifications(
+    adaptateur,
+    {
+      account,
+      credentials,
+      http: mod.httpFor(account),
+      saveCredentials: async (patch) => {
+        Object.assign(credentials, patch);
+        await repos.credentials.put(accountId, credentials);
+      },
+    },
+    rappel,
+    jeton,
+    // eBay exige une adresse où prévenir quand la livraison échoue. La nôtre
+    // sert aussi de trace : sans alerte, un abonnement mort passe inaperçu.
+    "support@variety.boutique",
+  );
+
+  const poses = rapport.crees.length + rapport.dejaLa.length;
+  if (poses > 0) {
+    const frais = await repos.credentials.get(accountId);
+    await repos.credentials.put(accountId, {
+      ...frais,
+      notificationsActives: "1",
+    });
+    // La capacité bascule en « poussée » : le relevé devient un filet.
+    await ensureSyncJobs(env, accountId);
+  }
+
+  return { ...rapport, rappel };
 }

@@ -1340,7 +1340,15 @@ accounts.post("/:id/temps-reel", async (c) => {
   const account = await repos.accounts.get(id);
   if (!account) return c.json({ error: "Boutique inconnue" }, 404);
 
-  if (account.marketplace !== "shopify") {
+  /*
+   * Shopify et eBay savent s'abonner par l'API ; Etsy non.
+   *
+   * Ce n'est pas une lacune de l'outil : Etsy ne publie AUCUNE API de gestion
+   * des webhooks. Son abonnement se crée à la main dans son portail, et seul
+   * le secret revient ici. Le dire vaut mieux que de laisser chercher un
+   * bouton qui ne peut pas exister.
+   */
+  if (account.marketplace !== "shopify" && account.marketplace !== "ebay") {
     return c.json(
       {
         error:
@@ -1370,8 +1378,10 @@ accounts.post("/:id/temps-reel", async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     return c.json(
       {
-        error: /access denied|scope/i.test(message)
-          ? "Shopify refuse : l'application n'a pas la portée « write_webhooks ». Ajoutez-la dans le Dev Dashboard, réinstallez l'app, puis réessayez."
+        error: /access denied|scope|insufficient/i.test(message)
+          ? account.marketplace === "ebay"
+            ? "eBay refuse : le jeton n'a pas la portée « commerce.notification.subscription ». Elle vient d'être ajoutée aux portées demandées — reconnectez la boutique eBay, puis réessayez."
+            : "Shopify refuse : l'application n'a pas la portée « write_webhooks ». Ajoutez-la dans le Dev Dashboard, réinstallez l'app, puis réessayez."
           : message,
       },
       400,
