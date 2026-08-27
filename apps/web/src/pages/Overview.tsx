@@ -5,6 +5,18 @@ import { Icon } from "../components/Icon.js";
 import { toast } from "../components/Toast.js";
 
 /**
+ * Les plateformes d'APPROVISIONNEMENT.
+ *
+ * Alibaba est reliée par le même mécanisme qu'une place de marché — mêmes
+ * jetons, mêmes tâches de relevé — mais rien n'y est vendu. La compter parmi
+ * les « boutiques actives » gonflait un chiffre censé répondre à « combien de
+ * canaux de vente tournent ? ». Elle est donc séparée partout où l'interface
+ * répond à cette question-là.
+ */
+const FOURNISSEURS = new Set(["alibaba"]);
+const estFournisseur = (plateforme: string) => FOURNISSEURS.has(plateforme);
+
+/**
  * Accueil.
  *
  * L'état de santé de la synchronisation est affiché ICI, pas caché dans les
@@ -17,11 +29,24 @@ export function Overview() {
   const { data, isLoading } = useQuery({
     queryKey: ["overview"],
     queryFn: () => api.get<O>("/overview"),
+    /*
+     * L'ACCUEIL SE RAFRAÎCHIT SEUL.
+     *
+     * Le bandeau de retard s'efface au premier relevé réussi — mais la page
+     * ne le savait qu'au rechargement suivant. Après un incident réparé, on
+     * restait donc devant une alerte périmée, sans moyen de distinguer « c'est
+     * toujours cassé » de « l'écran date d'il y a une heure ». Le cron
+     * d'empilement tourne à la minute : relire à ce rythme suffit à ce que
+     * l'alerte s'éteigne d'elle-même, à la minute près.
+     */
+    refetchInterval: 60_000,
   });
 
   if (isLoading || !data) return <div className="boot">Chargement…</div>;
 
   const noShops = data.shops.length === 0;
+  const boutiques = data.shops.filter((s) => !estFournisseur(s.platform));
+  const fournisseurs = data.shops.filter((s) => estFournisseur(s.platform));
   /*
    * QUAND UNE TÂCHE EST-ELLE VRAIMENT EN RETARD ?
    *
@@ -36,15 +61,45 @@ export function Overview() {
    * suit un échec passager, sans masquer une panne installée.
    */
   const maintenant = Date.now() / 1000;
-  const nomBoutique = (id: string) =>
-    data.shops.find((s) => s.id === id)?.name ?? id;
+  const compte = (id: string) => data.shops.find((s) => s.id === id);
+  const nomBoutique = (id: string) => compte(id)?.name ?? id;
 
-  const stale = data.health.filter((h) => {
-    if (h.failureCount > 0) return true;
-    if (h.lastOkAt === null) return false;
-    const tolerance = Math.max(h.intervalSec * 3, 900);
-    return maintenant - h.lastOkAt > tolerance;
-  });
+  const stale = data.health
+    .filter((h) => {
+      if (h.failureCount > 0) return true;
+      if (h.lastOkAt === null) return false;
+      const tolerance = Math.max(h.intervalSec * 3, 900);
+      return maintenant - h.lastOkAt > tolerance;
+    })
+    // Les canaux de vente d'abord : une commande manquée coûte plus cher
+    // qu'un catalogue fournisseur en retard.
+    .sort(
+      (a, b) =>
+        Number(estFournisseur(compte(a.shopId)?.platform ?? "")) -
+        Number(estFournisseur(compte(b.shopId)?.platform ?? "")),
+    );
+
+  /**
+   * Quand la tâche repartira — dite en clair.
+   *
+   * Deux cas se ressemblent à l'écran et n'ont rien à voir : une échéance
+   * dépassée parce que le cron va la prendre au prochain tour (tout va bien,
+   * il faut juste attendre une minute), et une échéance dépassée parce que la
+   * boutique n'est plus « active » — l'ordonnanceur la filtre alors, et
+   * l'attente serait infinie. Les annoncer pareil serait mentir.
+   */
+  function prochaineTentative(h: O["health"][number]): string {
+    if (compte(h.shopId)?.status !== "active") {
+      return "relevé suspendu jusqu'à la reconnexion";
+    }
+    const dans = h.nextRunAt - maintenant;
+    if (dans <= 60) return "nouvelle tentative imminente";
+    if (dans < 3600) return `nouvelle tentative dans ${Math.round(dans / 60)} min`;
+    const heures = Math.floor(dans / 3600);
+    // Tronqué, pas arrondi : arrondir 59 min 40 donnerait « 1 h 60 ».
+    const minutes = Math.floor((dans % 3600) / 60);
+    return `nouvelle tentative dans ${heures} h${minutes > 0 ? ` ${minutes}` : ""}`;
+  }
 
   async function sync(shopId: string, name: string) {
     await api.post(`/sync/${shopId}`);
@@ -96,8 +151,8 @@ export function Overview() {
             />
             <Stat
               label="Boutiques actives"
-              value={String(data.shops.filter((s) => s.status === "active").length)}
-              sub={`sur ${data.shops.length}`}
+              value={String(boutiques.filter((s) => s.status === "active").length)}
+              sub={`sur ${boutiques.length}`}
             />
             <Stat
               label="Stock bas"
@@ -128,40 +183,95 @@ export function Overview() {
                 <span className="banner__b" key={h.shopId + h.resource}>
                   {/* Le nom de la boutique, pas seulement la ressource : avec
                       trois boutiques, « listings » seul ne dit pas laquelle. */}
+                  {estFournisseur(compte(h.shopId)?.platform ?? "") && (
+                    <span className="pill pill--info banner__tag">Fournisseur</span>
+                  )}
                   {nomBoutique(h.shopId)} · {h.resource} —{" "}
                   {h.lastOkAt ? `dernier succès ${when(h.lastOkAt)}` : "jamais synchronisé"}
                   {h.lastError ? ` · ${h.lastError}` : ""}
+                  <b className="banner__next">{prochaineTentative(h)}</b>
                 </span>
               ))}
+              {/* Sans cette phrase, l'alerte se lit comme une chose à réparer
+                  alors qu'elle se répare seule : le compteur d'échecs retombe
+                  à zéro au premier relevé réussi, et le bandeau disparaît. */}
+              <span className="banner__note">
+                Ce bandeau s'efface tout seul au premier relevé réussi — la page
+                se relit chaque minute, rien à recharger.
+              </span>
             </div>
           )}
 
-          <h2 className="sec">
-            Boutiques <span>{data.shops.length}</span>
-          </h2>
-          <div className="rows">
-            {data.shops.map((s) => (
-              <div className="row" key={s.id}>
-                <span className="mono-badge">
-                  {s.name.slice(0, 2).toUpperCase()}
-                </span>
-                <div className="row__main">
-                  <div className="row__t">{s.name}</div>
-                  <div className="row__s">{s.platform}</div>
-                </div>
-                <button
-                  className="btn btn--small"
-                  onClick={() => void sync(s.id, s.name)}
-                >
-                  <Icon name="refresh" />
-                  Sync
-                </button>
+          {boutiques.length > 0 && (
+            <>
+              <h2 className="sec">
+                Boutiques <span>{boutiques.length}</span>
+              </h2>
+              <div className="rows">
+                {boutiques.map((s) => (
+                  <Compte key={s.id} shop={s} onSync={sync} />
+                ))}
               </div>
-            ))}
-          </div>
+            </>
+          )}
+
+          {fournisseurs.length > 0 && (
+            <>
+              <h2 className="sec">
+                Fournisseurs <span>{fournisseurs.length}</span>
+              </h2>
+              <div className="rows">
+                {fournisseurs.map((s) => (
+                  <Compte key={s.id} shop={s} onSync={sync} fournisseur />
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </>
+  );
+}
+
+/**
+ * Une ligne de compte relié.
+ *
+ * Le liseré et le badge turquoise disent la seule chose qui compte au premier
+ * coup d'œil : d'où vient l'argent, et d'où vient la marchandise.
+ */
+function Compte({
+  shop,
+  onSync,
+  fournisseur,
+}: {
+  shop: O["shops"][number];
+  onSync: (id: string, name: string) => Promise<void>;
+  fournisseur?: boolean;
+}) {
+  return (
+    <div className={fournisseur ? "row row--fournisseur" : "row"}>
+      <span
+        className={
+          fournisseur ? "mono-badge mono-badge--fournisseur" : "mono-badge"
+        }
+      >
+        {shop.name.slice(0, 2).toUpperCase()}
+      </span>
+      <div className="row__main">
+        <div className="row__t">{shop.name}</div>
+        <div className="row__s">
+          {shop.platform}
+          {fournisseur ? " · approvisionnement, pas un canal de vente" : ""}
+        </div>
+      </div>
+      <button
+        className="btn btn--small"
+        onClick={() => void onSync(shop.id, shop.name)}
+      >
+        <Icon name="refresh" />
+        Sync
+      </button>
+    </div>
   );
 }
 

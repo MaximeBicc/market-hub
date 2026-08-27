@@ -64,6 +64,8 @@ export interface Overview {
     lastError: string | null;
     /** Rythme prévu de cette tâche. Un retard ne se juge que contre lui. */
     intervalSec: number;
+    /** Date de la prochaine tentative, repli exponentiel déjà appliqué. */
+    nextRunAt: number;
   }>;
   needsAttention: Array<{ id: string; name: string; status: string }>;
 }

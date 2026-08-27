@@ -22,6 +22,7 @@ import { evaluateAlerts } from "./lib/alerts.js";
 import { runEngineSync } from "./engine/sync.js";
 import { buildEngine } from "./engine/module.js";
 import type { CanonicalOrderEvent } from "@hub/engine";
+import { appliquerDisponibilite } from "./lib/disponibilite.js";
 import type { RateLimiter } from "./do/rate-limiter.js";
 
 /**
@@ -284,8 +285,25 @@ async function runWebhook(
 ): Promise<void> {
   const events = JSON.parse(task.payload) as CanonicalOrderEvent[];
   const mod = buildEngine(env);
+
+  /*
+   * LA VENTE QUI VIDE UN ARTICLE DOIT LE RETIRER DE LA VENTE.
+   *
+   * `ingest` décrémente le stock et propage la nouvelle valeur aux autres
+   * boutiques, mais une quantité à zéro laisse l'annonce en ligne : chez
+   * Shopify elle affiche « épuisé », chez eBay et Etsy elle se masque — et
+   * rien ne garantit qu'un acheteur ne passe pas entre les deux.
+   *
+   * Les produits touchés sont dédoublonnés : une commande de trois coloris du
+   * même article ne doit déclencher qu'une seule bascule.
+   */
+  const touches = new Set<string>();
   for (const event of events) {
-    await mod.salesSync.ingest(event);
+    const r = await mod.salesSync.ingest(event);
+    for (const p of r.changed) touches.add(p);
+  }
+  for (const productId of touches) {
+    await appliquerDisponibilite(env, productId, _counter);
   }
 }
 

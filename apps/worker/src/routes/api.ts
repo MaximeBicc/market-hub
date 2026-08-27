@@ -21,6 +21,10 @@ import type { Env } from "../env.js";
 import { randomId } from "../lib/crypto.js";
 import { normaliserValeur, varianteUnique } from "../lib/variantes.js";
 import { ficheProduit, idDepuisLien } from "../lib/alibaba.js";
+import {
+  appliquerDisponibilite,
+  retirerPartout,
+} from "../lib/disponibilite.js";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
 import { sendPushToUser } from "../lib/push.js";
@@ -100,6 +104,20 @@ api.get("/overview", async (c) => {
          * plus de rien — elle apprend à ignorer le bandeau.
          */
         intervalSec: syncJob.intervalSec,
+        /*
+         * L'ÉCHÉANCE, PARCE QU'UNE ALERTE SANS SUITE EST UNE IMPASSE.
+         *
+         * Le bandeau disait ce qui n'allait pas et s'arrêtait là. Après un
+         * échec passager — un déploiement raté, par exemple — la seule
+         * question qui reste est « quand est-ce que ça se répare tout seul ? ».
+         * Sans réponse, on recharge la page à l'aveugle ou on relance à la
+         * main un relevé qui allait partir de lui-même.
+         *
+         * `nextRunAt` porte déjà le repli exponentiel appliqué par le cron :
+         * c'est la date que l'ordonnanceur regardera vraiment, pas une
+         * estimation refaite dans le navigateur.
+         */
+        nextRunAt: syncJob.nextRunAt,
       })
       .from(syncJob)
       .where(eq(syncJob.enabled, 1)),
@@ -1383,6 +1401,7 @@ api.post("/alibaba/importer", async (c) => {
   }
 
   await recalculerStockProduit(db, id);
+  await appliquerDisponibilite(c.env, id);
 
   return c.json({
     ok: true,
@@ -1700,13 +1719,47 @@ api.post("/products/:id/stock", async (c) => {
       .where(eq(listing.sku, existing.sku));
   }
 
-  return c.json({ ok: true, id, stock: newStock });
+  const dispo = await appliquerDisponibilite(c.env, id);
+
+  return c.json({
+    ok: true,
+    id,
+    stock: newStock,
+    annonces: dispo.action === "rien" ? undefined : dispo,
+  });
 });
 
 /** Supprimer un produit maître. */
 api.delete("/products/:id", async (c) => {
   const db = drizzle(c.env.DB);
   const id = c.req.param("id");
+
+  /*
+   * RETIRER DE LA VENTE AVANT D'EFFACER.
+   *
+   * Une annonce laissée en ligne pour un produit qu'on vient de supprimer est
+   * un article achetable que plus rien ne suit : ni stock, ni coût, ni
+   * expédition. Et la synchronisation la retrouverait au passage suivant pour
+   * recréer un produit vide — la suppression n'aurait servi qu'à perdre le
+   * coût d'achat et les déclarations obligatoires.
+   *
+   * Si une plateforme refuse, on N'EFFACE PAS. Supprimer quand même
+   * laisserait exactement la situation qu'on cherche à éviter, en silence.
+   */
+  const retrait = await retirerPartout(c.env, id);
+  const echecs = retrait.resultats.filter(
+    (r) => r.status !== "success" && r.status !== "unsupported",
+  );
+  if (echecs.length > 0) {
+    return c.json(
+      {
+        error:
+          "Impossible de retirer l'annonce de la vente — le produit n'a pas été supprimé.",
+        detail: echecs.map((r) => `${r.marketplace} : ${r.message ?? r.status}`),
+      },
+      409,
+    );
+  }
 
   /*
    * CINQ RÉFÉRENCES POINTENT VERS CE PRODUIT ET SES VARIANTES.
@@ -2356,5 +2409,15 @@ api.patch("/products/:id/stock-variantes", async (c) => {
   // continueraient de montrer l'ancienne valeur.
   await recalculerStockProduit(db, id);
 
-  return c.json({ ok: true, enregistres: faits.length, refuses: refuses.length });
+  // Et les annonces suivent le stock : épuisé, l'article se retire partout ;
+  // réapprovisionné, il revient — mais seulement là où la règle l'avait
+  // couché. Aucun appel réseau si l'état voulu est déjà l'état courant.
+  const dispo = await appliquerDisponibilite(c.env, id);
+
+  return c.json({
+    ok: true,
+    enregistres: faits.length,
+    refuses: refuses.length,
+    annonces: dispo.action === "rien" ? undefined : dispo,
+  });
 });
