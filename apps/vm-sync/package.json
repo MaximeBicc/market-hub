@@ -1,0 +1,15 @@
+{
+  "name": "@hub/vm-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@hub/core": "workspace:*",
+    "@hub/engine": "workspace:*",
+    "tsx": "^4.23.12"
+  }
+}
