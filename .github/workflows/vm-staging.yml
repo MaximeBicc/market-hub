@@ -56,3 +56,17 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4.124.0"
           command: deploy --config wrangler.vm-staging.jsonc
+
+      - name: Smoke test public /health
+        run: |
+          URL="https://market-hub-vm-staging-control.variety-tools.workers.dev"
+          BODY=$(curl -fsS --retry 5 --retry-delay 3 "$URL/health")
+          echo "$BODY"
+          echo "$BODY" | grep -q '"ok":true'
+
+      - name: Smoke test route privée verrouillée
+        run: |
+          URL="https://market-hub-vm-staging-control.variety-tools.workers.dev"
+          CODE=$(curl -sS -o /tmp/vm-status.json -w '%{http_code}' "$URL/api/internal/vm-sync/status")
+          cat /tmp/vm-status.json
+          test "$CODE" = "401"
