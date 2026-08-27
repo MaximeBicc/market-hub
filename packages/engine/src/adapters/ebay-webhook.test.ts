@@ -503,9 +503,14 @@ describe("rafraîchissement du jeton", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string | URL, init?: RequestInit) => {
-        corps.push(
-          Object.fromEntries(new URLSearchParams(String(init?.body ?? ""))),
-        );
+        // `forEach` plutôt que `Object.fromEntries` : les types Workers ne
+        // déclarent pas l'itérateur de `URLSearchParams`, et la conversion
+        // implicite ne compile pas.
+        const champs: Record<string, string> = {};
+        new URLSearchParams(String(init?.body ?? "")).forEach((v, k) => {
+          champs[k] = v;
+        });
+        corps.push(champs);
         return new Response(JSON.stringify(reponse), {
           status,
           headers: { "Content-Type": "application/json" },
