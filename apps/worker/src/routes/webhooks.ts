@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import { appliquerStockDistant } from "../lib/stock-distant.js";
+import { jetonVerificationValide, reponseDefiEbay } from "@hub/engine";
 import { eq } from "drizzle-orm";
 import type { CanonicalOrderEvent } from "@hub/engine";
-import { shop } from "../db/schema.js";
+import { eventLog, shop } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { buildEngine } from "../engine/module.js";
 import { d1Repositories } from "../engine/repositories.js";
@@ -183,13 +184,30 @@ webhooks.get("/ebay", async (c) => {
   const endpoint = `${c.env.APP_URL.replace(/\/+$/, "")}/api/webhooks/ebay`;
   const token = c.env.EBAY_VERIFICATION_TOKEN ?? "";
   if (!token) return c.text("Not found", 404); // pas de jeton, pas de poignée de main
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(challenge + token + endpoint),
-  );
-  const hex = [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 
-  return c.json({ challengeResponse: hex });
+  /*
+   * eBay impose au jeton une forme précise : de trente-deux à quatre-vingts
+   * caractères, lettres, chiffres, tiret et souligné. Un jeton trop court
+   * fait échouer l'enregistrement de la destination avec un message qui ne
+   * dit PAS que c'est la longueur — et cette route répondrait pendant ce
+   * temps un condensé parfaitement calculé que rien n'accepterait jamais.
+   *
+   * On le signale plutôt que de laisser chercher.
+   */
+  if (!jetonVerificationValide(token)) {
+    await drizzle(c.env.DB)
+      .insert(eventLog)
+      .values({
+        id: crypto.randomUUID(),
+        at: Math.floor(Date.now() / 1000),
+        level: "error",
+        scope: "webhook",
+        message:
+          "EBAY_VERIFICATION_TOKEN hors format : 32 à 80 caractères parmi [A-Za-z0-9_-]. eBay refusera la destination sans dire que c'est la longueur.",
+      });
+  }
+
+  return c.json({
+    challengeResponse: await reponseDefiEbay(challenge, token, endpoint),
+  });
 });
