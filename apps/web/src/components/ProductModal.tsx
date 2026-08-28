@@ -25,6 +25,14 @@ interface LigneDecl {
   sku: string;
   prixEuro: string;
   stock: number;
+  /**
+   * La photo propre à ce coloris.
+   *
+   * eBay en fait l'axe d'image de son groupe quand TOUTES les déclinaisons en
+   * ont une : la vignette change alors au clic sur un coloris. Sans elle,
+   * dix-sept coloris montrent la même photo et l'acheteur choisit à l'aveugle.
+   */
+  photo: string;
 }
 
 export function ProductModal({ product, consumables = [], onClose, onSuccess }: ProductModalProps) {
@@ -114,6 +122,7 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
           sku: string | null;
           optionValues: string[];
           priceAmount: number;
+          imageUrl: string | null;
           status: string;
           onHand: number | null;
         }>;
@@ -132,6 +141,7 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
           valeur: v.optionValues.join(" / "),
           sku: v.sku ?? "",
           prixEuro: v.priceAmount ? (v.priceAmount / 100).toFixed(2) : "",
+          photo: v.imageUrl ?? "",
           stock: v.onHand ?? 0,
         })),
       );
@@ -220,6 +230,7 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
             .map((l) => ({
               valeur: l.valeur.trim(),
               sku: l.sku.trim() || null,
+              imageUrl: l.photo.trim() || null,
               prixCentimes: l.prixEuro.trim()
                 ? Math.round(parseNumberInput(l.prixEuro) * 100)
                 : null,
@@ -520,6 +531,20 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
                         }
                       />
                       <input
+                        type="url"
+                        className="input font-mono"
+                        placeholder="photo (https://…)"
+                        title="Photo propre à cette déclinaison. eBay change la vignette au clic sur le coloris quand toutes en ont une."
+                        value={l.photo}
+                        onChange={(e) =>
+                          setDecl(
+                            decl.map((x, j) =>
+                              j === i ? { ...x, photo: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                      <input
                         type="number"
                         min="0"
                         className="input font-mono"
@@ -554,7 +579,7 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
                     className="btn btn--ghost"
                     style={{ marginTop: 6 }}
                     onClick={() =>
-                      setDecl([...decl, { valeur: "", sku: "", prixEuro: "", stock: 0 }])
+                      setDecl([...decl, { valeur: "", sku: "", prixEuro: "", stock: 0, photo: "" }])
                     }
                   >
                     <Icon name="plus" /> Ajouter une déclinaison

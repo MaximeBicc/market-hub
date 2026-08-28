@@ -2320,12 +2320,20 @@ h2.sec:first-child {
 
 /* Une déclinaison par ligne : nom, SKU, prix, stock, retrait. Dense, parce
    qu'un produit en dix-sept coloris ne doit pas remplir trois écrans. */
+/* Valeur · SKU · prix · photo · stock · retirer.
+   La photo prend la plus large part restante : une URL illisible se
+   retape en entier, et c'est le champ qu'on relit le plus mal. */
 .decl-ligne {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 0.8fr 78px auto;
+  grid-template-columns: 1.4fr 1fr 0.8fr 1.6fr 78px auto;
   gap: 6px;
   align-items: center;
   margin-bottom: 6px;
+}
+/* Six colonnes ne tiennent pas sur un téléphone : elles se replient en deux,
+   plutôt que de réduire chaque champ à une largeur où l'on ne lit plus rien. */
+@media (max-width: 640px) {
+  .decl-ligne { grid-template-columns: 1fr 1fr; }
 }
 .decl-ligne .input {
   padding: 6px 8px;

@@ -2316,6 +2316,10 @@ api.get("/products/:id/variantes", async (c) => {
       optionKey: variant.optionKey,
       priceAmount: variant.priceAmount,
       priceCurrency: variant.priceCurrency,
+      // Sans elle, l'écran de saisie rouvrait toujours vide : on rechargeait
+      // le prix et le SKU, jamais la photo, et la ressaisir était le seul
+      // moyen de ne pas l'effacer au premier enregistrement.
+      imageUrl: variant.imageUrl,
       status: variant.status,
       position: variant.position,
       onHand: inventory.onHand,
@@ -2377,6 +2381,15 @@ api.put("/products/:id/declinaisons", async (c) => {
       sku?: string | null;
       prixCentimes?: number | null;
       stock?: number;
+      /**
+       * La photo propre à cette déclinaison.
+       *
+       * Les trois plateformes savent la porter — eBay en fait même l'axe
+       * d'image de son groupe quand TOUTES les déclinaisons en ont une, ce
+       * qui change la vignette au clic sur un coloris. Sans elle, dix-sept
+       * coloris montrent la même photo, et l'acheteur choisit à l'aveugle.
+       */
+      imageUrl?: string | null;
     }>;
   };
   const body = await c.req
@@ -2428,6 +2441,15 @@ api.put("/products/:id/declinaisons", async (c) => {
           ? Math.round(l.prixCentimes)
           : null,
       stock: Math.max(0, Math.round(Number(l.stock ?? 0)) || 0),
+      /*
+       * HTTPS EXIGÉ, et pas par principe : eBay et Etsy refusent une image en
+       * clair. L'annonce se crée puis reste invendable, sur un message qui
+       * parle de « média invalide » sans jamais nommer le protocole. Une
+       * adresse en http est donc ignorée plutôt que transmise.
+       */
+      imageUrl: /^https:\/\//i.test((l.imageUrl ?? "").trim())
+        ? (l.imageUrl ?? "").trim()
+        : null,
     }))
     .filter((l) => l.valeur.length > 0);
 
@@ -2512,6 +2534,7 @@ api.put("/products/:id/declinaisons", async (c) => {
         optionValues: JSON.stringify([l.valeur]),
         priceAmount: l.prixCentimes ?? p.priceAmount,
         priceCurrency: p.priceCurrency ?? "EUR",
+        imageUrl: l.imageUrl,
         position: i,
         status: "active",
         createdAt: now,
@@ -2523,6 +2546,7 @@ api.put("/products/:id/declinaisons", async (c) => {
           sku: l.sku,
           optionValues: JSON.stringify([l.valeur]),
           priceAmount: l.prixCentimes ?? p.priceAmount,
+          imageUrl: l.imageUrl,
           position: i,
           status: "active",
           updatedAt: now,
@@ -2564,6 +2588,97 @@ api.put("/products/:id/declinaisons", async (c) => {
   await recalculerStockProduit(db, id);
 
   return c.json({ ok: true, declinaisons: lignes.length, archivees });
+});
+
+/**
+ * LE PRIX ET LA PHOTO DE CHAQUE DÉCLINAISON.
+ *
+ * Les trois plateformes savent les porter, et le faisaient déjà : eBay pose
+ * une image par SKU dans son groupe, Etsy accepte un prix par déclinaison,
+ * Shopify un prix par variante. Ce que personne ne pouvait faire, c'était les
+ * SAISIR — la seule route existante n'écrivait que le stock. Un rouge à
+ * 12 € et un doré à 15 € finissaient donc au même prix, celui du parent.
+ *
+ * Le prix est en CENTIMES, comme partout ailleurs dans l'outil. Un prix en
+ * euros flottants perd des centimes à l'arrondi, et une annonce à 12,99 €
+ * publiée à 12,98 € est un litige avec l'acheteur.
+ */
+api.patch("/products/:id/variantes", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<Record<string, { priceAmount?: number | null; imageUrl?: string | null }>>()
+    .catch(() => ({}) as Record<string, never>);
+
+  // Les variantes de CE produit, et elles seules : sans ce filtre, la route
+  // permettrait de réécrire le prix de n'importe quel article du catalogue.
+  const siennes = new Set(
+    (
+      await db
+        .select({ id: variant.id })
+        .from(variant)
+        .where(eq(variant.productId, id))
+    ).map((v) => v.id),
+  );
+
+  const faits: string[] = [];
+  const refuses: string[] = [];
+  const maintenant = Math.floor(Date.now() / 1000);
+
+  for (const [variantId, valeurs] of Object.entries(body)) {
+    if (!siennes.has(variantId) || !valeurs || typeof valeurs !== "object") {
+      refuses.push(variantId);
+      continue;
+    }
+
+    const patch: Record<string, unknown> = { updatedAt: maintenant };
+
+    if (valeurs.priceAmount !== undefined) {
+      if (valeurs.priceAmount === null) {
+        // Effacer le prix propre : la déclinaison reprend celui du parent.
+        patch["priceAmount"] = null;
+      } else {
+        const n = Math.round(Number(valeurs.priceAmount));
+        if (!Number.isFinite(n) || n < 0) {
+          refuses.push(variantId);
+          continue;
+        }
+        patch["priceAmount"] = n;
+      }
+    }
+
+    if (valeurs.imageUrl !== undefined) {
+      const u = (valeurs.imageUrl ?? "").trim();
+      /*
+       * HTTPS EXIGÉ, ET PAS PAR PRINCIPE. eBay et Etsy refusent une image en
+       * clair — l'annonce se crée puis reste invendable, avec un message qui
+       * parle de « média invalide » sans nommer le protocole.
+       */
+      if (u && !/^https:\/\//i.test(u)) {
+        refuses.push(variantId);
+        continue;
+      }
+      patch["imageUrl"] = u || null;
+    }
+
+    if (Object.keys(patch).length === 1) {
+      // Rien d'autre que la date : il n'y avait aucune valeur à écrire.
+      refuses.push(variantId);
+      continue;
+    }
+
+    await db.update(variant).set(patch).where(eq(variant.id, variantId));
+    faits.push(variantId);
+  }
+
+  if (faits.length === 0) {
+    return c.json(
+      { error: "Aucune valeur valide. Un prix se donne en centimes, une photo en HTTPS." },
+      400,
+    );
+  }
+
+  return c.json({ ok: true, enregistres: faits.length, refuses: refuses.length });
 });
 
 api.patch("/products/:id/stock-variantes", async (c) => {
