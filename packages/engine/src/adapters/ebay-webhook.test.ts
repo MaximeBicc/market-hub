@@ -364,7 +364,13 @@ describe("mise en place des abonnements", () => {
    * destination échoue avec un code qui ne dit pas laquelle des trois manque.
    */
   function fetchAbonnement(reponses: Record<string, unknown>) {
-    const appels: Array<{ url: string; methode: string; corps: unknown }> = [];
+    const appels: Array<{
+      url: string;
+      methode: string;
+      corps: unknown;
+      /** Le jeton porté, pour vérifier lequel part où. */
+      jeton?: string;
+    }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string | URL, init?: RequestInit) => {
@@ -383,7 +389,15 @@ describe("mise en place des abonnements", () => {
             corps = String(init.body);
           }
         }
-        appels.push({ url: u, methode: init?.method ?? "GET", corps });
+        const auth = new Headers(
+          init?.headers as HeadersInit | undefined,
+        ).get("Authorization");
+        appels.push({
+          url: u,
+          methode: init?.method ?? "GET",
+          corps,
+          ...(auth ? { jeton: auth.replace(/^Bearer /, "") } : {}),
+        });
         const cle = Object.keys(reponses).find((k) => u.includes(k));
         return new Response(JSON.stringify(cle ? reponses[cle] : {}), {
           status: 200,
@@ -469,6 +483,50 @@ describe("mise en place des abonnements", () => {
     expect(chemins[0]).toBe("PUT /config");
     expect(chemins.some((x) => x.startsWith("POST /destination"))).toBe(true);
     expect(r.crees).toContain("ORDER_CONFIRMATION");
+  });
+
+  it("envoie le jeton APPLICATIF sur la destination, le jeton VENDEUR sur l'abonnement", async () => {
+    /*
+     * LE PARTAGE EXACT, ET LA RAISON DE CHAQUE CÔTÉ.
+     *
+     * Une destination est notre adresse de rappel : commune à tous les
+     * vendeurs, rattachée à l'application. Un abonnement lie UN vendeur à
+     * cette destination, et réclame donc son consentement.
+     *
+     * Se tromper sur la destination donne « 1100 / ACCESS / Access denied »,
+     * un refus qui parle de permissions et fait chercher du côté des portées
+     * alors que le jeton est simplement du mauvais type.
+     */
+    const appels = fetchAbonnement({
+      "/oauth2/token": { access_token: "APPLICATIF", expires_in: 7200 },
+      "/destination?": { destinations: [] },
+      "/topic?": { topics: [] },
+      "/subscription?": { subscriptions: [] },
+      "/destination": { destinationId: "d1" },
+    });
+
+    await ebayEnsureNotifications(
+      adapter,
+      {
+        ...c(),
+        credentials: {
+          clientId: "cid",
+          clientSecret: "csec",
+          accessToken: "VENDEUR",
+          accessTokenExpiresAt: FUTUR,
+        },
+      } as MarketplaceContext,
+      "https://h/api/webhooks/ebay",
+      "a".repeat(32),
+      "a@b.c",
+    );
+
+    const jetonDe = (fragment: string, methode: string) =>
+      appels.find((a) => a.url.includes(fragment) && a.methode === methode)
+        ?.jeton;
+
+    expect(jetonDe("/destination", "POST")).toBe("APPLICATIF");
+    expect(jetonDe("/subscription", "POST")).toBe("VENDEUR");
   });
 
   it("réutilise une destination existante plutôt que d'en créer une seconde", async () => {

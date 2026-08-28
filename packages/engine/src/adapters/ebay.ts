@@ -673,7 +673,7 @@ export async function ebayEnsureNotifications(
         endpoint?: string;
         deliveryConfig?: { endpoint?: string };
       }>;
-    }>(ctx, "/destination?limit=100");
+    }>(ctx, "/destination?limit=100", {}, "application");
     destinationId = (liste.destinations ?? []).find(
       (d) => (d.deliveryConfig?.endpoint ?? d.endpoint) === endpoint,
     )?.destinationId;
@@ -693,6 +693,20 @@ export async function ebayEnsureNotifications(
           deliveryConfig: { endpoint, verificationToken },
         }),
       },
+      /*
+       * UNE DESTINATION APPARTIENT À L'APPLICATION, PAS AU VENDEUR.
+       *
+       * C'est notre adresse de rappel : elle est commune à tous les vendeurs
+       * qui utilisent l'outil, et eBay la rattache à l'application. Elle
+       * exige donc le jeton applicatif.
+       *
+       * Avec celui du vendeur, eBay répond « 1100 / ACCESS / Access denied »
+       * — un refus qui parle de permissions et fait chercher du côté des
+       * portées, alors que le jeton est simplement du mauvais type. Seul
+       * l'ABONNEMENT, qui lie un vendeur à cette destination, réclame son
+       * consentement.
+       */
+      "application",
     );
     destinationId = creee.destinationId;
   }
