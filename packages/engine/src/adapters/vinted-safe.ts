@@ -45,6 +45,7 @@ export class VintedSafeAdapter implements MarketplaceAdapter {
       ordersFulfill: false,
       trackingWrite: false,
       inboundSales: "manual",
+      pousseActive: false,
     };
   }
 

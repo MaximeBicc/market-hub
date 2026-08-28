@@ -325,8 +325,30 @@ export interface CapabilitySet {
   ordersFulfill: boolean;
   /** Poser un numéro de suivi. Certaines plateformes acceptent l'un sans l'autre. */
   trackingWrite: boolean;
-  /** Comment les ventes entrantes arrivent, si elles arrivent. */
+  /**
+   * Ce que la plateforme SAIT faire des ventes entrantes.
+   *
+   * Une propriété de la plateforme, pas de ce compte-ci : elle ne change pas
+   * selon qu'on se soit abonné ou non. C'est ce qui permet de dire « cette
+   * boutique pourrait pousser ses ventes, personne ne le lui a demandé ».
+   */
   inboundSales: "webhook" | "poll" | "both" | "manual" | "none";
+  /**
+   * Les abonnements sont-ils EFFECTIVEMENT en place pour ce compte ?
+   *
+   * La question est différente de la précédente, et les confondre coûte cher
+   * dans les deux sens. Croire qu'une boutique pousse alors qu'elle n'est pas
+   * abonnée détend son relevé et fait découvrir les ventes avec un quart
+   * d'heure de retard. Croire l'inverse la relève toutes les deux minutes
+   * pour rien — 1 440 tâches par jour au lieu de 192.
+   *
+   * Chaque module répond pour lui-même : le drapeau ne porte pas le même nom
+   * d'une plateforme à l'autre, et ce détail n'a rien à faire dans le noyau.
+   * C'est précisément en le mettant là qu'on avait fait relever eBay toutes
+   * les deux minutes malgré ses deux abonnements actifs — le noyau ne
+   * connaissait que le drapeau de Shopify.
+   */
+  pousseActive: boolean;
   messagesRead?: boolean | undefined;
   messagesSend?: boolean | undefined;
   reviewsRead?: boolean | undefined;

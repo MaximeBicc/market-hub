@@ -220,7 +220,7 @@ function estIntrouvable(e: UserError): boolean {
 export class ShopifyAdapter implements MarketplaceAdapter {
   readonly id = "shopify";
 
-  capabilities(): CapabilitySet {
+  capabilities(ctx?: MarketplaceContext): CapabilitySet {
     return {
       listingCreate: true,
       listingUpdate: true,
@@ -237,6 +237,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       // Shopify pousse des webhooks fiables ET permet le relevé : on garde
       // les deux, le relevé servant de filet si un webhook se perd.
       inboundSales: "both",
+      pousseActive: ctx?.credentials?.["webhooksActifs"] === "1",
     };
   }
 

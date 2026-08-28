@@ -812,7 +812,20 @@ export async function ensureSyncJobs(
   const account = await repos.accounts.get(accountId);
   if (!account) return;
 
-  const caps = await mod.registry.get(account.marketplace).capabilities({ account });
+  /*
+   * LES IDENTIFIANTS SONT INDISPENSABLES ICI.
+   *
+   * Les appeler sans eux paraissait anodin — une capacité, c'est une
+   * propriété de plateforme. Sauf que la question « cette boutique pousse-t-
+   * elle ses ventes ? » ne se répond que sur le COMPTE, et le module lit son
+   * drapeau dans les identifiants. Sans eux il répond « non » quoi qu'il
+   * arrive, et eBay est resté relevé toutes les deux minutes malgré ses deux
+   * abonnements actifs.
+   */
+  const credentials = await repos.credentials.get(accountId);
+  const caps = await mod.registry
+    .get(account.marketplace)
+    .capabilities({ account, ...(credentials ? { credentials } : {}) });
 
   /*
    * « Pousse » ne veut pas dire « saurait pousser » mais « pousse
@@ -820,11 +833,14 @@ export async function ensureSyncJobs(
    * avoir demandé. Relâcher le relevé sur la seule capacité déclarée
    * ralentirait une boutique dont les abonnements n'ont jamais été créés —
    * exactement l'inverse du but.
+   *
+   * C'est le MODULE qui répond, plus le noyau : le drapeau ne porte pas le
+   * même nom d'une plateforme à l'autre — `webhooksActifs` chez Shopify,
+   * `notificationsActives` chez eBay, un secret de signature chez Etsy — et
+   * le noyau n'en connaissait qu'un seul. Les deux autres ne relâchaient
+   * donc jamais leur cadence.
    */
-  const abonne =
-    (await repos.credentials.get(accountId))?.["webhooksActifs"] === "1";
-  const pousse =
-    abonne && (caps.inboundSales === "webhook" || caps.inboundSales === "both");
+  const abonne = caps.pousseActive;
   const now = Math.floor(Date.now() / 1000);
 
   const plan = planReleves(caps, abonne);

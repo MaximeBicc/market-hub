@@ -105,10 +105,20 @@ describe("capacités", () => {
     expect(c.listingActivate).toBe(true);
   });
 
-  it("annonce le relevé, pas les webhooks", () => {
-    // Les notifications eBay sont signées en ECDSA et non vérifiées ici :
-    // prétendre les gérer ferait manquer des ventes en silence.
-    expect(adapter.capabilities(ctxWith(undefined)).inboundSales).toBe("poll");
+  it("sait pousser, mais ne pousse pas tant qu'on ne l'a pas abonné", () => {
+    /*
+     * DEUX QUESTIONS, PAS UNE.
+     *
+     * « eBay sait-il pousser ? » — oui, toujours. « Cette boutique-ci
+     * pousse-t-elle ? » — seulement si l'abonnement a été créé.
+     *
+     * Les confondre coûtait dans les deux sens : le diagnostic ne pouvait
+     * plus dire « cette plateforme pourrait pousser, personne ne le lui a
+     * demandé », et le relevé lisait la capacité pour décider sa cadence.
+     */
+    const capacites = adapter.capabilities(ctxWith(undefined));
+    expect(capacites.inboundSales).toBe("both");
+    expect(capacites.pousseActive).toBe(false);
   });
 });
 

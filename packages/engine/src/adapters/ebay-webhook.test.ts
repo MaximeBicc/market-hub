@@ -342,7 +342,9 @@ describe("la clé publique", () => {
 
 describe("la capacité dit la vérité", () => {
   it("reste en relevé tant qu'aucun abonnement n'existe", () => {
-    expect(adapter.capabilities(ctx()).inboundSales).toBe("poll");
+    expect(adapter.capabilities(ctx()).pousseActive).toBe(false);
+    // La CAPACITÉ ne bouge pas : eBay sait pousser dans les deux cas.
+    expect(adapter.capabilities(ctx()).inboundSales).toBe("both");
   });
 
   it("passe en poussée quand l'abonnement est marqué actif", () => {
@@ -352,8 +354,8 @@ describe("la capacité dit la vérité", () => {
      * notifications qui n'arriveraient jamais.
      */
     expect(
-      adapter.capabilities(ctx({ notificationsActives: "1" })).inboundSales,
-    ).toBe("both");
+      adapter.capabilities(ctx({ notificationsActives: "1" })).pousseActive,
+    ).toBe(true);
   });
 });
 

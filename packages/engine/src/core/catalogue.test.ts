@@ -153,12 +153,16 @@ describe("préconditions Etsy", () => {
 
   it("annonce le temps réel seulement quand le secret de webhook est là", () => {
     // Etsy a livré ses webhooks de commande en 2026, mais une notification
-    // sans secret vérifiable est refusée : la capacité doit suivre le secret.
-    expect(adapter.capabilities(ctx("etsy")).inboundSales).toBe("poll");
+    // sans secret vérifiable est refusée : c'est la POUSSÉE EFFECTIVE qui
+    // suit le secret. La capacité, elle, ne bouge pas — Etsy sait pousser
+    // dans les deux cas, et le dire permet de signaler un secret manquant
+    // plutôt que de faire passer la boutique pour incapable.
+    expect(adapter.capabilities(ctx("etsy")).pousseActive).toBe(false);
+    expect(adapter.capabilities(ctx("etsy")).inboundSales).toBe("both");
     expect(
       adapter.capabilities(ctx("etsy", { webhookSecret: "whsec_x" }))
-        .inboundSales,
-    ).toBe("both");
+        .pousseActive,
+    ).toBe(true);
   });
 });
 

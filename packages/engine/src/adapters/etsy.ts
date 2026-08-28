@@ -699,7 +699,10 @@ export class EtsyAdapter implements MarketplaceAdapter {
        * mais le relevé reste la seule voie pour le stock, et le filet quand
        * une notification se perd.
        */
-      inboundSales: c["webhookSecret"] ? "both" : "poll",
+      inboundSales: "both",
+      // Sans le secret de signature, aucune notification n'est acceptée :
+      // l'abonnement existe peut-être chez Etsy, il ne sert à rien ici.
+      pousseActive: Boolean(c["webhookSecret"]),
     };
   }
 

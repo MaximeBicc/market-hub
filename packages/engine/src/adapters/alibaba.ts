@@ -55,6 +55,7 @@ export class AlibabaAdapter implements MarketplaceAdapter {
       ordersFulfill: false,
       trackingWrite: false,
       inboundSales: "manual",
+      pousseActive: false,
     };
   }
 

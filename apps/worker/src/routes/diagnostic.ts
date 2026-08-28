@@ -403,14 +403,12 @@ diagnostic.get("/", async (c) => {
       tempsReel: {
         poussePossible,
         /*
-         * Les deux plateformes ne posent pas le même drapeau : Shopify écrit
-         * `webhooksActifs`, eBay `notificationsActives`. Ne lire que le
-         * premier faisait dire à ce diagnostic qu'eBay n'était jamais abonné
-         * — et afficher l'avertissement juste en dessous, alors que les
-         * notifications tournaient.
+         * La réponse vient du module, pas d'une liste de drapeaux tenue ici.
+         * Chaque plateforme nomme le sien autrement, et cet écran est celui
+         * qui sert à vérifier le reste : il ne peut pas être celui qui oublie
+         * une plateforme de plus à chaque ajout.
          */
-        abonnementActif:
-          c2["webhooksActifs"] === "1" || c2["notificationsActives"] === "1",
+        abonnementActif: capacites.pousseActive,
         secretPresent: Boolean(c2["webhookSecret"] || c2["clientSecret"]),
         dernierWebhookRecuIlYaSec: dernierWebhook[0]
           ? maintenant - dernierWebhook[0].at
@@ -418,9 +416,7 @@ diagnostic.get("/", async (c) => {
         // Le cas trompeur : la plateforme SAIT pousser, on croit le temps réel
         // actif, et rien n'a jamais été souscrit.
         avertissement:
-          poussePossible &&
-          c2["webhooksActifs"] !== "1" &&
-          c2["notificationsActives"] !== "1"
+          poussePossible && !capacites.pousseActive
             ? "Cette plateforme sait pousser ses événements, mais aucun abonnement n'a été créé. Le relevé tourne toutes les 2 minutes à la place."
             : null,
       },

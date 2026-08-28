@@ -248,8 +248,12 @@ describe("capacités", () => {
     expect(c.listingCreate).toBe(true);
   });
 
-  it("annonce le relevé, jamais le webhook", () => {
-    expect(adapter.capabilities(ctxWith(undefined)).inboundSales).toBe("poll");
+  it("sait pousser, mais pas sans son secret de signature", () => {
+    // Etsy pousse des notifications ; sans le secret, aucune n'est acceptée.
+    // La plateforme en est capable, ce compte-ci ne l'est pas.
+    const capacites = adapter.capabilities(ctxWith(undefined));
+    expect(capacites.inboundSales).toBe("both");
+    expect(capacites.pousseActive).toBe(false);
   });
 });
 

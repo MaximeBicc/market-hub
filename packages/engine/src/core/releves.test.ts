@@ -62,14 +62,17 @@ describe("politique de relevé", () => {
 
   it("ne détend RIEN sur une plateforme qui ne pousse pas, même marquée abonnée", async () => {
     /*
-     * Le piège que ce test verrouille : eBay ne sait pas encore pousser —
-     * la vérification de ses notifications n'est pas implémentée, il déclare
-     * donc « poll ». Un drapeau d'abonnement posé par erreur ne doit pas
-     * ralentir son relevé, sans quoi les ventes arriveraient avec un quart
-     * d'heure de retard et personne ne saurait pourquoi.
+     * Le piège que ce test verrouille : un drapeau d'abonnement posé par
+     * erreur ne doit pas ralentir le relevé d'une plateforme qui ne pousse
+     * rien, sans quoi les ventes arriveraient avec un quart d'heure de retard
+     * et personne ne saurait pourquoi.
+     *
+     * Alibaba en est l'exemple net : elle ne pousse pas, et aucun drapeau ne
+     * peut y changer quoi que ce soit. eBay tenait ce rôle tant que ses
+     * notifications n'étaient pas vérifiées ; elles le sont désormais.
      */
-    const caps = new EbayAdapter().capabilities(ctx("ebay"));
-    expect(caps.inboundSales).toBe("poll");
+    const caps = await new AlibabaAdapter().capabilities();
+    expect(caps.inboundSales).toBe("manual");
 
     const plan = planReleves(caps, true);
     expect(plan.find((r) => r.resource === "orders")?.intervalSec).toBe(120);
@@ -78,16 +81,51 @@ describe("politique de relevé", () => {
   it("Etsy ne se détend qu'avec son secret de webhook", () => {
     const adapter = new EtsyAdapter();
 
-    // Sans secret, une notification n'est pas vérifiable : on la refuse, donc
-    // on ne peut pas s'y fier, donc on continue de relever.
-    const sansSecret = planReleves(adapter.capabilities(ctx("etsy")), true);
+    /*
+     * Le second argument est celui que passe la production : `pousseActive`,
+     * la réponse du module. Le figer à `true` dans le test, comme avant,
+     * masquait le seul défaut qui compte ici — un noyau qui interroge le
+     * mauvais drapeau et laisse la boutique à deux minutes.
+     */
+    const sansSecret = (() => {
+      const c = adapter.capabilities(ctx("etsy"));
+      return planReleves(c, c.pousseActive);
+    })();
     expect(sansSecret.find((r) => r.resource === "orders")?.intervalSec).toBe(120);
 
-    const avecSecret = planReleves(
-      adapter.capabilities(ctx("etsy", { webhookSecret: "whsec_x" })),
-      true,
-    );
+    const avecSecret = (() => {
+      const c = adapter.capabilities(ctx("etsy", { webhookSecret: "whsec_x" }));
+      return planReleves(c, c.pousseActive);
+    })();
     expect(avecSecret.find((r) => r.resource === "orders")?.intervalSec).toBe(900);
+  });
+
+  it("eBay se détend dès que ses notifications sont actives", () => {
+    /*
+     * LE DÉFAUT QUE CE TEST VERROUILLE, CONSTATÉ EN PRODUCTION.
+     *
+     * Deux abonnements actifs chez eBay, et le relevé toujours à deux
+     * minutes : 1 440 tâches par jour au lieu de 192. Le noyau demandait ses
+     * capacités au module SANS lui passer les identifiants — or c'est là que
+     * le module lit son drapeau. Il répondait donc « pas abonné » quoi qu'il
+     * arrive, et le temps réel ne faisait rien gagner.
+     *
+     * Le test refait la composition exacte de la production : capacités
+     * calculées AVEC les identifiants, puis `pousseActive` passé au plan.
+     */
+    const adapter = new EbayAdapter();
+
+    const sansIdentifiants = adapter.capabilities({} as MarketplaceContext);
+    expect(sansIdentifiants.pousseActive).toBe(false);
+
+    const abonne = adapter.capabilities(
+      ctx("ebay", { notificationsActives: "1" }),
+    );
+    expect(abonne.pousseActive).toBe(true);
+
+    const plan = planReleves(abonne, abonne.pousseActive);
+    expect(plan.find((r) => r.resource === "orders")?.intervalSec).toBe(900);
+    expect(plan.find((r) => r.resource === "inventory")?.intervalSec).toBe(900);
   });
 
   it("garde le catalogue complet quotidien, quoi qu'il arrive", async () => {

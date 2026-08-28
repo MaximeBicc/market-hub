@@ -68,6 +68,7 @@ export class MockAdapter implements MarketplaceAdapter {
       ordersFulfill: true,
       trackingWrite: true,
       inboundSales: "both",
+      pousseActive: false,
       ...this.caps,
     };
   }

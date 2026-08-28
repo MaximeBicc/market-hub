@@ -1018,9 +1018,8 @@ export class EbayAdapter implements MarketplaceAdapter {
        * pourquoi. La capacité suit donc l'abonnement RÉEL, marqué au moment
        * où il est créé.
        */
-      inboundSales: (ctx?.credentials?.["notificationsActives"] === "1"
-        ? "both"
-        : "poll") as CapabilitySet["inboundSales"],
+      inboundSales: "both",
+      pousseActive: ctx?.credentials?.["notificationsActives"] === "1",
     };
   }
 
