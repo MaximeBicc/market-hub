@@ -122,7 +122,56 @@ export async function storeTokens(
 ): Promise<void> {
   const db = drizzle(env.DB);
   const now = Math.floor(Date.now() / 1000);
-  const ciphertext = await encryptJson(env.MASTER_KEY, tokens);
+
+  /*
+   * ══ RECONNECTER NE DOIT PAS TOUT EFFACER ══
+   *
+   * Ce coffre ne contient pas que des jetons. Il porte aussi tout ce qu'une
+   * boutique a fallu configurer à la main :
+   *
+   *   eBay     l'adresse d'expédition et les trois politiques, sans
+   *            lesquelles aucune annonce ne peut être publiée
+   *   Etsy     le profil de livraison, le délai de préparation, et le SECRET
+   *            de webhook — celui qu'on ne peut obtenir qu'une fois, dans le
+   *            portail d'Etsy
+   *   Shopify  l'emplacement d'inventaire
+   *
+   * L'ancienne écriture chiffrait `tokens` SEUL et remplaçait le coffre
+   * entier. Une reconnexion — le geste même qu'on demande quand un jeton
+   * expire — effaçait donc silencieusement tous ces réglages. On les
+   * redécouvrait à la première publication refusée, sans lien évident avec
+   * la reconnexion faite la veille.
+   *
+   * On relit donc, on fusionne, on réécrit. Les jetons neufs l'emportent —
+   * c'est le but de l'appel — et le reste survit.
+   */
+  const [existant] = await db
+    .select({ ciphertext: oauthToken.ciphertext })
+    .from(oauthToken)
+    .where(eq(oauthToken.shopId, shopId))
+    .limit(1);
+
+  let anciens: Record<string, unknown> = {};
+  if (existant?.ciphertext) {
+    try {
+      anciens = await decryptJson<Record<string, unknown>>(
+        env.MASTER_KEY,
+        existant.ciphertext,
+      );
+    } catch {
+      /*
+       * Coffre illisible — clé maîtresse changée, donnée corrompue. On repart
+       * des seuls jetons plutôt que d'échouer : sans ça, la reconnexion
+       * elle-même deviendrait impossible, et c'est précisément le geste qui
+       * répare.
+       */
+    }
+  }
+
+  const ciphertext = await encryptJson(env.MASTER_KEY, {
+    ...anciens,
+    ...tokens,
+  });
 
   await db
     .insert(oauthToken)
