@@ -307,6 +307,15 @@ export interface CapabilitySet {
   listingUpdate: boolean;
   listingActivate: boolean;
   listingDeactivate: boolean;
+  /**
+   * EFFACER l'annonce chez la plateforme, et non la coucher.
+   *
+   * Distincte de `listingDeactivate` parce que les deux gestes n'ont rien à
+   * voir : désactiver se défait, effacer non — l'ancienneté de l'annonce, son
+   * référencement et ses avis partent avec elle. Facultative : une plateforme
+   * qui ne sait pas effacer n'a pas à mentir en le déclarant.
+   */
+  listingDelete?: boolean | undefined;
   stockRead: boolean;
   stockWrite: boolean;
   priceRead: boolean;

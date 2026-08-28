@@ -600,6 +600,68 @@ const SUJETS_VOULUS = [
   "ORDER_CANCELLATION_ACTIVITY",
 ] as const;
 
+/** La portée qu'un abonnement par vendeur exige, et elle seule. */
+export const PORTEE_NOTIFICATION =
+  "https://api.ebay.com/oauth/api_scope/commerce.notification.subscription";
+
+/**
+ * LE CONSENTEMENT D'HIER CONTIENT-IL LA PORTÉE D'AUJOURD'HUI ?
+ *
+ * Une portée ne s'ajoute pas à un jeton existant : elle s'obtient au moment du
+ * consentement, et jamais après. Une boutique reliée avant qu'on ajoute la
+ * portée des notifications ne l'a donc pas — et rien, dans ce qu'on garde
+ * d'elle, ne permet de le savoir. Le blob d'identifiants ne mémorise pas les
+ * portées accordées, et le jeton d'eBay est opaque : il n'y a rien à lire.
+ *
+ * Cette sonde demande la réponse à eBay. Un rafraîchissement peut restreindre
+ * la demande à un SOUS-ENSEMBLE du consentement : demander cette seule portée
+ * réussit si elle a été accordée, et échoue en `invalid_scope` sinon. La
+ * réponse est donc factuelle, pas déduite d'une date de connexion.
+ *
+ * LE JETON OBTENU EST JETÉ, DÉLIBÉRÉMENT. Il ne porte QUE la portée sondée :
+ * l'enregistrer remplacerait le jeton complet par un jeton mutilé, et tout le
+ * reste — stock, commandes, annonces — tomberait en « accès refusé ». C'est
+ * pour ça qu'on n'appelle pas `saveCredentials` ici.
+ *
+ * En cas de panne réseau on répond `true` : il vaut mieux laisser la suite
+ * tenter et rapporter la vraie erreur d'eBay que bloquer sur un doute.
+ */
+export async function ebayPorteeAccordee(
+  ctx: MarketplaceContext,
+  portee: string = PORTEE_NOTIFICATION,
+): Promise<boolean> {
+  const c = ctx.credentials ?? {};
+  const clientId = c["clientId"] ?? "";
+  const clientSecret = c["clientSecret"] ?? "";
+  const refreshToken = c["refreshToken"] ?? "";
+  if (!clientId || !clientSecret || !refreshToken) return true;
+
+  try {
+    const res = await fetch(
+      `${hosts(c["environment"]).api}/identity/v1/oauth2/token`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Basic ${basic(clientId, clientSecret)}`,
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+          scope: portee,
+        }),
+      },
+    );
+    if (res.ok) return true;
+    const detail = await res.text().catch(() => "");
+    // Seul `invalid_scope` prouve l'absence. Un autre refus parle d'autre
+    // chose — jeton mort, identifiants faux — et ne se traite pas ici.
+    return !/invalid_scope/i.test(detail);
+  } catch {
+    return true;
+  }
+}
+
 /**
  * ABONNE UN COMPTE EBAY AUX NOTIFICATIONS DE VENTE.
  *
@@ -634,6 +696,21 @@ export async function ebayEnsureNotifications(
   if (!jetonVerificationValide(verificationToken)) {
     throw new Error(
       "eBay : le jeton de vérification doit faire 32 à 80 caractères parmi [A-Za-z0-9_-]. eBay refuse la destination sans dire que c'est la longueur.",
+    );
+  }
+
+  /*
+   * LA PORTÉE D'ABORD — pour ne pas envoyer quelqu'un chercher au mauvais
+   * endroit. Sans ce contrôle, une boutique reliée avant l'ajout de la portée
+   * traverse la configuration et la destination sans encombre, puis échoue au
+   * dernier appel sur un refus d'eBay qui parle de permissions. On conclut
+   * alors à un réglage manquant dans la console développeur — où tout est
+   * pourtant coché, puisque cocher n'accorde rien : seul le consentement
+   * accorde.
+   */
+  if (!(await ebayPorteeAccordee(ctx))) {
+    throw new Error(
+      "Cette boutique eBay a été reliée avant que l'abonnement aux notifications existe : son autorisation ne porte pas la portée « commerce.notification.subscription ». Une portée ne s'ajoute jamais à un jeton existant. Clique sur « Reconnecter » sur la boutique — les réglages et les annonces sont conservés, seul le consentement est refait.",
     );
   }
 
@@ -2149,6 +2226,55 @@ export class EbayAdapter implements MarketplaceAdapter {
       { method: "POST" },
     );
     return this.ok(ctx, r?.listingId ?? listing.remoteId);
+  }
+
+  /**
+   * Efface l'offre chez eBay.
+   *
+   * IRRÉVERSIBLE, et plus coûteux qu'ailleurs : l'offre emporte son historique
+   * de ventes, et un groupe emporte toutes ses déclinaisons. C'est pourquoi le
+   * retrait pour stock nul se contente d'un `withdraw`, qui conserve tout —
+   * seule la suppression du produit passe par ici.
+   */
+  async deleteListing(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    _idempotencyKey?: string,
+  ): Promise<TargetResult> {
+    const forme = this.forme(listing);
+    if (!forme) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "unsupported",
+        message: "Aucune offre eBay à effacer pour cet article.",
+      };
+    }
+
+    /*
+     * Une offre publiée doit être RETIRÉE avant d'être effacée : eBay refuse
+     * de supprimer une offre encore en ligne. On retire donc d'abord, en
+     * ignorant l'échec — l'offre peut n'avoir jamais été publiée, auquel cas
+     * le retrait n'a rien à faire.
+     */
+    try {
+      await this.deactivateListing(ctx, listing);
+    } catch {
+      // Rien à retirer : on passe directement à la suppression.
+    }
+
+    const chemin =
+      forme.type === "groupe"
+        ? `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(forme.cle)}`
+        : `/sell/inventory/v1/offer/${forme.offerId}`;
+
+    try {
+      await this.call(ctx, chemin, { method: "DELETE" });
+    } catch (e) {
+      if (!(e instanceof EbayHttpError) || e.status !== 404) throw e;
+      return this.ok(ctx, listing.remoteId, "Offre déjà absente d'eBay.");
+    }
+    return this.ok(ctx, listing.remoteId, "Annonce effacée chez eBay.");
   }
 
   async deactivateListing(

@@ -226,6 +226,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       listingUpdate: true,
       listingActivate: true,
       listingDeactivate: true,
+      listingDelete: true,
       stockRead: true,
       stockWrite: true,
       priceRead: true,
@@ -1159,6 +1160,78 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     return this.setStatus(ctx, listing, "DRAFT");
   }
 
+  /**
+   * Efface le produit chez Shopify.
+   *
+   * Le produit, PAS la variante : Shopify n'expose pas de suppression de
+   * variante isolée, et un produit dont on aurait ôté toutes les déclinaisons
+   * resterait de toute façon une coquille en ligne. Effacer le parent emporte
+   * ses variantes — c'est bien ce qu'on veut quand le produit disparaît du
+   * stock.
+   *
+   * Conséquence directe : sur un article à dix-sept coloris, la première
+   * annonce effacée emporte les seize autres. Les appels suivants trouvent un
+   * produit déjà absent et le comptent pour un succès — ce que fait déjà
+   * `estIntrouvable`.
+   */
+  async deleteListing(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    _idempotencyKey?: string,
+  ): Promise<TargetResult> {
+    const productId = await this.produitParent(ctx, listing);
+    if (!productId) {
+      return this.ok(
+        ctx,
+        listing.remoteId,
+        "Produit déjà absent de Shopify — rien à effacer.",
+      );
+    }
+
+    const d = await this.gql<{
+      productDelete: {
+        deletedProductId: string | null;
+        userErrors: UserError[];
+      };
+    }>(
+      ctx,
+      `mutation Effacer($input: ProductDeleteInput!) {
+        productDelete(input: $input) { deletedProductId userErrors { field message } }
+      }`,
+      { input: { id: productId } },
+    );
+
+    if ((d.productDelete.userErrors ?? []).some(estIntrouvable)) {
+      return this.ok(
+        ctx,
+        listing.remoteId,
+        "Produit déjà absent de Shopify — rien à effacer.",
+      );
+    }
+    this.assertNoUserErrors(d.productDelete.userErrors, "suppression");
+    return this.ok(ctx, listing.remoteId, "Annonce effacée chez Shopify.");
+  }
+
+  /**
+   * L'identifiant du produit parent d'une annonce, ou `undefined` s'il a
+   * disparu. Mémorisé à la création ; retrouvé par la variante sinon.
+   */
+  private async produitParent(
+    ctx: MarketplaceContext,
+    listing: Listing,
+  ): Promise<string | undefined> {
+    const connu = listing.marketplaceData?.["productId"] as string | undefined;
+    if (connu) return connu;
+    const found = await this.gql<{
+      productVariant: { product: { id: string } } | null;
+    }>(
+      ctx,
+      `query Parent($id: ID!) { productVariant(id: $id) { product { id } } }`,
+      { id: listing.remoteId },
+    );
+    return found.productVariant?.product.id;
+  }
+
   private async setStatus(
     ctx: MarketplaceContext,
     listing: Listing,
@@ -1192,21 +1265,11 @@ export class ShopifyAdapter implements MarketplaceAdapter {
           )
         : null;
 
-    let productId = listing.marketplaceData?.["productId"] as string | undefined;
+    const productId = await this.produitParent(ctx, listing);
     if (!productId) {
-      const found = await this.gql<{
-        productVariant: { product: { id: string } } | null;
-      }>(
-        ctx,
-        `query Parent($id: ID!) { productVariant(id: $id) { product { id } } }`,
-        { id: listing.remoteId },
-      );
-      productId = found.productVariant?.product.id;
-      if (!productId) {
-        const acquis = disparu();
-        if (acquis) return acquis;
-        throw new Error("Shopify : produit introuvable");
-      }
+      const acquis = disparu();
+      if (acquis) return acquis;
+      throw new Error("Shopify : produit introuvable");
     }
 
     const d = await this.gql<{ productUpdate: { userErrors: UserError[] } }>(

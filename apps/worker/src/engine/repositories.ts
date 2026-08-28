@@ -615,10 +615,40 @@ export class D1CredentialRepository implements CredentialRepository {
     };
   }
 
+  /**
+   * ÉCRIRE DES IDENTIFIANTS SANS EFFACER LES AUTRES.
+   *
+   * Cette méthode FUSIONNE avec ce qui est déjà en coffre. Elle remplaçait, et
+   * ce choix a produit le même défaut trois fois de suite, à trois endroits
+   * écrits par des mains différentes : le renouvellement de jeton, la
+   * connexion Shopify, puis les retours OAuth d'eBay et d'Etsy.
+   *
+   * Le scénario est toujours le même et ne se voit jamais tout de suite. Une
+   * boutique se reconnecte, le retour OAuth écrit les six champs qu'il
+   * connaît — identifiant, secret, jetons — et fait disparaître les huit
+   * autres que l'usage avait déposés : l'abonnement aux notifications, le
+   * numéro de vendeur appris au premier webhook, le secret de signature. La
+   * connexion « réussit », et la boutique cesse silencieusement de recevoir
+   * ses ventes en temps réel.
+   *
+   * Trois occurrences indépendantes ne sont plus des étourderies : c'est la
+   * primitive qui a la mauvaise forme. Aucun des vingt-deux appels ne
+   * cherchait à SUPPRIMER une clé — tous passaient déjà l'objet complet ou un
+   * `{ ...courant, ...correctif }`. Fusionner ne change donc rien pour eux, et
+   * rend le défaut impossible pour le vingt-troisième.
+   */
   async put(accountId: AccountId, credentials: Record<string, string>) {
-    const ciphertext = await encryptJson(this.masterKey, credentials);
+    const anciens = (await this.get(accountId)) ?? {};
+    const fusionnes = { ...anciens, ...credentials };
+
+    const ciphertext = await encryptJson(this.masterKey, fusionnes);
     const now = Math.floor(Date.now() / 1000);
-    const { acces, rafraichissement } = this.echeances(credentials);
+    /*
+     * Les échéances se lisent sur le RÉSULTAT, pas sur le correctif : un
+     * patch d'un seul champ n'en porte aucune, et les calculer sur lui
+     * remettrait les deux dates à zéro à chaque petite écriture.
+     */
+    const { acces, rafraichissement } = this.echeances(fusionnes);
 
     await this.db
       .insert(oauthToken)

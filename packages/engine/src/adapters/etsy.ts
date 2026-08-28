@@ -681,6 +681,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
       listingUpdate: true,
       listingActivate: true,
       listingDeactivate: true,
+      listingDelete: true,
       stockRead: true,
       stockWrite: true,
       priceRead: true,
@@ -1389,6 +1390,32 @@ export class EtsyAdapter implements MarketplaceAdapter {
     // « inactive » et non « supprimée » : une annonce retirée chez Etsy est
     // irrécupérable, et son historique de ventes avec elle.
     return this.setState(ctx, listing, "inactive");
+  }
+
+  /**
+   * Efface l'annonce chez Etsy.
+   *
+   * IRRÉVERSIBLE : l'annonce part avec son ancienneté, ses favoris et son
+   * historique de ventes, et la republier se repaie. C'est pour cette raison
+   * que la règle du stock à zéro DÉSACTIVE au lieu d'effacer — seule la
+   * suppression du produit passe par ici.
+   */
+  async deleteListing(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    _idempotencyKey?: string,
+  ): Promise<TargetResult> {
+    const id = listing.remoteId;
+    if (!id) throw new Error("Etsy : annonce sans identifiant distant");
+
+    try {
+      await this.call(ctx, `/listings/${id}`, { method: "DELETE" });
+    } catch (e) {
+      // Déjà effacée depuis Etsy : l'état voulu est atteint.
+      if (!(e instanceof Error) || !/réponse 404/.test(e.message)) throw e;
+      return this.ok(ctx, id, "Annonce déjà absente d'Etsy — rien à effacer.");
+    }
+    return this.ok(ctx, id, "Annonce effacée chez Etsy.");
   }
 
   private async setState(

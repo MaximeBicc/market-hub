@@ -485,6 +485,90 @@ describe("mise en place des abonnements", () => {
     expect(r.crees).toContain("ORDER_CONFIRMATION");
   });
 
+  it("nomme la reconnexion quand la portée n'a jamais été accordée", async () => {
+    /*
+     * LE SCÉNARIO QUI A COÛTÉ TROIS ALLERS-RETOURS.
+     *
+     * Une boutique reliée avant l'ajout de la portée traverse la
+     * configuration et la destination sans encombre, puis se fait refuser au
+     * dernier appel. Le refus d'eBay parle de permissions, ce qui envoie
+     * chercher dans la console développeur — où tout est coché, puisque
+     * cocher n'accorde rien.
+     *
+     * La sonde doit trancher AVANT, et dire le geste exact.
+     */
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        if (String(url).includes("/oauth2/token")) {
+          return new Response(
+            JSON.stringify({ error: "invalid_scope" }),
+            { status: 400 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      }),
+    );
+
+    await expect(
+      ebayEnsureNotifications(
+        adapter,
+        /*
+         * La sonde interroge le CONSENTEMENT, qui vit dans le jeton de
+         * rafraîchissement : sans lui elle ne peut rien trancher et laisse
+         * passer, à dessein. Le décor doit donc en porter un.
+         */
+        { ...c(), credentials: { ...c().credentials, refreshToken: "rtok" } },
+        "https://h/api/webhooks/ebay",
+        "a".repeat(32),
+        "a@b.c",
+      ),
+    ).rejects.toThrow(/Reconnecter/);
+  });
+
+  it("ne conserve JAMAIS le jeton restreint rendu par la sonde", async () => {
+    /*
+     * Le jeton que rend la sonde ne porte QUE la portée sondée. L'enregistrer
+     * remplacerait le jeton complet par un jeton mutilé : stock, commandes et
+     * annonces tomberaient toutes en « accès refusé », et la cause serait
+     * introuvable — on aurait vérifié une permission et cassé les autres.
+     */
+    const enregistres: Array<Record<string, string>> = [];
+    const appels = fetchAbonnement({
+      "/oauth2/token": { access_token: "RESTREINT", expires_in: 7200 },
+      "/destination?": { destinations: [] },
+      "/topic?": { topics: [] },
+      "/subscription?": { subscriptions: [] },
+      "/destination": { destinationId: "d1" },
+    });
+
+    await ebayEnsureNotifications(
+      adapter,
+      {
+        ...c(),
+        credentials: { ...c().credentials, refreshToken: "rtok" },
+        saveCredentials: async (patch: Record<string, string>) => {
+          enregistres.push(patch);
+        },
+      } as unknown as MarketplaceContext,
+      "https://h/api/webhooks/ebay",
+      "a".repeat(32),
+      "a@b.c",
+    );
+
+    // La sonde a bien demandé la portée, et personne n'a gardé sa réponse.
+    expect(
+      appels.some(
+        (a) =>
+          a.url.includes("/oauth2/token") &&
+          String(a.corps).includes("commerce.notification.subscription"),
+      ),
+    ).toBe(true);
+    expect(
+      enregistres.some((p) => p["accessToken"] === "RESTREINT"),
+    ).toBe(false);
+  });
+
   it("envoie le jeton APPLICATIF sur la destination, le jeton VENDEUR sur l'abonnement", async () => {
     /*
      * LE PARTAGE EXACT, ET LA RAISON DE CHAQUE CÔTÉ.

@@ -124,6 +124,25 @@ export interface MarketplaceAdapter {
   ): Promise<TargetResult>;
 
   /**
+   * Efface l'annonce chez la plateforme.
+   *
+   * Sert quand on supprime le produit : laisser l'annonce en ligne pour un
+   * article qu'on ne suit plus, c'est laisser un objet achetable sans stock ni
+   * expédition derrière lui.
+   *
+   * IRRÉVERSIBLE, et c'est pour cela qu'elle est distincte du retrait. Une
+   * annonce effacée emporte son ancienneté, son référencement et ses avis.
+   *
+   * Facultative : un module qui ne l'implémente pas se voit répondre
+   * « unsupported », et l'appelant se rabat sur le retrait de la vente.
+   */
+  deleteListing?(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    idempotencyKey: string,
+  ): Promise<TargetResult>;
+
+  /**
    * Marque une commande expédiée, avec éventuellement un numéro de suivi.
    *
    * Volontairement OBLIGATOIRE et non optionnelle : chaque adaptateur doit
