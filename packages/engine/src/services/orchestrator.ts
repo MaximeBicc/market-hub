@@ -456,6 +456,16 @@ export class MarketplaceOrchestrator {
     productId: ProductId;
     accountIds: AccountId[];
     active: boolean;
+    /**
+     * Les annonces à basculer, quand on ne veut pas toutes les basculer.
+     *
+     * Sert à REMETTRE en vente exactement ce qu'un épuisement avait couché, et
+     * rien d'autre : sans ce filtre, un réapprovisionnement publierait au
+     * passage le brouillon jamais relu qui dormait sur le même compte.
+     *
+     * Absent, le comportement ne change pas : toutes les annonces du produit.
+     */
+    listingIds?: readonly string[];
     idempotencyKey: string;
   }): Promise<CommandOutcome> {
     const need: CapabilityKey = input.active
@@ -474,10 +484,13 @@ export class MarketplaceOrchestrator {
        * Une annonce eBay à déclinaisons ne compte que pour une ligne ici :
        * c'est l'adaptateur qui sait qu'elle se retire d'un seul tenant.
        */
-      const listings = await this.listings.listByProductAndAccount(
+      const toutes = await this.listings.listByProductAndAccount(
         input.productId,
         ctx.account.id,
       );
+      const listings = input.listingIds
+        ? toutes.filter((l) => input.listingIds!.includes(l.id))
+        : toutes;
       if (listings.length === 0) {
         return {
           accountId: ctx.account.id,

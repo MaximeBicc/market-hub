@@ -1213,3 +1213,80 @@ describe("indice de boutique", () => {
     expect(adapter.indiceCompte(new Request("https://x/"))).toBeNull();
   });
 });
+
+describe("retrait d'un produit disparu de Shopify", () => {
+  /**
+   * Le cas qui rendait un article INSUPPRIMABLE À VIE.
+   *
+   * Quelqu'un efface le produit depuis l'administration Shopify. L'annonce
+   * reste chez nous, marquée « active », et pointe sur un identifiant que
+   * Shopify ne connaît plus. Supprimer le produit commence par le retirer
+   * partout : Shopify répondait « id Product does not exist », le retrait
+   * comptait pour un échec, et la suppression était refusée — indéfiniment,
+   * puisque rien ne nettoie une annonce dont la contrepartie a disparu.
+   */
+  const annonce: Listing = {
+    id: "l1",
+    productId: "p1",
+    accountId: "acc1",
+    remoteId: "gid://shopify/ProductVariant/1",
+    status: "active",
+    price: { amount: 1000, currency: "EUR" },
+    stock: 3,
+    marketplaceData: { productId: "gid://shopify/Product/1" },
+  };
+
+  it("compte le retrait comme réussi quand le produit n'existe plus", async () => {
+    const { http } = fakeHttp([
+      {
+        data: {
+          productUpdate: {
+            userErrors: [{ field: ["id"], message: "Product does not exist" }],
+          },
+        },
+      },
+    ]);
+    const r = await adapter.deactivateListing(ctxWith(http), annonce);
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/absent de Shopify/);
+  });
+
+  it("compte le retrait comme réussi quand la variante est introuvable", async () => {
+    const { http } = fakeHttp([{ data: { productVariant: null } }]);
+    const sansParent: Listing = { ...annonce, marketplaceData: {} };
+    const r = await adapter.deactivateListing(ctxWith(http), sansParent);
+    expect(r.status).toBe("success");
+  });
+
+  it("REFUSE en revanche de dire qu'une remise en vente a réussi", async () => {
+    // Republier ce qui n'existe plus est impossible : l'annoncer serait mentir,
+    // et l'article passerait pour vendable alors qu'il n'existe nulle part.
+    const { http } = fakeHttp([
+      {
+        data: {
+          productUpdate: {
+            userErrors: [{ field: ["id"], message: "Product does not exist" }],
+          },
+        },
+      },
+    ]);
+    await expect(
+      adapter.activateListing(ctxWith(http), annonce),
+    ).rejects.toThrow(/does not exist/);
+  });
+
+  it("laisse remonter une vraie erreur de retrait", async () => {
+    const { http } = fakeHttp([
+      {
+        data: {
+          productUpdate: {
+            userErrors: [{ field: ["status"], message: "Invalid status" }],
+          },
+        },
+      },
+    ]);
+    await expect(
+      adapter.deactivateListing(ctxWith(http), annonce),
+    ).rejects.toThrow(/Invalid status/);
+  });
+});

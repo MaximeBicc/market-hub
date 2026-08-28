@@ -398,6 +398,25 @@ describe("état d'une annonce", () => {
     await adapter.activateListing(ctxWith(http), annonce);
     expect(form(sent[0]?.raw ?? null)["state"]).toBe("active");
   });
+
+  /*
+   * Une annonce effacée depuis Etsy répond 404. Compter cela pour un échec
+   * bloquait la suppression du produit — qui commence par retirer partout —
+   * alors que l'état voulu, « plus rien en vente », est déjà atteint.
+   */
+  it("compte le retrait comme réussi quand l'annonce n'existe plus", async () => {
+    const { http } = fakeHttp([{ status: 404, body: { error: "not found" } }]);
+    const r = await adapter.deactivateListing(ctxWith(http), annonce);
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/absente d'Etsy/);
+  });
+
+  it("refuse en revanche de dire qu'une remise en vente a réussi", async () => {
+    const { http } = fakeHttp([{ status: 404, body: { error: "not found" } }]);
+    await expect(
+      adapter.activateListing(ctxWith(http), annonce),
+    ).rejects.toThrow(/404/);
+  });
 });
 
 describe("expédition", () => {

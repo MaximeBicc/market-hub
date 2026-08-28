@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { TargetResult } from "@hub/engine";
 import { inventory, listing, product, shop, variant } from "../db/schema.js";
@@ -81,34 +81,58 @@ export async function appliquerDisponibilite(
   } catch {
     // Une donnée illisible ne doit pas empêcher la règle de s'appliquer.
   }
-  const dejaRetire = donnees["retireParStock"] === true;
+  /*
+   * `retireParStock` porte désormais LA LISTE des annonces couchées par la
+   * règle, et non plus un simple « oui ». Sans elle, on ne savait pas quoi
+   * remettre en vente : on visait les annonces `inactive`, mais Shopify n'a
+   * pas cet état — le relevé réécrit son statut en `draft`, le filtre ne
+   * correspondait donc JAMAIS, et un article épuisé ne revenait plus jamais
+   * en ligne après réapprovisionnement.
+   *
+   * `true` est l'ancienne valeur. On la lit encore — un produit retiré avant
+   * cette version en porte une — sans savoir quelles annonces relever : dans
+   * ce cas on retombe sur l'ancien filtre par statut.
+   */
+  const marque = donnees["retireParStock"];
+  const dejaRetire = marque === true || Array.isArray(marque);
+  const couchees: string[] = Array.isArray(marque)
+    ? marque.filter((x): x is string => typeof x === "string")
+    : [];
 
   const doitEtreRetire = disponible === 0;
   // L'état voulu est déjà l'état courant : rien à écrire, rien à appeler.
   if (doitEtreRetire === dejaRetire) return RIEN;
 
   /*
-   * On ne vise que les annonces dans l'état de départ attendu.
+   * On ne vise que les annonces qu'il y a lieu de basculer.
    *
-   * Pour retirer : celles qui sont ACTIVES. Un brouillon jamais publié n'a
+   * Pour RETIRER : celles qui sont actives. Un brouillon jamais publié n'a
    * rien à retirer, et le lui demander produirait une erreur chez eBay, dont
    * l'API refuse de retirer une offre non publiée.
    *
-   * Pour remettre : celles qui sont INACTIVES — c'est-à-dire précisément
-   * celles que la règle avait couchées.
+   * Pour REMETTRE : celles que la règle avait couchées, nommément. Le statut
+   * ne peut pas servir de critère — chaque plateforme a son vocabulaire, et
+   * celui de Shopify (« draft ») ne ressemble pas au nôtre (« inactive »).
    */
-  const etatAttendu = doitEtreRetire ? "active" : "inactive";
-  const comptes = await db
-    .selectDistinct({ shopId: listing.shopId })
+  const cible = doitEtreRetire
+    ? eq(listing.status, "active")
+    : couchees.length > 0
+      ? inArray(listing.id, couchees)
+      : // Produit retiré par une version antérieure : la liste n'existe pas.
+        // On se rabat sur l'ancien critère, faute de mieux.
+        eq(listing.status, "inactive");
+
+  const visees = await db
+    .select({ id: listing.id, shopId: listing.shopId })
     .from(listing)
     .innerJoin(shop, eq(shop.id, listing.shopId))
     .where(
-      and(
-        eq(listing.productId, productId),
-        eq(listing.status, etatAttendu),
-        eq(shop.status, "active"),
-      ),
+      and(eq(listing.productId, productId), cible, eq(shop.status, "active")),
     );
+
+  const comptes = [...new Set(visees.map((v) => v.shopId))].map((shopId) => ({
+    shopId,
+  }));
 
   if (comptes.length === 0) {
     /*
@@ -117,7 +141,7 @@ export async function appliquerDisponibilite(
      * jamais reconnu comme retiré, et son réapprovisionnement n'activerait
      * rien. Le drapeau décrit l'intention, pas le nombre d'appels réussis.
      */
-    await memoriser(env, productId, donnees, doitEtreRetire);
+    await memoriser(env, productId, donnees, doitEtreRetire, []);
     return { action: doitEtreRetire ? "retire" : "remis", comptes: 0, resultats: [] };
   }
 
@@ -126,6 +150,8 @@ export async function appliquerDisponibilite(
     productId,
     accountIds: comptes.map((c) => c.shopId),
     active: !doitEtreRetire,
+    // À la remise en vente, on ne relève QUE ce qu'on avait couché.
+    ...(doitEtreRetire ? {} : { listingIds: visees.map((v) => v.id) }),
     idempotencyKey: `dispo:${productId}:${doitEtreRetire ? "off" : "on"}:${disponible}`,
   });
 
@@ -137,7 +163,13 @@ export async function appliquerDisponibilite(
    * donc n'y toucherait pas. Mieux vaut retenter au passage suivant.
    */
   if (outcome.anySuccess) {
-    await memoriser(env, productId, donnees, doitEtreRetire);
+    await memoriser(
+      env,
+      productId,
+      donnees,
+      doitEtreRetire,
+      visees.map((v) => v.id),
+    );
   }
 
   return {
@@ -152,10 +184,12 @@ async function memoriser(
   productId: string,
   donnees: Record<string, unknown>,
   retire: boolean,
+  /** Les annonces couchées, pour savoir lesquelles relever plus tard. */
+  couchees: readonly string[],
 ): Promise<void> {
   const db = drizzle(env.DB);
   const suite = { ...donnees };
-  if (retire) suite["retireParStock"] = true;
+  if (retire) suite["retireParStock"] = [...couchees];
   else delete suite["retireParStock"];
 
   await db

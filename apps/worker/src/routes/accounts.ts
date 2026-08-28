@@ -1542,10 +1542,25 @@ accounts.post("/:id/temps-reel", async (c) => {
     const message = err instanceof Error ? err.message : String(err);
     return c.json(
       {
+        /*
+         * LE MESSAGE DE LA PLATEFORME D'ABORD, NOTRE HYPOTHÈSE ENSUITE.
+         *
+         * Ce bloc REMPLAÇAIT le message par une explication devinée à partir
+         * d'un mot-clé. Quand la devinette était juste, elle aidait ; quand
+         * elle était fausse, elle envoyait chercher au mauvais endroit en
+         * cachant la seule information fiable — ce que la plateforme a
+         * réellement répondu.
+         *
+         * On garde donc le texte d'origine, et on ajoute la piste.
+         */
         error: /access denied|scope|insufficient/i.test(message)
-          ? account.marketplace === "ebay"
-            ? "eBay refuse : le jeton n'a pas la portée « commerce.notification.subscription ». Elle vient d'être ajoutée aux portées demandées — reconnectez la boutique eBay, puis réessayez."
-            : "Shopify refuse : l'application n'a pas la portée « write_webhooks ». Ajoutez-la dans le Dev Dashboard, réinstallez l'app, puis réessayez."
+          ? `${message}
+
+Piste : ${
+              account.marketplace === "ebay"
+                ? "il peut manquer la portée « commerce.notification.subscription » au jeton du vendeur. Elle a été ajoutée récemment : un jeton créé avant ne la porte pas."
+                : "il peut manquer la portée « write_webhooks » à l'application. Ajoutez-la dans le Dev Dashboard, réinstallez l'app, puis réessayez."
+            }`
           : message,
       },
       400,
