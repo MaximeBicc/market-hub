@@ -300,6 +300,8 @@ function FicheDiffusion({
   const [cibles, setCibles] = useState<Set<string>>(new Set());
   const [ciblesInitialisees, setCiblesInitialisees] = useState(false);
   const [resultats, setResultats] = useState<Resultat[] | null>(null);
+  /** Distingue « voici ce qui manque » de « voici ce qui est parti ». */
+  const [etaitVerification, setEtaitVerification] = useState(false);
 
   const { data: catalogue } = useQuery({
     queryKey: ["catalogue"],
@@ -356,6 +358,41 @@ function FicheDiffusion({
     onError: (e) => toast(e instanceof Error ? e.message : "Échec"),
   });
 
+  /**
+   * RÉPÉTER LA PUBLICATION SANS RIEN ÉCRIRE.
+   *
+   * Chaque module exécute ses contrôles et s'arrête avant sa première
+   * écriture : on obtient, boutique par boutique, exactement ce qui manque —
+   * sans brouillon facturé chez Etsy ni offre orpheline chez eBay.
+   *
+   * Les réponses s'affichent dans le MÊME bloc que celles d'une vraie
+   * publication, à dessein : ce sont les mêmes verdicts, rendus par le même
+   * code. Deux présentations différentes laisseraient croire à deux
+   * mécanismes différents.
+   */
+  const verifier = useMutation({
+    mutationFn: async () => {
+      await api.patch(`/products/${produit.id}/diffusion`, payload());
+      return api.post<{ results: Resultat[] }>("/engine/listing", {
+        productId: produit.id,
+        accountIds: [...cibles],
+        verifier: true,
+      });
+    },
+    onMutate: () => setResultats(null),
+    onSuccess: (r) => {
+      setResultats(r.results);
+      setEtaitVerification(true);
+      const prets = r.results.filter((x) => x.status === "success").length;
+      toast(
+        prets === r.results.length
+          ? `Tout est prêt sur ${prets} boutique${prets > 1 ? "s" : ""} — rien n'a été envoyé`
+          : `${r.results.length - prets} boutique(s) bloquée(s) — rien n'a été envoyé`,
+      );
+    },
+    onError: (e) => toast(e instanceof Error ? e.message : "Vérification impossible"),
+  });
+
   const publier = useMutation({
     mutationFn: async () => {
       // Enregistrer d'abord garantit que le texte visible dans ce panneau est
@@ -368,7 +405,10 @@ function FicheDiffusion({
         publish: true,
       });
     },
-    onMutate: () => setResultats(null),
+    onMutate: () => {
+      setResultats(null);
+      setEtaitVerification(false);
+    },
     onSuccess: async (r) => {
       setResultats(r.results);
       const enLigne = r.results.filter((x) => x.status === "success").length;
@@ -557,6 +597,16 @@ function FicheDiffusion({
             <h3>Prêt à publier ?</h3>
             <div>{controles.map((c) => <span className={c.ok ? "is-ok" : "is-missing"} key={c.texte}><Icon name={c.ok ? "checkCircle" : "alert"} />{c.texte}</span>)}</div>
             <button className="btn btn--ghost btn--wide" disabled={enregistrer.isPending} onClick={() => enregistrer.mutate()}>{enregistrer.isPending ? "Enregistrement…" : "Enregistrer sans publier"}</button>
+            {/*
+              * VÉRIFIER D'ABORD, ET SANS CONDITION.
+              *
+              * Ce bouton n'est pas grisé quand la liste de contrôle est
+              * incomplète — c'est justement là qu'il sert. Il interroge les
+              * boutiques elles-mêmes, qui savent des exigences que cette
+              * liste ignore : les caractéristiques propres à une catégorie
+              * eBay, l'éligibilité d'un article chez Etsy.
+              */}
+            <button className="btn btn--wide" disabled={cibles.size === 0 || verifier.isPending} onClick={() => verifier.mutate()}><Icon name="check" />{verifier.isPending ? "Vérification…" : "Vérifier sans envoyer"}</button>
             <button className="btn btn--primary btn--wide publish-submit" disabled={!pret || publier.isPending} onClick={() => publier.mutate()}><Icon name="upload" />{publier.isPending ? "Mise en ligne…" : `Publier sur ${cibles.size} boutique${cibles.size > 1 ? "s" : ""}`}</button>
             <small>Le clic rend les annonces visibles immédiatement. Relancer ne crée aucun doublon.</small>
           </section>
@@ -564,9 +614,10 @@ function FicheDiffusion({
       </div>
 
       {publier.isPending && <div className="card publish-progress"><PalmLoader compact label="Envoi des photos et mise en ligne sur vos boutiques…" /></div>}
+      {verifier.isPending && <div className="card publish-progress"><PalmLoader compact label="Interrogation de chaque boutique — rien n'est envoyé…" /></div>}
 
       {resultats && <section className="publish-results">
-        <div className="publish-results__head"><div><span>Publication terminée</span><h2>Vos annonces, boutique par boutique</h2></div></div>
+        <div className="publish-results__head"><div><span>{etaitVerification ? "Vérification — rien n'a été envoyé" : "Publication terminée"}</span><h2>{etaitVerification ? "Ce qu'il reste à remplir, boutique par boutique" : "Vos annonces, boutique par boutique"}</h2></div></div>
         <div className="publish-results__grid">{resultats.map((r) => {
           const v = VERDICTS[r.status];
           const boutique = boutiques.find((b) => b.id === r.accountId);
