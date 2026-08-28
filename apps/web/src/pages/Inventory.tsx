@@ -15,6 +15,7 @@ import { ProductModal } from "../components/ProductModal.js";
 import { AlibabaModal } from "../components/AlibabaModal.js";
 import { ConsumableModal } from "../components/ConsumableModal.js";
 import { FulfillmentModal } from "../components/FulfillmentModal.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 
 const CATEGORY_ICONS: Record<string, string> = {
   envelope: "✉️",
@@ -102,7 +103,7 @@ export function Inventory() {
     },
   });
 
-  if (isLoading || !data) return <div className="boot">Chargement…</div>;
+  if (isLoading || !data) return <PalmLoader label="Chargement du stock…" />;
 
   const products = data.products ?? [];
   const consumables = data.consumables ?? [];
@@ -814,7 +815,7 @@ function DeclinaisonsProduit({ produitId }: { produitId: string }) {
   if (isLoading) {
     return (
       <div className="declinaisons">
-        <span className="muted">Lecture des déclinaisons…</span>
+        <PalmLoader compact label="Lecture des déclinaisons…" />
       </div>
     );
   }

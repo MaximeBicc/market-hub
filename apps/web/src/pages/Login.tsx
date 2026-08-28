@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../lib/api.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 
 /**
  * Connexion par identifiant et mot de passe.
@@ -32,6 +33,10 @@ export function Login() {
       );
       setBusy(false);
     }
+  }
+
+  if (busy) {
+    return <PalmLoader fullscreen label="Connexion à MarketHub…" />;
   }
 
   return (
@@ -74,10 +79,10 @@ export function Login() {
         <button
           type="submit"
           className="btn btn--primary btn--wide"
-          disabled={busy || !username || !password}
+          disabled={!username || !password}
           style={{ marginTop: 4 }}
         >
-          {busy ? "Vérification…" : "Se connecter"}
+          Se connecter
         </button>
       </form>
     </div>

@@ -12,6 +12,7 @@ import { Publier } from "./pages/Publier.js";
 import { Shops } from "./pages/Shops.js";
 import { Settings } from "./pages/Settings.js";
 import { Icon } from "./components/Icon.js";
+import { PalmLoader } from "./components/PalmLoader.js";
 import { Toast } from "./components/Toast.js";
 
 /**
@@ -91,7 +92,7 @@ export function App() {
   const location = useLocation();
   const travaux = useTravauxEnCours(Boolean(auth?.authenticated));
 
-  if (isLoading) return <div className="boot">…</div>;
+  if (isLoading) return <PalmLoader fullscreen label="Ouverture de MarketHub…" />;
   if (!auth?.authenticated) return <Login />;
 
   const title = TITLES[location.pathname] ?? "MarketHub";

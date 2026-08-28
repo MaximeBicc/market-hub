@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, money, when, type Overview as O } from "../lib/api.js";
 import { Empty } from "../components/Empty.js";
 import { Icon } from "../components/Icon.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 import { toast } from "../components/Toast.js";
 
 /**
@@ -42,7 +43,7 @@ export function Overview() {
     refetchInterval: 60_000,
   });
 
-  if (isLoading || !data) return <div className="boot">Chargement…</div>;
+  if (isLoading || !data) return <PalmLoader label="Chargement de l’accueil…" />;
 
   const noShops = data.shops.length === 0;
   const boutiques = data.shops.filter((s) => !estFournisseur(s.platform));

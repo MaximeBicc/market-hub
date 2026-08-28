@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api, money } from "../lib/api.js";
 import { Empty } from "../components/Empty.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 
 interface GrowthData {
   days: Array<{ date: string; label: string; total: number; count: number }>;
@@ -26,7 +27,7 @@ export function Growth() {
     queryFn: () => api.get<GrowthData>("/growth?days=30"),
   });
 
-  if (isLoading || !data) return <div className="boot">Chargement…</div>;
+  if (isLoading || !data) return <PalmLoader label="Chargement de la croissance…" />;
 
   if (data.count === 0) {
     return (

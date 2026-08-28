@@ -4,6 +4,7 @@ import { api, money, when, type OrderRow } from "../lib/api.js";
 import { Empty } from "../components/Empty.js";
 import { Icon } from "../components/Icon.js";
 import { FulfillmentModal } from "../components/FulfillmentModal.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   pending: { label: "en attente", cls: "pill--warn" },
@@ -43,7 +44,7 @@ export function Orders() {
     },
   });
 
-  if (isLoading || !data) return <div className="boot">Chargement…</div>;
+  if (isLoading || !data) return <PalmLoader label="Chargement des commandes…" />;
 
   const shops = overview?.shops ?? [];
   const allOrders = data.orders;
@@ -288,4 +289,3 @@ export function Orders() {
     </>
   );
 }
-

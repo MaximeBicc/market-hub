@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api.js";
 import { Empty } from "../components/Empty.js";
 import { Icon } from "../components/Icon.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 import { toast } from "../components/Toast.js";
 
 interface Account {
@@ -86,7 +87,7 @@ export function Shops() {
     queryFn: () => api.get<{ accounts: Account[] }>("/engine/accounts"),
   });
 
-  if (isLoading || !data) return <div className="boot">Chargement…</div>;
+  if (isLoading || !data) return <PalmLoader label="Chargement des boutiques…" />;
 
   /**
    * Demande à la plateforme de pousser ses événements.
@@ -1171,9 +1172,7 @@ function Reglages({
   if (isLoading) {
     return (
       <div className="card" style={{ marginTop: 9 }}>
-        <p className="muted" style={{ margin: 0 }}>
-          Lecture de vos profils chez la plateforme…
-        </p>
+        <PalmLoader compact label="Lecture de vos profils chez la plateforme…" />
       </div>
     );
   }

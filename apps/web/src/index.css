@@ -927,12 +927,122 @@ h2.sec:first-child {
 /* ================================================================
    DIVERS
    ================================================================ */
-.boot {
+/* Un seul langage visuel pour tous les temps d'attente. Le SVG reste dans le
+   bundle : le chargeur est donc disponible avant toute réponse du réseau. */
+.palm-loader {
+  min-height: min(68dvh, 640px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  text-align: center;
+  padding: 32px 20px;
+}
+.palm-loader--fullscreen {
   min-height: 100dvh;
+  background:
+    radial-gradient(circle at 50% 46%, color-mix(in srgb, var(--accent-soft) 52%, transparent) 0 12%, transparent 36%),
+    var(--page);
+}
+.palm-loader--compact {
+  min-height: 150px;
+  padding: 18px;
+}
+.palm-loader__scene {
+  position: relative;
+  width: 118px;
+  height: 118px;
   display: grid;
   place-items: center;
-  color: var(--muted);
+  margin-bottom: 8px;
+}
+.palm-loader--compact .palm-loader__scene {
+  width: 76px;
+  height: 76px;
+  margin-bottom: 4px;
+}
+.palm-loader__halo {
+  position: absolute;
+  inset: 9px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent-soft) 74%, transparent);
+  animation: palm-halo 1.9s ease-in-out infinite;
+}
+.palm-loader__palm {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.palm-loader__tree {
+  transform-box: view-box;
+  transform-origin: 60px 101px;
+  animation: palm-sway 2.25s ease-in-out infinite alternate;
+}
+.palm-loader__trunk {
+  fill: none;
+  stroke: var(--brand-2);
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+.palm-loader__leaves {
+  fill: var(--accent);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: palm-leaves 1.55s ease-in-out infinite alternate;
+}
+.palm-loader__shadow {
+  fill: color-mix(in srgb, var(--brand) 17%, transparent);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: palm-shadow 2.25s ease-in-out infinite alternate;
+}
+.palm-loader__label {
+  color: var(--ink-2);
   font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.palm-loader--compact .palm-loader__label {
+  font-size: 12.5px;
+}
+.palm-loader__dots {
+  display: flex;
+  gap: 5px;
+  height: 12px;
+  margin-top: 7px;
+}
+.palm-loader__dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: palm-dot 1.15s ease-in-out infinite;
+}
+.palm-loader__dots i:nth-child(2) { animation-delay: 0.14s; }
+.palm-loader__dots i:nth-child(3) { animation-delay: 0.28s; }
+
+@keyframes palm-sway {
+  from { transform: rotate(-2.2deg); }
+  to { transform: rotate(2.2deg); }
+}
+@keyframes palm-leaves {
+  from { transform: rotate(-1.2deg) scale(0.985); }
+  to { transform: rotate(1.2deg) scale(1.015); }
+}
+@keyframes palm-shadow {
+  from { transform: scaleX(0.84); opacity: 0.48; }
+  to { transform: scaleX(1); opacity: 0.68; }
+}
+@keyframes palm-halo {
+  0%, 100% { transform: scale(0.94); opacity: 0.6; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+@keyframes palm-dot {
+  0%, 65%, 100% { transform: translateY(0); opacity: 0.32; }
+  32% { transform: translateY(-4px); opacity: 1; }
 }
 .muted {
   color: var(--muted);
@@ -989,6 +1099,13 @@ h2.sec:first-child {
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+  }
+  .palm-loader__tree,
+  .palm-loader__leaves,
+  .palm-loader__shadow,
+  .palm-loader__halo,
+  .palm-loader__dots i {
+    animation: none !important;
   }
 }
 

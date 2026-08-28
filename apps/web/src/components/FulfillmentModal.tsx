@@ -10,6 +10,7 @@ import {
   type FulfillOrderResponse,
 } from "../lib/api.js";
 import { Icon } from "./Icon.js";
+import { PalmLoader } from "./PalmLoader.js";
 
 interface FulfillmentModalProps {
   orderId: string;
@@ -475,7 +476,7 @@ export function FulfillmentModal({ orderId, onClose, onSuccess }: FulfillmentMod
     return (
       <div className="modal-overlay" onClick={onClose}>
         <div className="modal-card modal-card--loading" onClick={(e) => e.stopPropagation()}>
-          <div className="boot">Chargement de la commande…</div>
+          <PalmLoader compact label="Chargement de la commande…" />
         </div>
       </div>
     );

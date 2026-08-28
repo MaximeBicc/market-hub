@@ -37,6 +37,7 @@ import {
 } from "../lib/ai.js";
 import { Empty } from "../components/Empty.js";
 import { Icon } from "../components/Icon.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 import { Rempart } from "../components/Rempart.js";
 import { toast } from "../components/Toast.js";
 
@@ -103,7 +104,7 @@ export function Analyse() {
 
   const oublier = (jobId: string) => setJobs(forgetJob(jobId));
 
-  if (isLoading || !data) return <div className="boot">Chargement…</div>;
+  if (isLoading || !data) return <PalmLoader label="Chargement des analyses…" />;
 
   const produit = data.produits.find((p) => p.productId === selected) ?? null;
   const enCours = jobs.length > 0;
