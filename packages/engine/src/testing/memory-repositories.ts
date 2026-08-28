@@ -91,6 +91,9 @@ export class MemoryListingRepository implements ListingRepository {
   async listByProduct(productId: ProductId) {
     return [...this.items.values()].filter((l) => l.productId === productId);
   }
+  async remove(id: string) {
+    this.items.delete(id);
+  }
 }
 
 export class MemoryVariantRepository implements VariantRepository {

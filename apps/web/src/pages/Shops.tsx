@@ -391,6 +391,9 @@ export function Shops() {
       {reglages && (
         <Reglages
           accountId={reglages}
+          marketplace={
+            data.accounts.find((a) => a.id === reglages)?.marketplace ?? ""
+          }
           onFerme={() => setReglages(null)}
         />
       )}
@@ -1170,9 +1173,11 @@ interface Reglage {
  */
 function Reglages({
   accountId,
+  marketplace,
   onFerme,
 }: {
   accountId: string;
+  marketplace: string;
   onFerme: () => void;
 }) {
   const qc = useQueryClient();
@@ -1278,6 +1283,84 @@ function Reglages({
         >
           Enregistrer
         </button>
+      )}
+
+      {marketplace === "etsy" && <SecretEtsy accountId={accountId} />}
+    </div>
+  );
+}
+
+/**
+ * LE SECRET DE SIGNATURE D'ETSY.
+ *
+ * Etsy n'a pas d'API pour créer un abonnement aux notifications : le point
+ * d'entrée se déclare à la main dans son portail, qui rend alors un secret en
+ * « whsec_… ». Ce secret est la seule chose qui distingue une vraie
+ * notification d'une contrefaçon — sans lui, l'adaptateur refuse tout, et la
+ * boutique reste relevée toutes les deux minutes au lieu d'être poussée.
+ *
+ * Il ne passe PAS par la route générique des réglages : celle-ci n'accepte
+ * que des identifiants choisis dans une liste, et sa liste blanche est ce qui
+ * l'empêche de devenir une écriture libre dans le coffre — jetons compris.
+ * Un secret en texte libre a donc sa propre route, volontairement étroite.
+ */
+function SecretEtsy({ accountId }: { accountId: string }) {
+  const qc = useQueryClient();
+  const [secret, setSecret] = useState("");
+
+  const envoyer = useMutation({
+    mutationFn: (v: string) =>
+      api.post(`/engine/accounts/${accountId}/etsy/profils`, {
+        webhookSecret: v,
+      }),
+    onSuccess: async () => {
+      toast("Secret enregistré — Etsy peut pousser ses ventes");
+      // Effacé de la mémoire du navigateur dès qu'il est parti.
+      setSecret("");
+      await qc.invalidateQueries({ queryKey: ["accounts"] });
+    },
+    onError: (e: unknown) => toast(e instanceof Error ? e.message : "Échec"),
+  });
+
+  const rappel = `${window.location.origin}/api/webhooks/etsy`;
+  const valide = /^whsec_/.test(secret.trim());
+
+  return (
+    <div style={{ marginTop: 18, borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+      <span className="row__t">Ventes en temps réel</span>
+      <p className="muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
+        Dans le portail Etsy, onglet <b>Webhooks</b>, crée un point d'entrée sur
+        cette adresse et abonne-le aux événements <b>order.paid</b> et{" "}
+        <b>order.canceled</b>. Etsy rend alors un secret en « whsec_… » : colle-le
+        ici.
+      </p>
+      <div className="field">
+        <label htmlFor="etsy-rappel">Adresse à déclarer chez Etsy</label>
+        <input id="etsy-rappel" className="input" readOnly value={rappel} />
+      </div>
+      <div className="field">
+        <label htmlFor="etsy-secret">Secret de signature</label>
+        <input
+          id="etsy-secret"
+          className="input"
+          type="password"
+          autoComplete="off"
+          placeholder="whsec_…"
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+        />
+      </div>
+      <button
+        className="btn btn--primary btn--wide"
+        disabled={!valide || envoyer.isPending}
+        onClick={() => envoyer.mutate(secret.trim())}
+      >
+        {envoyer.isPending ? "Enregistrement…" : "Enregistrer le secret"}
+      </button>
+      {secret && !valide && (
+        <p className="muted" style={{ marginTop: 8 }}>
+          Un secret Etsy commence par « whsec_ ».
+        </p>
       )}
     </div>
   );

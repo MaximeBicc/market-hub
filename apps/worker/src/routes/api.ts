@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
 import { and, desc, eq, gte, gt, or, sql, lte, inArray } from "drizzle-orm";
 import type { QueueTask } from "@hub/core";
+import type { TargetResult } from "@hub/engine";
 import {
   consumable,
   eventLog,
@@ -24,6 +25,7 @@ import { ficheProduit, idDepuisLien } from "../lib/alibaba.js";
 import {
   appliquerDisponibilite,
   retirerPartout,
+  supprimerPartout,
 } from "../lib/disponibilite.js";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { marquerSupprime } from "../lib/suppression.js";
@@ -1759,31 +1761,53 @@ api.delete("/products/:id", async (c) => {
   const id = c.req.param("id");
 
   /*
-   * RETIRER DE LA VENTE AVANT D'EFFACER.
+   * SUPPRIMER LE PRODUIT SUPPRIME SES ANNONCES.
    *
-   * Une annonce laissée en ligne pour un produit qu'on vient de supprimer est
-   * un article achetable que plus rien ne suit : ni stock, ni coût, ni
-   * expédition. Et la synchronisation la retrouverait au passage suivant pour
-   * recréer un produit vide — la suppression n'aurait servi qu'à perdre le
-   * coût d'achat et les déclarations obligatoires.
+   * Deux règles cohabitent dans cet outil, et les confondre a coûté cher :
    *
-   * Si une plateforme refuse, on N'EFFACE PAS. Supprimer quand même
-   * laisserait exactement la situation qu'on cherche à éviter, en silence.
+   *   stock à zéro    → on MASQUE. L'article reviendra ; son ancienneté, son
+   *                     référencement et ses avis doivent l'attendre, parce
+   *                     que les algorithmes des plateformes favorisent une
+   *                     annonce établie et qu'ils ne se rachètent pas.
+   *   produit supprimé → on EFFACE. L'article ne revient pas. Une annonce
+   *                     laissée en ligne serait un objet achetable que plus
+   *                     rien ne suit : ni stock, ni coût, ni expédition.
+   *
+   * Une plateforme qui ne sait pas effacer se voit au moins retirer l'annonce
+   * de la vente : mieux vaut un brouillon orphelin qu'un article vendable
+   * qu'on ne peut pas honorer.
+   *
+   * Si une plateforme ÉCHOUE — par opposition à « ne sait pas faire » — on
+   * n'efface rien du tout. Supprimer quand même laisserait exactement la
+   * situation qu'on cherche à éviter, et en silence.
    */
-  const retrait = await retirerPartout(c.env, id);
-  const echecs = retrait.resultats.filter(
-    (r) => r.status !== "success" && r.status !== "unsupported",
-  );
-  if (echecs.length > 0) {
+  const echec = (resultats: readonly TargetResult[], quoi: string) => {
+    const ratés = resultats.filter(
+      (r) => r.status !== "success" && r.status !== "unsupported",
+    );
+    if (ratés.length === 0) return null;
     return c.json(
       {
-        error:
-          "Impossible de retirer l'annonce de la vente — le produit n'a pas été supprimé.",
-        detail: echecs.map((r) => `${r.marketplace} : ${r.message ?? r.status}`),
+        error: `Impossible ${quoi} — le produit n'a pas été supprimé.`,
+        detail: ratés.map((r) => `${r.marketplace} : ${r.message ?? r.status}`),
       },
       409,
     );
-  }
+  };
+
+  // Budget de sous-requêtes partagé : effacer puis retirer sur trois comptes
+  // se compte en une dizaine d'appels, et le plan gratuit en autorise 50.
+  const compteur = { used: 0 };
+
+  const suppression = await supprimerPartout(c.env, id, compteur);
+  const refus = echec(suppression.resultats, "d'effacer l'annonce");
+  if (refus) return refus;
+
+  // Ce que personne n'a su effacer ne doit au moins plus être en vente. Les
+  // annonces effacées ont disparu de la base : il ne reste ici que le reliquat.
+  const retrait = await retirerPartout(c.env, id, compteur);
+  const refus2 = echec(retrait.resultats, "de retirer l'annonce de la vente");
+  if (refus2) return refus2;
 
   /*
    * CINQ RÉFÉRENCES POINTENT VERS CE PRODUIT ET SES VARIANTES.
@@ -1798,9 +1822,11 @@ api.delete("/products/:id", async (c) => {
    *   inventory.variant_id     → ses variantes
    *   variant.product_id       → le produit
    *
-   * Les annonces, elles, SURVIVENT : elles existent chez la plateforme et
-   * continueront d'être relevées par la synchronisation. Les supprimer ici
-   * les ferait réapparaître au passage suivant, orphelines et sans stock.
+   * Les annonces effacées chez la plateforme sont DÉJÀ parties de la base :
+   * `supprimerPartout` retire la ligne locale en même temps que l'objet
+   * distant. Ce qui suit ne concerne donc que le reliquat — les comptes dont
+   * la plateforme ne sait pas effacer. Ces annonces-là survivent, puisqu'elles
+   * existent encore et continueront d'être relevées.
    */
   const siennes = await db
     .select({ id: variant.id })
@@ -1836,7 +1862,11 @@ api.delete("/products/:id", async (c) => {
    * produit par la bande.
    */
   const siennesAnnonces = await db
-    .select({ id: listing.id, data: listing.marketplaceData })
+    .select({
+      id: listing.id,
+      groupId: listing.groupId,
+      data: listing.marketplaceData,
+    })
     .from(listing)
     .where(eq(listing.productId, id));
 
@@ -1858,6 +1888,29 @@ api.delete("/products/:id", async (c) => {
       .update(listingGroup)
       .set({ marketplaceData: marquerSupprime(g.data, now) })
       .where(eq(listingGroup.id, g.id));
+  }
+
+  /*
+   * Un groupe dont plus AUCUNE annonce ne subsiste ne décrit plus rien : son
+   * objet distant a été effacé avec elles. Le garder laisserait une ligne que
+   * rien ne relit et que rien ne nettoiera jamais.
+   *
+   * Le test porte sur les annonces restantes, pas sur ce qu'on croit avoir
+   * effacé : un compte dont la plateforme ne sait pas effacer garde les
+   * siennes, et son groupe reste donc en place, marqué.
+   */
+  const vides = groupes.filter(
+    (g) => !siennesAnnonces.some((l) => l.groupId === g.id),
+  );
+  for (const g of vides) {
+    const reste = await db
+      .select({ id: listing.id })
+      .from(listing)
+      .where(eq(listing.groupId, g.id))
+      .limit(1);
+    if (reste.length === 0) {
+      await db.delete(listingGroup).where(eq(listingGroup.id, g.id));
+    }
   }
 
   await db

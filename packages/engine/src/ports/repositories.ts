@@ -71,6 +71,14 @@ export interface ListingRepository {
   ): Promise<Listing | undefined>;
   put(listing: Listing): Promise<void>;
   listByProduct(productId: ProductId): Promise<Listing[]>;
+  /**
+   * Efface la ligne locale d'une annonce.
+   *
+   * À n'appeler que lorsque l'annonce a disparu CHEZ LA PLATEFORME. La garder
+   * décrirait un objet qui n'existe plus, et aucun relevé ne la corrigerait :
+   * ce qui a quitté le catalogue distant n'est plus jamais relu.
+   */
+  remove(id: string): Promise<void>;
 }
 
 /**

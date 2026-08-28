@@ -202,13 +202,52 @@ async function memoriser(
 }
 
 /**
+ * Efface les annonces d'un produit chez toutes les plateformes.
+ *
+ * SUPPRIMER UN PRODUIT SUPPRIME SES ANNONCES. C'est la règle, et elle se
+ * distingue de celle du stock à zéro : là, on MASQUE — l'article reviendra, et
+ * son ancienneté comme ses avis doivent l'attendre. Ici, l'article ne revient
+ * pas ; laisser l'annonce en ligne, fût-elle en brouillon, encombrerait la
+ * boutique d'objets que plus rien ne suit.
+ *
+ * La ligne locale part avec l'annonce distante : ce qui a quitté le catalogue
+ * de la plateforme n'est plus jamais relu, donc plus jamais corrigé.
+ *
+ * Une plateforme qui ne sait pas effacer répond « unsupported » — à l'appelant
+ * d'enchaîner sur `retirerPartout`, faute de mieux.
+ */
+export async function supprimerPartout(
+  env: Env,
+  productId: string,
+  compteur: { used: number } = { used: 0 },
+): Promise<{ comptes: number; resultats: TargetResult[] }> {
+  const db = drizzle(env.DB);
+
+  const comptes = await db
+    .selectDistinct({ shopId: listing.shopId })
+    .from(listing)
+    .innerJoin(shop, eq(shop.id, listing.shopId))
+    .where(and(eq(listing.productId, productId), eq(shop.status, "active")));
+
+  if (comptes.length === 0) return { comptes: 0, resultats: [] };
+
+  const mod = buildEngine(env, compteur);
+  const outcome = await mod.orchestrator.deleteListings({
+    productId,
+    accountIds: comptes.map((c) => c.shopId),
+    idempotencyKey: `suppression:${productId}`,
+  });
+
+  return { comptes: comptes.length, resultats: outcome.results };
+}
+
+/**
  * Retire les annonces d'un produit sur toutes les boutiques, sans condition.
  *
- * Sert avant une suppression : effacer un produit dont les annonces restent en
- * vente laisserait des articles achetables que plus rien ne suit. Pire, la
- * synchronisation les retrouverait au passage suivant et recréerait un
- * produit — la suppression n'aurait servi qu'à perdre le coût d'achat et les
- * déclarations obligatoires.
+ * Filet de `supprimerPartout` : ce qu'une plateforme n'a pas su effacer ne
+ * doit au moins plus être achetable. Laisser une annonce en vente pour un
+ * produit qu'on ne suit plus, c'est un article sans stock, sans coût et sans
+ * expédition derrière lui.
  */
 export async function retirerPartout(
   env: Env,

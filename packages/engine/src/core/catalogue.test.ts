@@ -56,6 +56,7 @@ describe("catalogue des commandes", () => {
       "setPrice",
       "setStock",
       "setActive",
+      "deleteListings",
       "fulfillOrder",
     ]) {
       expect(ids).toContain(attendu);

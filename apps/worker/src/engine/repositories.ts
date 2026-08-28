@@ -291,6 +291,10 @@ export class D1ListingRepository implements ListingRepository {
     return rows.map((r) => this.map(r));
   }
 
+  async remove(id: string) {
+    await this.db.delete(listing).where(eq(listing.id, id));
+  }
+
   async put(l: Listing) {
     const now = Math.floor(Date.now() / 1000);
     // L'empreinte reste calculée ici : c'est elle qui évite de réécrire une

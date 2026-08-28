@@ -452,6 +452,101 @@ export class MarketplaceOrchestrator {
     return outcome;
   }
 
+  /**
+   * Efface les annonces d'un produit chez les plateformes.
+   *
+   * Sert à la suppression d'un produit : une annonce laissée en ligne pour un
+   * article qu'on ne suit plus est un objet achetable sans stock ni
+   * expédition derrière lui.
+   *
+   * IRRÉVERSIBLE. Ce n'est pas `setActive(false)`, qui couche l'annonce en la
+   * conservant — c'est le geste des ruptures de stock, où l'ancienneté et les
+   * avis doivent survivre.
+   *
+   * Une plateforme qui ne sait pas effacer répond « unsupported » : à
+   * l'appelant de se rabattre sur le retrait, plutôt que de laisser l'article
+   * en vente sans le dire.
+   */
+  async deleteListings(input: {
+    productId: ProductId;
+    accountIds: AccountId[];
+    idempotencyKey: string;
+  }): Promise<CommandOutcome> {
+    const outcome = await this.fanOut(
+      input.accountIds,
+      "listingDelete",
+      async (ctx, adapter) => {
+        if (!adapter.deleteListing) {
+          return {
+            accountId: ctx.account.id,
+            marketplace: ctx.account.marketplace,
+            status: "unsupported" as const,
+            message: `${ctx.account.marketplace} ne sait pas effacer une annonce`,
+          };
+        }
+
+        const listings = await this.listings.listByProductAndAccount(
+          input.productId,
+          ctx.account.id,
+        );
+        if (listings.length === 0) {
+          return {
+            accountId: ctx.account.id,
+            marketplace: ctx.account.marketplace,
+            status: "unsupported" as const,
+            message: "Aucune annonce pour ce produit sur ce compte",
+          };
+        }
+
+        const resultats: TargetResult[] = [];
+        for (const l of listings) {
+          resultats.push(
+            await adapter.deleteListing(
+              ctx,
+              l,
+              `${input.idempotencyKey}:${ctx.account.id}:${l.id}`,
+            ),
+          );
+          /*
+           * La ligne locale part avec l'annonce distante.
+           *
+           * La garder décrirait un objet qui n'existe plus, et le prochain
+           * relevé ne la corrigerait jamais : une annonce absente du catalogue
+           * distant n'est plus jamais relue. C'est exactement l'état qui
+           * rendait un article insupprimable.
+           */
+          if (resultats[resultats.length - 1]!.status === "success") {
+            await this.listings.remove(l.id);
+          }
+        }
+
+        // Un seul verdict pour le compte, et c'est le PIRE qui l'emporte :
+        // annoncer « effacé » alors qu'une annonce sur trois est restée en
+        // ligne laisserait un article achetable que plus rien ne suit.
+        const rate = resultats.find(
+          (x) => x.status !== "success" && x.status !== "unsupported",
+        );
+        return (
+          rate ?? {
+            accountId: ctx.account.id,
+            marketplace: ctx.account.marketplace,
+            status: "success",
+            ...(listings.length > 1
+              ? { message: `${listings.length} annonces effacées` }
+              : {}),
+          }
+        );
+      },
+    );
+    await this.report(
+      "deleteListings",
+      input.idempotencyKey,
+      input.productId,
+      outcome,
+    );
+    return outcome;
+  }
+
   async setActive(input: {
     productId: ProductId;
     accountIds: AccountId[];

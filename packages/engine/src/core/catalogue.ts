@@ -66,6 +66,13 @@ export const COMMANDES: readonly CommandeCatalogue[] = [
     portee: "multi",
   },
   {
+    id: "deleteListings",
+    libelle: "Effacer une annonce",
+    exige: ["listingDelete"],
+    ecrit: true,
+    portee: "multi",
+  },
+  {
     id: "fulfillOrder",
     libelle: "Marquer expédié, avec suivi",
     // `trackingWrite` si un numéro est fourni, `ordersFulfill` sinon.
