@@ -1807,16 +1807,15 @@ export class EtsyAdapter implements MarketplaceAdapter {
 
   webhookSignaux(): SignalWebhook[] {
     /*
-     * Etsy ne pousse qu'un identifiant de commande, dans une forme que sa
-     * documentation ne fige pas. Il n'y a donc rien à exploiter directement :
-     * le signal dit « va relire les ventes », et c'est déjà l'essentiel — la
-     * détection passe de deux minutes à quelques secondes.
+     * Rien ici : la notification est désormais TRADUITE en vente par
+     * `verifyAndParseWebhook`, qui lit la commande exacte. Demander en plus
+     * une relecture des ventes ferait deux fois le travail — et le relevé de
+     * secours, lui, tourne de toute façon.
      *
-     * La notification porte pourtant un `resource_url` qui désigne la
-     * commande exacte. L'exploiter ferait tomber le relevé à UN appel au lieu
-     * d'une page complète ; c'est le prochain gain sur cette plateforme.
+     * Si la lecture ciblée échoue, elle rend une liste vide : c'est le
+     * routeur qui retombe alors sur la relecture, exactement là où il faut.
      */
-    return [{ type: "relire", resource: "orders" }];
+    return [];
   }
 
   /**
@@ -1882,8 +1881,141 @@ export class EtsyAdapter implements MarketplaceAdapter {
       throw new Error("Etsy : signature de webhook invalide");
     }
 
-    return [];
+    /*
+     * ══ À PARTIR D'ICI, LE CORPS EST DIGNE DE CONFIANCE ══
+     *
+     * Etsy nomme la commande exacte qui a changé. Le chemin d'avant répondait
+     * « va relire les ventes », ce qui déclenchait une page complète de
+     * commandes — cinquante lectures pour une vente. Lire LA commande coûte un
+     * appel.
+     */
+    let charge: { event_type?: string; resource_url?: string; shop_id?: number };
+    try {
+      charge = JSON.parse(rawBody);
+    } catch {
+      return [];
+    }
+
+    /*
+     * L'identifiant de boutique sert ici de CONTRÔLE, pas de prérequis. Le
+     * réclamer ferait échouer la lecture d'un compte qui ne l'a pas encore
+     * mémorisé — alors que l'adresse en porte un, et que le jeton employé
+     * reste celui du compte : Etsy refuserait de toute façon la commande
+     * d'une boutique étrangère.
+     */
+    const attendu = ctx.credentials?.["shopId"] ?? ctx.account.externalAccountId ?? "";
+    const cible = lireResourceUrl(charge.resource_url, attendu);
+    if (!cible) return [];
+
+    /*
+     * Le genre se lit sur `event_type`. Attention : la documentation écrit
+     * « order.paid », la charge réelle porte « ORDER_PAID ». On normalise les
+     * deux formes plutôt que de parier sur l'une.
+     */
+    const genre = GENRE_ETSY[
+      (charge.event_type ?? "").toUpperCase().replace(/\./g, "_")
+    ];
+    if (!genre) return [];
+
+    let recu: RecuEtsy;
+    try {
+      recu = await this.call<RecuEtsy>(
+        ctx,
+        `/shops/${cible.shopId}/receipts/${cible.receiptId}`,
+      );
+    } catch {
+      /*
+       * La commande n'a pas pu être lue — jeton fatigué, panne passagère. On
+       * rend une liste vide plutôt que de lever : lever ferait croire au
+       * routeur que ce webhook n'était pas pour ce compte, et il essaierait
+       * les autres boutiques. Une liste vide laisse le relevé de secours
+       * rattraper la vente au passage suivant.
+       */
+      return [];
+    }
+
+    return [
+      {
+        marketplace: "etsy",
+        accountId: ctx.account.id,
+        remoteOrderId: String(recu.receipt_id ?? cible.receiptId),
+        /*
+         * L'identifiant du webhook sert de clé de déduplication : Etsy
+         * réessaie huit fois sur plus de vingt-quatre heures, et rejoue à la
+         * demande depuis son portail. Sans cette clé, une vente serait
+         * décomptée neuf fois du stock.
+         */
+        eventId: `hook:${id}`,
+        kind: genre,
+        occurredAt: recu.created_timestamp
+          ? new Date(recu.created_timestamp * 1000).toISOString()
+          : new Date().toISOString(),
+        lines: (recu.transactions ?? []).map((t) => ({
+          sku: t.sku ?? undefined,
+          quantity: t.quantity ?? 1,
+          remoteListingId: t.listing_id ? String(t.listing_id) : undefined,
+        })),
+        raw: recu,
+      },
+    ];
   }
+}
+
+/** Une commande Etsy, réduite à ce qui décrémente le stock. */
+interface RecuEtsy {
+  receipt_id?: number;
+  created_timestamp?: number;
+  status?: string;
+  transactions?: Array<{
+    listing_id?: number | null;
+    sku?: string | null;
+    quantity?: number;
+  }>;
+}
+
+/**
+ * Les événements Etsy, et le sens qu'ils donnent au stock.
+ *
+ * Les deux graphies sont acceptées : la documentation écrit « order.paid »,
+ * la charge réelle porte « ORDER_PAID ». Parier sur l'une des deux, c'est
+ * ignorer la moitié des notifications sans le savoir.
+ */
+const GENRE_ETSY: Record<string, "paid" | "cancelled"> = {
+  ORDER_PAID: "paid",
+  ORDER_CANCELED: "cancelled",
+  ORDER_CANCELLED: "cancelled",
+};
+
+/**
+ * LIRE L'ADRESSE FOURNIE — SANS JAMAIS L'APPELER.
+ *
+ * Etsy joint un `resource_url` qui désigne la commande. La tentation est de
+ * l'appeler tel quel. On ne le fait PAS, et la raison vaut d'être écrite :
+ *
+ * cet appel porterait notre jeton d'accès ET notre clé applicative. Si le
+ * secret de signature fuitait un jour, une notification forgée nous ferait
+ * livrer ces deux secrets à l'adresse de l'attaquant. La signature protège
+ * contre une falsification à froid, pas contre une clé compromise.
+ *
+ * On extrait donc les DEUX ENTIERS et on reconstruit l'appel depuis notre
+ * propre constante. La charge utile ne fournit plus alors que des nombres :
+ * il n'y a plus rien à détourner.
+ *
+ * La boutique est vérifiée en prime — une commande d'une autre boutique lue
+ * avec le jeton de celle-ci serait au mieux un refus, au pire un mélange.
+ */
+export function lireResourceUrl(
+  resourceUrl: string | undefined,
+  shopIdCompte: string,
+): { shopId: string; receiptId: string } | null {
+  if (!resourceUrl) return null;
+  const m = /\/shops\/(\d+)\/receipts\/(\d+)(?:[/?#]|$)/.exec(resourceUrl);
+  if (!m) return null;
+  const [, shopId, receiptId] = m;
+  if (!shopId || !receiptId) return null;
+  // La commande doit appartenir à la boutique dont le secret a validé.
+  if (shopIdCompte && shopId !== shopIdCompte) return null;
+  return { shopId, receiptId };
 }
 
 /**

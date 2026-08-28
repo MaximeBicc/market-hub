@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EtsyAdapter,
+  lireResourceUrl,
   ETSY_SCOPES,
   etsyConsentUrl,
   etsyFindShop,
@@ -734,13 +735,15 @@ describe("webhooks", () => {
     ).rejects.toThrow(/secret/);
   });
 
-  it("déclenche une relecture des ventes", () => {
-    // On ne parse pas le corps : sa forme n'est pas documentée de façon
-    // fiable, et deviner la structure d'une vente décrémente un stock deux
-    // fois. Le webhook dit « ça a bougé », le relevé va lire quoi.
-    expect(adapter.webhookSignaux()).toEqual([
-      { type: "relire", resource: "orders" },
-    ]);
+  it("ne demande plus de relecture : la commande est lue directement", () => {
+    /*
+     * Cette méthode répondait « va relire les ventes », ce qui déclenchait une
+     * page complète de commandes — cinquante lectures pour une vente. La
+     * notification nomme la commande exacte : `verifyAndParseWebhook` la lit
+     * en un appel, et demander une relecture en plus ferait deux fois le
+     * travail.
+     */
+    expect(adapter.webhookSignaux()).toEqual([]);
   });
 });
 
@@ -1201,5 +1204,211 @@ describe("indice de boutique", () => {
     // n'importe quoi, y compris une tentative de faire planter la route.
     expect(adapter.indiceCompte(new Request("https://x/"), "pas du json")).toBeNull();
     expect(adapter.indiceCompte(new Request("https://x/"), "{}")).toBeNull();
+  });
+});
+
+describe("lecture d'une adresse de ressource", () => {
+  /**
+   * LA GARANTIE QUI COMPTE ICI EST DE SÉCURITÉ.
+   *
+   * Etsy joint une adresse désignant la commande. L'appeler telle quelle
+   * porterait notre jeton d'accès ET notre clé applicative vers l'hôte
+   * qu'elle nomme. La signature protège contre une falsification à froid,
+   * pas contre un secret compromis — alors on n'appelle jamais cette
+   * adresse : on en extrait deux entiers et on reconstruit l'appel.
+   */
+  it("extrait la boutique et la commande d'une adresse normale", () => {
+    expect(
+      lireResourceUrl(
+        "https://api.etsy.com/v3/application/shops/777/receipts/3917482190",
+        "777",
+      ),
+    ).toEqual({ shopId: "777", receiptId: "3917482190" });
+  });
+
+  it("accepte l'autre hôte d'Etsy, les deux étant équivalents", () => {
+    expect(
+      lireResourceUrl(
+        "https://openapi.etsy.com/v3/application/shops/777/receipts/42",
+        "777",
+      ),
+    ).toEqual({ shopId: "777", receiptId: "42" });
+  });
+
+  it("refuse une commande d'une AUTRE boutique", () => {
+    /*
+     * Le secret qui a validé appartient à une boutique donnée. Lire la
+     * commande d'une autre avec ce jeton serait au mieux un refus d'Etsy, au
+     * pire un mélange de deux catalogues.
+     */
+    expect(
+      lireResourceUrl(
+        "https://api.etsy.com/v3/application/shops/999/receipts/42",
+        "777",
+      ),
+    ).toBeNull();
+  });
+
+  it("ne se laisse pas détourner vers un hôte étranger", () => {
+    /*
+     * Ce cas ne peut PAS mal tourner, et c'est tout l'intérêt : on ne lit que
+     * les deux nombres. L'hôte annoncé n'est jamais utilisé, donc même une
+     * adresse hostile ne fait que fournir des chiffres.
+     */
+    const r = lireResourceUrl(
+      "https://attaquant.test/v3/application/shops/777/receipts/42",
+      "777",
+    );
+    expect(r).toEqual({ shopId: "777", receiptId: "42" });
+    // Rien de l'hôte ne survit à l'extraction.
+    expect(JSON.stringify(r)).not.toContain("attaquant");
+  });
+
+  it("refuse ce qui n'a pas la forme attendue", () => {
+    for (const url of [
+      undefined,
+      "",
+      "pas une adresse",
+      "https://api.etsy.com/v3/application/shops/abc/receipts/42",
+      "https://api.etsy.com/v3/application/listings/777/receipts/42",
+    ]) {
+      expect(lireResourceUrl(url, "777")).toBeNull();
+    }
+  });
+});
+
+describe("une notification devient une vente", () => {
+  /** Signe un corps comme Svix, format qu'Etsy utilise. */
+  async function signer(corps: string, secret: string, id = "msg_1") {
+    const horodatage = String(Math.floor(Date.now() / 1000));
+    const cle = await crypto.subtle.importKey(
+      "raw",
+      Uint8Array.from(atob(secret.replace(/^whsec_/, "")), (c) =>
+        c.charCodeAt(0),
+      ),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign(
+      "HMAC",
+      cle,
+      new TextEncoder().encode(`${id}.${horodatage}.${corps}`),
+    );
+    return {
+      "webhook-id": id,
+      "webhook-timestamp": horodatage,
+      "webhook-signature": `v1,${btoa(String.fromCharCode(...new Uint8Array(sig)))}`,
+    };
+  }
+
+  const SECRET = `whsec_${btoa("un-secret-de-test")}`;
+
+  const RECU = {
+    receipt_id: 3917482190,
+    created_timestamp: 1756400000,
+    status: "paid",
+    transactions: [
+      { listing_id: 111, sku: "SAC-NOIR", quantity: 2 },
+      { listing_id: 222, sku: null, quantity: 1 },
+    ],
+  };
+
+  it("lit UNE commande au lieu d'une page entière", async () => {
+    const { http, sent } = fakeHttp([{ body: RECU }]);
+    const corps = JSON.stringify({
+      event_type: "ORDER_PAID",
+      resource_url:
+        "https://api.etsy.com/v3/application/shops/777/receipts/3917482190",
+      shop_id: 777,
+    });
+    const entetes = await signer(corps, SECRET);
+
+    const evts = await adapter.verifyAndParseWebhook!(
+      ctxWith(http, { webhookSecret: SECRET }),
+      new Request("https://h/", { method: "POST", headers: entetes }),
+      corps,
+    );
+
+    // Un seul appel, et c'est bien la commande nommée — pas la liste.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toContain("/shops/777/receipts/3917482190");
+    expect(sent[0]?.url).not.toContain("receipts?limit");
+
+    expect(evts).toHaveLength(1);
+    expect(evts[0]?.kind).toBe("paid");
+    expect(evts[0]?.remoteOrderId).toBe("3917482190");
+    expect(evts[0]?.lines).toEqual([
+      { sku: "SAC-NOIR", quantity: 2, remoteListingId: "111" },
+      { sku: undefined, quantity: 1, remoteListingId: "222" },
+    ]);
+  });
+
+  it("déduplique sur l'identifiant du webhook, pas sur la commande", async () => {
+    /*
+     * Etsy réessaie huit fois sur plus de vingt-quatre heures, et rejoue à la
+     * demande depuis son portail. Sans clé stable, une vente serait décomptée
+     * neuf fois du stock.
+     */
+    const { http } = fakeHttp([{ body: RECU }]);
+    const corps = JSON.stringify({
+      event_type: "ORDER_PAID",
+      resource_url:
+        "https://api.etsy.com/v3/application/shops/777/receipts/3917482190",
+    });
+    const entetes = await signer(corps, SECRET, "msg_abc");
+
+    const evts = await adapter.verifyAndParseWebhook!(
+      ctxWith(http, { webhookSecret: SECRET }),
+      new Request("https://h/", { method: "POST", headers: entetes }),
+      corps,
+    );
+    expect(evts[0]?.eventId).toBe("hook:msg_abc");
+  });
+
+  it("accepte les deux graphies d'événement", async () => {
+    // La documentation écrit « order.paid », la charge réelle « ORDER_PAID ».
+    for (const forme of ["ORDER_PAID", "order.paid"]) {
+      const { http } = fakeHttp([{ body: RECU }]);
+      const corps = JSON.stringify({
+        event_type: forme,
+        resource_url:
+          "https://api.etsy.com/v3/application/shops/777/receipts/1",
+      });
+      const entetes = await signer(corps, SECRET);
+      const evts = await adapter.verifyAndParseWebhook!(
+        ctxWith(http, { webhookSecret: SECRET }),
+        new Request("https://h/", { method: "POST", headers: entetes }),
+        corps,
+      );
+      expect(evts[0]?.kind).toBe("paid");
+    }
+  });
+
+  it("rend une liste vide, sans lever, quand la commande est illisible", async () => {
+    /*
+     * Lever ferait croire au routeur que ce webhook n'était pas pour ce
+     * compte, et il essaierait les autres boutiques. Une liste vide laisse le
+     * relevé de secours rattraper la vente.
+     */
+    const { http } = fakeHttp([{ status: 500, body: {} }]);
+    const corps = JSON.stringify({
+      event_type: "ORDER_PAID",
+      resource_url: "https://api.etsy.com/v3/application/shops/777/receipts/9",
+    });
+    const entetes = await signer(corps, SECRET);
+
+    await expect(
+      adapter.verifyAndParseWebhook!(
+        ctxWith(http, { webhookSecret: SECRET }),
+        new Request("https://h/", { method: "POST", headers: entetes }),
+        corps,
+      ),
+    ).resolves.toEqual([]);
+  });
+
+  it("ne demande plus de relecture : la vente est déjà lue", () => {
+    // La demander en plus ferait deux fois le travail.
+    expect(adapter.webhookSignaux()).toEqual([]);
   });
 });
