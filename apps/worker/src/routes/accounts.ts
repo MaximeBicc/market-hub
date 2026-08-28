@@ -466,11 +466,29 @@ accounts.post("/:id/reconnecter", async (c) => {
     const environment =
       creds["environment"] === "sandbox" ? "sandbox" : "production";
     /*
-     * Le RuName vient de la configuration de l'application, pas du coffre :
-     * il est commun à toutes les boutiques eBay et ne change jamais.
+     * LE RUNAME EST DANS LE COFFRE — C'EST LÀ QU'IL A ÉTÉ DÉPOSÉ.
+     *
+     * Il a été saisi au formulaire de première connexion et enregistré avec
+     * les identifiants. L'aller chercher dans un secret du worker était une
+     * erreur de raisonnement : rien ne l'y a jamais mis, et le message
+     * d'échec envoyait configurer une variable dont personne n'a besoin —
+     * pour une valeur déjà présente à deux mètres.
+     *
+     * Le secret reste accepté en second, pour une éventuelle boutique dont le
+     * coffre serait incomplet ; mais l'ordre compte, et la valeur du compte
+     * passe avant.
      */
-    const ruName = c.env.EBAY_RU_NAME ?? "";
+    const ruName = creds["ruName"] ?? c.env.EBAY_RU_NAME ?? "";
 
+    if (!ruName) {
+      return c.json(
+        {
+          error:
+            "Le RuName de cette boutique est introuvable. Il a été saisi à la première connexion : reconnecte par le formulaire eBay plus bas, qui le redemande.",
+        },
+        400,
+      );
+    }
     if (!clientId || !clientSecret) {
       return c.json(
         {

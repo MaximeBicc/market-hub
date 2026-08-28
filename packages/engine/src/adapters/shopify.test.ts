@@ -1290,3 +1290,76 @@ describe("retrait d'un produit disparu de Shopify", () => {
     ).rejects.toThrow(/Invalid status/);
   });
 });
+
+describe("effacement d'une annonce", () => {
+  /**
+   * Supprimer un produit du stock efface ses annonces — c'est la règle, et
+   * elle diffère de celle du stock à zéro, qui se contente de masquer.
+   */
+  const annonce: Listing = {
+    id: "l1",
+    productId: "p1",
+    accountId: "acc1",
+    remoteId: "gid://shopify/ProductVariant/1",
+    status: "active",
+    price: { amount: 1000, currency: "EUR" },
+    stock: 3,
+    marketplaceData: { productId: "gid://shopify/Product/1" },
+  };
+
+  it("efface le PRODUIT parent, pas la variante", async () => {
+    // Shopify n'efface pas une variante isolée, et un produit vidé de ses
+    // déclinaisons resterait une coquille en ligne.
+    const { http, sent } = fakeHttp([
+      {
+        data: {
+          productDelete: {
+            deletedProductId: "gid://shopify/Product/1",
+            userErrors: [],
+          },
+        },
+      },
+    ]);
+    const r = await adapter.deleteListing(ctxWith(http), annonce);
+    expect(r.status).toBe("success");
+    expect(sent[0]?.body.query).toContain("productDelete");
+    expect(sent[0]?.body.variables.input.id).toBe("gid://shopify/Product/1");
+  });
+
+  it("compte pour un succès un produit déjà absent", async () => {
+    // Sur un article à dix-sept coloris, la première annonce effacée emporte
+    // les seize autres : les appels suivants ne trouvent plus rien.
+    const { http } = fakeHttp([
+      {
+        data: {
+          productDelete: {
+            deletedProductId: null,
+            userErrors: [{ field: ["id"], message: "Product does not exist" }],
+          },
+        },
+      },
+    ]);
+    const r = await adapter.deleteListing(ctxWith(http), annonce);
+    expect(r.status).toBe("success");
+  });
+
+  it("laisse remonter un vrai refus", async () => {
+    const { http } = fakeHttp([
+      {
+        data: {
+          productDelete: {
+            deletedProductId: null,
+            userErrors: [{ message: "Cannot delete product with active order" }],
+          },
+        },
+      },
+    ]);
+    await expect(
+      adapter.deleteListing(ctxWith(http), annonce),
+    ).rejects.toThrow(/active order/);
+  });
+
+  it("déclare savoir effacer", async () => {
+    expect((await adapter.capabilities()).listingDelete).toBe(true);
+  });
+});
