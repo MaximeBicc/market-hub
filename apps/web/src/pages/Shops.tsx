@@ -117,6 +117,30 @@ export function Shops() {
   }
 
   /**
+   * REFAIRE LE CONSENTEMENT SANS RIEN PERDRE.
+   *
+   * Il faut parfois repasser par l'autorisation — quand une portée s'ajoute,
+   * le jeton d'hier ne la porte pas, et aucune autre manœuvre ne l'obtient.
+   * Sans ce bouton, le seul geste disponible était « Supprimer puis
+   * recréer », qui perdait les réglages marchands et détachait les annonces.
+   *
+   * Ici la boutique garde son identité : seul le consentement est refait.
+   */
+  async function reconnecter(a: Account) {
+    try {
+      const r = await api.post<{ url: string }>(
+        `/engine/accounts/${a.id}/reconnecter`,
+      );
+      if (!r?.url) throw new Error("Aucune adresse d'autorisation reçue");
+      // La plateforme demande le consentement dans sa propre page ; le retour
+      // se fait sur notre adresse de rappel, qui retrouve la boutique.
+      window.location.href = r.url;
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Reconnexion impossible");
+    }
+  }
+
+  /**
    * Suppression définitive d'une boutique.
    *
    * La confirmation nomme la boutique plutôt que de demander « êtes-vous
@@ -342,6 +366,13 @@ export function Shops() {
                       onClick={() => void tempsReel(a)}
                     >
                       Temps réel
+                    </button>
+                    <button
+                      className="btn btn--small"
+                      title="Refaire le consentement sans rien perdre : la boutique garde ses réglages, ses annonces et son stock"
+                      onClick={() => void reconnecter(a)}
+                    >
+                      Reconnecter
                     </button>
                     <button
                       className="btn btn--small btn--ghost"

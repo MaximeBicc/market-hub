@@ -439,6 +439,94 @@ accounts.post("/:id/test", async (c) => {
  * SON compte eBay au vôtre, et lire ensuite tout ce qui y transite. Il est à
  * usage unique et vit dix minutes.
  */
+/**
+ * RECONNECTER UNE BOUTIQUE DÉJÀ RELIÉE, SANS RIEN RESAISIR.
+ *
+ * Le parcours de première connexion réclame l'identifiant d'application, son
+ * secret et le RuName — trois valeurs qu'on ne va pas faire retaper à
+ * quelqu'un qui les a déjà données. Or il FAUT parfois repasser par le
+ * consentement : quand une portée s'ajoute, le jeton d'hier ne la porte pas,
+ * et aucune autre manœuvre ne l'obtient.
+ *
+ * Faute de ce chemin, le seul geste disponible était « Supprimer puis
+ * recréer » — qui perdait les réglages marchands et détachait les annonces.
+ * Ici, la boutique garde son identité : seul le consentement est refait.
+ */
+accounts.post("/:id/reconnecter", async (c) => {
+  const id = c.req.param("id");
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Boutique inconnue" }, 404);
+
+  const creds = (await repos.credentials.get(id)) ?? {};
+
+  if (account.marketplace === "ebay") {
+    const clientId = creds["clientId"] ?? "";
+    const clientSecret = creds["clientSecret"] ?? "";
+    /*
+     * Le RuName vient de la configuration de l'application, pas du coffre :
+     * il est commun à toutes les boutiques eBay et ne change jamais.
+     */
+    const ruName = c.env.EBAY_RU_NAME ?? "";
+    if (!clientId || !clientSecret || !ruName) {
+      return c.json(
+        {
+          error:
+            "Identifiants d'application eBay incomplets. Le RuName se configure dans les secrets du worker (EBAY_RU_NAME).",
+        },
+        400,
+      );
+    }
+
+    const environment = creds["environment"] === "sandbox" ? "sandbox" : "production";
+    const state = randomId(24);
+    /*
+     * Le retour passe par le MÊME chemin que la première connexion : il
+     * retrouve la boutique par son identifiant de place de marché et
+     * fusionne les identifiants au lieu de les remplacer. Rien à faire de
+     * plus ici.
+     */
+    await c.env.CACHE.put(
+      `ebay:${state}`,
+      JSON.stringify({
+        clientId,
+        clientSecret,
+        ruName,
+        marketplaceId: creds["marketplaceId"] ?? "EBAY_FR",
+        environment,
+        displayName: account.displayName,
+      }),
+      { expirationTtl: 600 },
+    );
+
+    return c.json({
+      url: ebayConsentUrl({ clientId, ruName, state, environment }),
+    });
+  }
+
+  if (account.marketplace === "etsy" || account.marketplace === "shopify") {
+    /*
+     * Ces deux-là passent par le parcours OAuth générique, qui sait déjà
+     * retrouver une boutique existante. On rend simplement l'adresse.
+     */
+    const base = c.env.APP_URL.replace(/\/+$/, "");
+    const domaine = creds["shopDomain"];
+    return c.json({
+      url:
+        account.marketplace === "shopify" && domaine
+          ? `${base}/api/oauth/shopify/start?shop=${encodeURIComponent(domaine)}`
+          : `${base}/api/oauth/${account.marketplace}/start`,
+    });
+  }
+
+  return c.json(
+    {
+      error: `${account.marketplace} ne se reconnecte pas par ce chemin.`,
+    },
+    400,
+  );
+});
+
 accounts.post("/ebay/start", async (c) => {
   const body = await c.req
     .json<{
