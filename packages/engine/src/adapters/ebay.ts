@@ -1439,6 +1439,38 @@ export class EbayAdapter implements MarketplaceAdapter {
     }
 
     /*
+     * LES CARACTÉRISTIQUES OBLIGATOIRES, DEMANDÉES AVANT D'ÉCRIRE.
+     *
+     * Sans ce contrôle, la séquence était : brouillon créé chez eBay, puis
+     * refus « 25002 : la caractéristique Type est manquante » à la mise en
+     * ligne. Le brouillon restait, invendable, et eBay ne nommait qu'UNE
+     * caractéristique à la fois — il fallait donc recommencer autant de fois
+     * qu'il en manquait, en laissant un brouillon derrière soi à chaque fois.
+     *
+     * On demande la liste complète d'abord, et on la donne d'un coup.
+     */
+    const obligatoires = await this.aspectsObligatoires(ctx, categoryId);
+    if (obligatoires.length > 0) {
+      const fournis = new Set(
+        Object.keys(aspectsCommuns(product) ?? {}).map((n) => n.toLowerCase()),
+      );
+      // Un axe de déclinaison EST une caractéristique aux yeux d'eBay : la
+      // couleur d'un groupe compte comme « Couleur » renseignée.
+      for (const axe of product.options ?? []) {
+        if (axe.name) fournis.add(nomAspect(axe.name).toLowerCase());
+      }
+      const manquants = obligatoires.filter(
+        (n) => !fournis.has(nomAspect(n).toLowerCase()),
+      );
+      if (manquants.length > 0) {
+        return this.manuel(
+          ctx,
+          `eBay exige ${manquants.length > 1 ? "ces caractéristiques" : "cette caractéristique"} pour la catégorie ${categoryId} : ${manquants.join(", ")}. Renseignez-${manquants.length > 1 ? "les" : "la"} sur le produit sous ce nom exact — eBay refuse la mise en ligne sans elles, et n'en signale qu'une à la fois.`,
+        );
+      }
+    }
+
+    /*
      * Les variantes archivées sont écartées : la plateforme ne les renvoie
      * plus, les republier ressusciterait un coloris retiré.
      */
@@ -1891,6 +1923,79 @@ export class EbayAdapter implements MarketplaceAdapter {
    * correspond, et l'appel ne fonctionne PAS en bac à sable — il y répond 200
    * avec des libellés au hasard, ce qui est pire qu'une erreur.
    */
+
+  /**
+   * LES CARACTÉRISTIQUES QU'EBAY EXIGE POUR CETTE CATÉGORIE.
+   *
+   * eBay refuse la mise en ligne d'une annonce à laquelle il manque une
+   * caractéristique obligatoire — « Type », « Marque », « Matière », selon la
+   * catégorie. Le refus arrive APRÈS la création du brouillon, sous la forme
+   * « 25002 : la caractéristique de l'objet Type est manquante ». Le brouillon
+   * reste alors chez eBay, invendable, et rien ne dit combien d'autres
+   * caractéristiques manquent : eBay n'en nomme qu'une à la fois.
+   *
+   * Les demander d'avance change la nature du problème. On sait la LISTE
+   * complète avant d'écrire quoi que ce soit, et on peut la dire.
+   *
+   * ÉCHOUE OUVERT, à dessein. Si le catalogue ne répond pas, on laisse passer
+   * : un incident de lecture ne doit pas interdire une publication qui aurait
+   * pu réussir. eBay refusera, et son message fera foi.
+   *
+   * Les noms sont ceux de la place de marché — « Matière » sur EBAY_FR, pas
+   * « Material » — parce que l'appel porte `Accept-Language`. C'est aussi
+   * sous ces noms-là qu'il faut les renseigner.
+   */
+  private async aspectsObligatoires(
+    ctx: MarketplaceContext,
+    categoryId: string,
+  ): Promise<string[]> {
+    const c = ctx.credentials ?? {};
+    // Le bac à sable répond au hasard sur la taxonomie : ne rien exiger.
+    if (c["environment"] === "sandbox") return [];
+
+    try {
+      const jeton = await this.jetonApplicatif(ctx);
+      const api = hosts(c["environment"]).api;
+      const http = ctx.http ?? fetch;
+      const marketplaceId = c["marketplaceId"] ?? "EBAY_FR";
+
+      let tree = c["categoryTreeId"];
+      if (!tree) {
+        const r = await http(
+          `${api}/commerce/taxonomy/v1/get_default_category_tree_id?marketplace_id=${marketplaceId}`,
+          { headers: { Authorization: `Bearer ${jeton}` } },
+        );
+        if (!r.ok) return [];
+        tree = ((await r.json()) as { categoryTreeId?: string }).categoryTreeId;
+        if (!tree) return [];
+        await ctx.saveCredentials?.({ categoryTreeId: tree });
+      }
+
+      const res = await http(
+        `${api}/commerce/taxonomy/v1/category_tree/${tree}/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${jeton}`,
+            "Accept-Language": "fr-FR",
+          },
+        },
+      );
+      if (!res.ok) return [];
+
+      const d = (await res.json()) as {
+        aspects?: Array<{
+          localizedAspectName?: string;
+          aspectConstraint?: { aspectRequired?: boolean };
+        }>;
+      };
+      return (d.aspects ?? [])
+        .filter((a) => a.aspectConstraint?.aspectRequired === true)
+        .map((a) => a.localizedAspectName)
+        .filter((n): n is string => typeof n === "string" && n.length > 0);
+    } catch {
+      return [];
+    }
+  }
   async searchCategories(
     ctx: MarketplaceContext,
     query: string,

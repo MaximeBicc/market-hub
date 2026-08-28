@@ -1391,6 +1391,7 @@ accounts.post("/:id/etsy/profils", async (c) => {
       shippingProfileId?: string;
       readinessStateId?: string;
       taxonomyId?: string;
+      productionPartnerId?: string;
       webhookSecret?: string;
     }>()
     .catch(() => ({}) as Record<string, string>);
@@ -1400,6 +1401,7 @@ accounts.post("/:id/etsy/profils", async (c) => {
     "shippingProfileId",
     "readinessStateId",
     "taxonomyId",
+    "productionPartnerId",
     // Donné par le portail Webhooks d'Etsy à la création du point d'entrée,
     // sous la forme « whsec_… ». Sans lui, aucune notification n'est acceptée.
     "webhookSecret",
@@ -1670,6 +1672,10 @@ accounts.post("/:id/reglages", async (c) => {
     "shippingProfileId",
     "readinessStateId",
     "taxonomyId",
+    // Sans lui, un article « fabriqué par quelqu'un d'autre » n'entre dans
+    // aucune des trois catégories qu'Etsy autorise, et la mise en vente est
+    // refusée par un message qui ne nomme pas la règle.
+    "productionPartnerId",
   ]);
 
   const patch: Record<string, string> = {};

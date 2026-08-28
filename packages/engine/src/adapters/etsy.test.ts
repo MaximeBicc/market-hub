@@ -76,10 +76,21 @@ function ctxWith(
   };
 }
 
+/*
+ * Le décor d'un compte RÉELLEMENT publiable.
+ *
+ * Le partenaire de production en fait partie, et ce n'est pas un détail de
+ * test : sans lui, un article « fabriqué par quelqu'un d'autre » n'entre dans
+ * aucune des trois catégories qu'Etsy autorise, et la mise en vente est
+ * refusée. Les scénarios ci-dessous emploient tous cette déclaration — la
+ * plus courante en revente — et sans partenaire ils décrivaient donc un
+ * chemin qui échoue en production tout en passant au vert ici.
+ */
 const PUBLIABLE = {
   shippingProfileId: "sp1",
   readinessStateId: "rs1",
   taxonomyId: "1234",
+  productionPartnerId: "pp1",
 };
 
 const annonce: Listing = {
@@ -872,6 +883,65 @@ describe("déclarations obligatoires", () => {
       "i",
     );
     expect(r.status).toBe("manual_required");
+  });
+
+  it("refuse AVANT d'écrire un article qui n'entre dans aucune catégorie Etsy", async () => {
+    /*
+     * LE REFUS QU'ETSY N'EXPLIQUE PAS.
+     *
+     * « Oh dear, you cannot sell this item on Etsy » arrive APRÈS la création
+     * du brouillon — facturé, invendable, et sans un mot sur la règle
+     * enfreinte. Ici : fabriqué par quelqu'un d'autre, sans partenaire de
+     * production déclaré, ni fourniture, ni vintage. Aucune des trois portes.
+     *
+     * Rien ne doit partir chez Etsy, et le message doit nommer les trois
+     * issues possibles plutôt que de constater l'échec.
+     */
+    const { http, sent } = fakeHttp([{ body: { listing_id: 7 } }]);
+    const { productionPartnerId: _sans, ...sansPartenaire } = PUBLIABLE;
+
+    const r = await adapter.createListing(
+      ctxWith(http, sansPartenaire),
+      { ...BASE, whoMade: "someone_else", whenMade: "2020_2026" },
+      "i",
+    );
+
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toMatch(/partenaire de production/i);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("laisse passer un vintage, une fourniture, ou un article fait main", async () => {
+    /*
+     * L'inverse du test précédent, et il compte autant : être plus sévère
+     * qu'Etsy interdirait des annonces qu'elle aurait acceptées. Les trois
+     * portes doivent rester ouvertes sans partenaire.
+     */
+    const { productionPartnerId: _sans, ...sansPartenaire } = PUBLIABLE;
+
+    const cas = [
+      { nom: "vintage", produit: { whoMade: "someone_else", whenMade: "1980s" } },
+      { nom: "fait main", produit: { whoMade: "i_did", whenMade: "2020_2026" } },
+      {
+        nom: "fourniture",
+        produit: {
+          whoMade: "someone_else",
+          whenMade: "2020_2026",
+          marketplaceData: { etsyIsSupply: true },
+        },
+      },
+    ] as const;
+
+    for (const c of cas) {
+      const { http, sent } = fakeHttp([{ body: { listing_id: 7 } }]);
+      const r = await adapter.createListing(
+        ctxWith(http, sansPartenaire),
+        { ...BASE, ...c.produit },
+        "i",
+      );
+      expect(r.status, c.nom).not.toBe("manual_required");
+      expect(sent.length, c.nom).toBeGreaterThan(0);
+    }
   });
 
   it("transmet la déclaration réelle quand elle est fournie", async () => {

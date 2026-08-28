@@ -902,6 +902,25 @@ export class EtsyAdapter implements MarketplaceAdapter {
     }
 
     /*
+     * L'ÉLIGIBILITÉ AVANT LA FACTURE.
+     *
+     * Etsy débite un frais d'insertion à la mise en vente et ne rembourse pas
+     * un brouillon abandonné. Découvrir après coup que l'article n'entre dans
+     * aucune de ses trois catégories laisse donc un brouillon payé et
+     * invendable — et son message, « Oh dear, you cannot sell this item on
+     * Etsy », ne nomme ni la règle ni le geste.
+     */
+    const partenaire = ctx.credentials?.["productionPartnerId"];
+    const estFourniture = product.marketplaceData?.["etsyIsSupply"] === true;
+    const inegible = refusEligibiliteEtsy({
+      whoMade,
+      whenMade,
+      estFourniture,
+      partenaire,
+    });
+    if (inegible) return this.aLaMain(ctx, inegible);
+
+    /*
      * ══ LES DÉCLINAISONS, DÉCIDÉES AVANT LA MOINDRE ÉCRITURE ══
      *
      * Etsy facture chaque mise en ligne et ne rembourse pas un brouillon
@@ -944,6 +963,13 @@ export class EtsyAdapter implements MarketplaceAdapter {
           who_made: whoMade,
           when_made: whenMade,
           taxonomy_id: String(taxonomy),
+          /*
+           * Ces deux-là ne sont pas décoratifs : ce sont eux qui font entrer
+           * l'article dans l'une des catégories autorisées. Omis, un article
+           * fabriqué par quelqu'un d'autre n'entre dans aucune.
+           */
+          is_supply: String(estFourniture),
+          ...(partenaire ? { production_partner_ids: partenaire } : {}),
           shipping_profile_id: String(shipping),
           readiness_state_id: String(readiness),
           ...((product.tags?.length ?? 0) > 0
@@ -1698,7 +1724,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
       }
     };
 
-    const [livraison, preparation] = await Promise.all([
+    const [livraison, preparation, partenaires] = await Promise.all([
       lire<{
         results?: Array<{
           shipping_profile_id?: number;
@@ -1745,9 +1771,38 @@ export class EtsyAdapter implements MarketplaceAdapter {
               : `Profil ${p.readiness_state_id}`),
         })),
       ),
+      /*
+       * LES PARTENAIRES DE PRODUCTION — la porte d'entrée de la revente.
+       *
+       * Etsy n'autorise que trois sortes d'articles : fait main, fourniture
+       * créative, ou vintage de vingt ans et plus. Un article fabriqué par
+       * quelqu'un d'autre n'entre dans la première qu'à une condition — que
+       * ce « quelqu'un d'autre » soit DÉCLARÉ comme partenaire de production.
+       * Sans lui, Etsy répond « Oh dear, you cannot sell this item on Etsy »,
+       * un message qui ne nomme ni la règle ni le geste.
+       */
+      lire<{
+        results?: Array<{
+          production_partner_id?: number;
+          partner_name?: string;
+          location?: string;
+        }>;
+      }>(`/shops/${boutique}/production-partners`, (d) =>
+        (d.results ?? []).map((p) => ({
+          id: String(p.production_partner_id),
+          label: p.partner_name ?? `Partenaire ${p.production_partner_id}`,
+          detail: p.location ?? "",
+        })),
+      ),
     ]);
 
     return [
+      {
+        key: "productionPartnerId",
+        label: "Partenaire de production",
+        aide: "À déclarer dans votre boutique Etsy → Paramètres → Production. Obligatoire dès qu'un article est fabriqué par quelqu'un d'autre : sans lui, Etsy refuse la mise en vente sans expliquer pourquoi.",
+        options: partenaires,
+      },
       {
         key: "shippingProfileId",
         label: "Profil de livraison",
@@ -2029,6 +2084,77 @@ export class EtsyAdapter implements MarketplaceAdapter {
     ];
   }
 }
+
+/**
+ * LES TROIS SEULES PORTES D'ENTRÉE D'ETSY.
+ *
+ * Etsy n'est pas une place de marché généraliste. Un article n'y est vendable
+ * que s'il entre dans l'une de ces trois catégories, et dans aucun autre cas :
+ *
+ *   FAIT MAIN — fabriqué par le vendeur ou son collectif. Fabriqué par
+ *   quelqu'un d'autre, il n'y entre QU'À LA CONDITION que ce quelqu'un soit
+ *   déclaré comme partenaire de production de la boutique ;
+ *
+ *   FOURNITURE CRÉATIVE — matière, composant ou outil destiné à créer. Celle-
+ *   là peut être industrielle : c'est sa destination qui compte ;
+ *
+ *   VINTAGE — vingt ans révolus, pas un de moins.
+ *
+ * Hors de ces trois cas, Etsy répond « Oh dear, you cannot sell this item on
+ * Etsy » — un refus qui ne nomme ni la règle enfreinte, ni le geste qui la
+ * lèverait, et qui arrive APRÈS la création du brouillon facturé.
+ *
+ * On ne refuse ICI que le cas certain et documenté : fabriqué par quelqu'un
+ * d'autre, sans partenaire déclaré, ni fourniture, ni vintage. Tout le reste
+ * part chez Etsy, à qui appartient la décision. Être plus sévère que la
+ * plateforme interdirait des annonces qu'elle aurait acceptées.
+ */
+function refusEligibiliteEtsy(args: {
+  whoMade: string;
+  whenMade: string;
+  estFourniture: boolean;
+  partenaire: string | undefined;
+}): string | null {
+  if (args.whoMade !== "someone_else") return null;
+  if (args.estFourniture) return null;
+  if (args.partenaire) return null;
+  if (EPOQUES_VINTAGE.has(args.whenMade)) return null;
+
+  return (
+    "Etsy n'accepte que trois sortes d'articles : fait main, fourniture créative, ou vintage de vingt ans et plus. " +
+    "Celui-ci est déclaré « fabriqué par quelqu'un d'autre », ce qui n'entre dans la première qu'avec un PARTENAIRE DE PRODUCTION déclaré. " +
+    "Trois issues, toutes honnêtes : déclarer le fabricant dans votre boutique Etsy → Paramètres → Production, puis le choisir dans les réglages du compte ; " +
+    "ou marquer l'article comme fourniture créative si c'en est une ; ou corriger la période s'il a plus de vingt ans. " +
+    "Sans cela Etsy refuse, et son message ne dit ni laquelle des trois manque ni comment la fournir."
+  );
+}
+
+/**
+ * Les périodes qu'Etsy tient pour vintage.
+ *
+ * Le seuil est de vingt ans révolus. Les valeurs listées ici sont celles
+ * qu'Etsy propose et qui sont TOUJOURS au-delà du seuil, quelle que soit
+ * l'année courante — une liste figée ne se périme donc pas. Les tranches
+ * proches de la limite en sont absentes à dessein : les inclure ferait
+ * accepter ici ce qu'Etsy refuserait ensuite.
+ */
+const EPOQUES_VINTAGE = new Set([
+  "before_2006",
+  "2000_2005",
+  "1990s",
+  "1980s",
+  "1970s",
+  "1960s",
+  "1950s",
+  "1940s",
+  "1930s",
+  "1920s",
+  "1910s",
+  "1900s",
+  "1800s",
+  "1700s",
+  "before_1700",
+]);
 
 /** Une commande Etsy, réduite à ce qui décrémente le stock. */
 interface RecuEtsy {

@@ -141,8 +141,17 @@ export class MarketplaceOrchestrator {
     const results: TargetResult[] = [];
 
     for (const accountId of accountIds) {
+      /*
+       * Retenue DÈS QUE le contexte est résolu, pour que l'échec sache de qui
+       * il parle. Le bloc de secours écrivait « unknown » quelle que soit la
+       * cause — y compris pour une erreur levée par l'adaptateur, où la
+       * plateforme est parfaitement connue. L'écran de résultats retombait
+       * alors sur son défaut et affichait « Shopify » sur une erreur d'eBay.
+       */
+      let marketplace = "unknown";
       try {
         const ctx = await this.ctx(accountId);
+        marketplace = ctx.account.marketplace;
 
         if (!ctx.account.enabled) {
           results.push({
@@ -172,7 +181,7 @@ export class MarketplaceOrchestrator {
         // L'échec d'une cible ne doit jamais emporter les autres.
         results.push({
           accountId,
-          marketplace: "unknown",
+          marketplace,
           status: "failed",
           message: err instanceof Error ? err.message : String(err),
         });

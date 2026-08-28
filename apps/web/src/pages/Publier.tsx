@@ -149,14 +149,33 @@ function tagsDe(p: ProduitRow): string[] {
   return [];
 }
 
+/**
+ * UN BADGE NE DOIT JAMAIS INVENTER LA PLATEFORME QU'IL NOMME.
+ *
+ * Il retombait sur « Shopify » pour tout ce qu'il ne reconnaissait pas. Sur
+ * un écran de résultats, ça donnait trois cartes marquées Shopify dont deux
+ * rapportaient des erreurs d'eBay et d'Etsy — de quoi chercher très longtemps
+ * une panne Shopify qui n'existait pas.
+ *
+ * Une valeur inattendue s'affiche donc telle quelle. Un nom inconnu se
+ * remarque et se corrige ; un nom faux se croit.
+ */
+const NOMS: Record<string, { court: string; long: string }> = {
+  ebay: { court: "e", long: "eBay" },
+  etsy: { court: "E", long: "Etsy" },
+  shopify: { court: "S", long: "Shopify" },
+  alibaba: { court: "A", long: "Alibaba" },
+};
+
 function PlateformeBadge({ plateforme }: { plateforme: string }) {
-  const nom = plateforme.toLowerCase();
+  const nom = (plateforme || "").toLowerCase();
+  const connu = NOMS[nom];
   return (
-    <span className={`platform-badge platform-badge--${nom}`}>
+    <span className={`platform-badge platform-badge--${nom || "inconnu"}`}>
       <span aria-hidden="true">
-        {nom === "ebay" ? "e" : nom === "etsy" ? "E" : "S"}
+        {connu?.court ?? (nom ? nom[0]!.toUpperCase() : "?")}
       </span>
-      {nom === "ebay" ? "eBay" : nom === "etsy" ? "Etsy" : "Shopify"}
+      {connu?.long ?? (nom || "plateforme inconnue")}
     </span>
   );
 }
