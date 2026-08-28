@@ -463,22 +463,50 @@ accounts.post("/:id/reconnecter", async (c) => {
   if (account.marketplace === "ebay") {
     const clientId = creds["clientId"] ?? "";
     const clientSecret = creds["clientSecret"] ?? "";
+    const environment =
+      creds["environment"] === "sandbox" ? "sandbox" : "production";
     /*
      * Le RuName vient de la configuration de l'application, pas du coffre :
      * il est commun à toutes les boutiques eBay et ne change jamais.
      */
     const ruName = c.env.EBAY_RU_NAME ?? "";
-    if (!clientId || !clientSecret || !ruName) {
+
+    if (!clientId || !clientSecret) {
       return c.json(
         {
           error:
-            "Identifiants d'application eBay incomplets. Le RuName se configure dans les secrets du worker (EBAY_RU_NAME).",
+            "Identifiants d'application eBay absents du coffre. Reliez la boutique depuis le formulaire eBay pour les redonner.",
         },
         400,
       );
     }
 
-    const environment = creds["environment"] === "sandbox" ? "sandbox" : "production";
+    /*
+     * SANS RuName, IL RESTE L'AUTRE CHEMIN — ET IL EST MEILLEUR.
+     *
+     * eBay propose deux façons d'obtenir un jeton : la redirection par
+     * RuName, et la génération directe depuis le portail développeur. La
+     * seconde ne dépend d'aucune URL d'acceptation, donc d'aucune
+     * configuration qui puisse être fausse.
+     *
+     * Une boutique reliée par ce second chemin n'a jamais eu besoin d'un
+     * RuName. Lui répondre « configurez EBAY_RU_NAME » est un cul-de-sac :
+     * on lui demande de mettre en place une mécanique dont elle n'a que faire.
+     * On la renvoie donc là où elle sait déjà aller.
+     */
+    if (!ruName) {
+      return c.json(
+        {
+          besoin: "jeton",
+          marketplaceId: creds["marketplaceId"] ?? "EBAY_FR",
+          environment,
+          error:
+            "Cette boutique a été reliée en collant un jeton, pas par redirection. Refaites-en un dans le portail développeur eBay — en cochant bien la portée « commerce.notification.subscription » — puis collez-le dans le formulaire eBay. Les réglages et les annonces sont conservés.",
+        },
+        400,
+      );
+    }
+
     const state = randomId(24);
     /*
      * Le retour passe par le MÊME chemin que la première connexion : il
