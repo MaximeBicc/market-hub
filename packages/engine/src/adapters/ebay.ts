@@ -1495,10 +1495,22 @@ export class EbayAdapter implements MarketplaceAdapter {
      * répétition.
      */
     if (ctx.dryRun) {
+      /*
+       * DIRE CE QUI PARTIRA, PAS SEULEMENT QUE ÇA PARTIRA.
+       *
+       * eBay coupe les titres à 80 caractères. La coupe est silencieuse et se
+       * découvre sur l'annonce publiée, souvent au milieu d'un mot. L'annoncer
+       * ici laisse le choix de réécrire un titre court plutôt que de subir
+       * celui qu'une troncature aura fabriqué.
+       */
+      const coupe =
+        product.title.length > TITRE_MAX
+          ? ` Titre coupé à ${TITRE_MAX} caractères : « ${product.title.slice(0, TITRE_MAX)} ».`
+          : "";
       return this.ok(
         ctx,
         undefined,
-        `Prêt à publier chez eBay : catégorie ${categoryId}, état renseigné, ${product.images?.length ?? 0} photo(s), caractéristiques obligatoires complètes.`,
+        `Prêt à publier chez eBay : catégorie ${categoryId}, état renseigné, ${product.images?.length ?? 0} photo(s), caractéristiques obligatoires complètes.${coupe}`,
       );
     }
 

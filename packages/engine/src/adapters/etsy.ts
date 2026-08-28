@@ -957,7 +957,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
       return this.ok(
         ctx,
         undefined,
-        `Prêt à publier chez Etsy : catégorie ${taxonomy}, ${whoMade}/${whenMade}${estFourniture ? ", fourniture créative" : partenaire ? ", partenaire de production déclaré" : ""}, ${variantes.length || 1} déclinaison(s).`,
+        `Prêt à publier chez Etsy : catégorie ${taxonomy}, ${whoMade}/${whenMade}${estFourniture ? ", fourniture créative" : partenaire ? ", partenaire de production déclaré" : ""}, ${variantes.length || 1} déclinaison(s).${product.title.length > 140 ? ` Titre coupé à 140 caractères : « ${product.title.slice(0, 140)} ».` : ""}`,
       );
     }
 
