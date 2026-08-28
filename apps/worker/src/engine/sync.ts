@@ -373,7 +373,16 @@ async function syncCatalogue(
        * sur les boutiques avant l'arrivée de l'outil — y compris ce qui se
        * vend.
        */
-      if (!productId && !supprime) {
+      /*
+       * SIGNALÉE UNE FOIS, PAS À CHAQUE PASSAGE.
+       *
+       * `prev` est l'annonce telle qu'on la connaissait déjà. Sans cette
+       * condition, une intruse serait rejournalisée à chaque relevé — quatre-
+       * vingt-seize fois par jour et par annonce — et le journal deviendrait
+       * illisible au moment précis où il sert à quelque chose. On ne signale
+       * donc que la PREMIÈRE rencontre.
+       */
+      if (!productId && !supprime && !prev) {
         intruses.push({
           remoteId: item.remoteId,
           titre: item.groupTitle ?? item.title,
