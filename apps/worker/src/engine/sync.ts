@@ -16,6 +16,7 @@ import {
   listingGroup,
   product,
   salesEvent,
+  shop,
   syncJob,
   variant,
 } from "../db/schema.js";
@@ -801,6 +802,93 @@ async function syncOrders(
  * par webhook n'a pas besoin d'être relevée souvent, le relevé n'étant qu'un
  * filet si un webhook se perd. Une plateforme sans webhook n'a que le relevé.
  */
+/**
+ * REMET LES CADENCES D'APLOMB, SANS RIEN CASSER D'AUTRE.
+ *
+ * La cadence d'une boutique n'est recalculée qu'aux moments où quelqu'un
+ * agit : connexion, activation du temps réel. Entre deux, elle peut rester
+ * fausse indéfiniment — et c'est arrivé : eBay avait ses deux abonnements
+ * actifs et relevait toujours toutes les deux minutes, soit 1 440 tâches par
+ * jour au lieu de 192, sans qu'aucune erreur ne le signale. Une cadence
+ * fausse ne casse rien de visible ; elle brûle le quota en silence.
+ *
+ * Ce passage horaire ne parle à AUCUNE plateforme : il relit le plan et
+ * n'écrit que si la valeur stockée diffère. En régime établi il ne fait rien.
+ *
+ * Il n'écrit QUE l'intervalle et l'activation. Ni `failureCount`, ni
+ * `lastError`, ni `nextRunAt` : ce sont les organes du recul progressif après
+ * échec, et les remettre à zéro chaque heure ferait réessayer sans fin une
+ * tâche qui échoue — le contraire du but.
+ */
+export async function reconcilierCadences(env: Env): Promise<{
+  examinees: number;
+  corrigees: Array<{ boutique: string; ressource: string; de: number; a: number }>;
+}> {
+  const db = drizzle(env.DB);
+  const mod = buildEngine(env);
+  const repos = d1Repositories(env.DB, env.MASTER_KEY);
+
+  const boutiques = await db
+    .select({ id: shop.id, nom: shop.displayName })
+    .from(shop);
+
+  const corrigees: Array<{
+    boutique: string;
+    ressource: string;
+    de: number;
+    a: number;
+  }> = [];
+
+  for (const b of boutiques) {
+    const account = await repos.accounts.get(b.id);
+    if (!account) continue;
+
+    const credentials = await repos.credentials.get(b.id);
+    let caps;
+    try {
+      caps = await mod.registry
+        .get(account.marketplace)
+        .capabilities({ account, ...(credentials ? { credentials } : {}) });
+    } catch {
+      // Une plateforme inconnue ne doit pas interrompre les autres.
+      continue;
+    }
+
+    const plan = planReleves(caps, caps.pousseActive);
+    const existants = await db
+      .select({
+        resource: syncJob.resource,
+        intervalSec: syncJob.intervalSec,
+        enabled: syncJob.enabled,
+      })
+      .from(syncJob)
+      .where(eq(syncJob.shopId, b.id));
+
+    for (const p of plan) {
+      const actuel = existants.find((e) => e.resource === p.resource);
+      if (!actuel) continue; // Rien à corriger : c'est `ensureSyncJobs` qui crée.
+      const voulu = p.enabled ? 1 : 0;
+      if (actuel.intervalSec === p.intervalSec && actuel.enabled === voulu) {
+        continue;
+      }
+      await db
+        .update(syncJob)
+        .set({ intervalSec: p.intervalSec, enabled: voulu })
+        .where(
+          and(eq(syncJob.shopId, b.id), eq(syncJob.resource, p.resource)),
+        );
+      corrigees.push({
+        boutique: b.nom,
+        ressource: p.resource,
+        de: actuel.intervalSec,
+        a: p.intervalSec,
+      });
+    }
+  }
+
+  return { examinees: boutiques.length, corrigees };
+}
+
 export async function ensureSyncJobs(
   env: Env,
   accountId: string,

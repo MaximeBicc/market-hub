@@ -17,6 +17,7 @@ import type { Env } from "./env.js";
 import { d1Repositories } from "./engine/repositories.js";
 import { randomId } from "./lib/crypto.js";
 import { rattraperTempsReel } from "./lib/temps-reel.js";
+import { reconcilierCadences } from "./engine/sync.js";
 import { sendPushToUser } from "./lib/push.js";
 
 /**
@@ -97,6 +98,19 @@ export async function handleScheduled(
        * Il ne coûte qu'une lecture de base quand tout est déjà abonné.
        */
       await rattraperTempsReel(env);
+      /*
+       * Et en dernier, la remise d'aplomb des cadences : elle doit voir
+       * l'effet des abonnements qui viennent d'être posés. Elle ne parle à
+       * aucune plateforme et n'écrit que si une valeur a dérivé.
+       */
+      const cadences = await reconcilierCadences(env);
+      if (cadences.corrigees.length > 0) {
+        console.log(
+          `[cadences] ${cadences.corrigees
+            .map((c) => `${c.boutique}/${c.ressource} ${c.de}s→${c.a}s`)
+            .join(", ")}`,
+        );
+      }
       break;
     case "40 3 * * *":
       await enqueueDueJobs(env, true);
