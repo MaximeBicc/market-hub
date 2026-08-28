@@ -201,6 +201,16 @@ export class MarketplaceOrchestrator {
     productId: ProductId;
     accountIds: AccountId[];
     idempotencyKey: string;
+    /**
+     * Répétition : tout vérifier, n'écrire nulle part.
+     *
+     * Le même chemin que la vraie publication — chargement des variantes,
+     * jointure du stock, préconditions de chaque module — arrêté juste avant
+     * la première écriture. Le verdict rendu est donc celui qu'aurait donné
+     * une vraie tentative, sans brouillon facturé chez Etsy ni offre orpheline
+     * chez eBay.
+     */
+    dryRun?: boolean;
   }): Promise<CommandOutcome> {
     const product = await this.products.get(input.productId);
     if (!product) throw new Error(`Produit inconnu : ${input.productId}`);
@@ -291,12 +301,21 @@ export class MarketplaceOrchestrator {
       }
 
       const result = await adapter.createListing(
-        ctx,
+        { ...ctx, ...(input.dryRun ? { dryRun: true } : {}) },
         aDiffuser,
         // La clé d'idempotence est déclinée par compte : rejouer la commande
         // ne doit pas créer un doublon chez la plateforme.
         `${input.idempotencyKey}:${ctx.account.id}`,
       );
+
+      /*
+       * En répétition, on ne consigne RIEN. Enregistrer une annonce qui
+       * n'existe pas chez la plateforme ferait croire au garde-fou
+       * ci-dessus qu'elle est déjà publiée, et la vraie publication serait
+       * ensuite refusée comme un doublon — une vérification qui empêche ce
+       * qu'elle devait préparer.
+       */
+      if (input.dryRun) return result;
 
       /*
        * CE QU'ON ÉCRIT LOCALEMENT DOIT ÊTRE VRAI.

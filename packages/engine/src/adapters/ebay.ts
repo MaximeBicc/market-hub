@@ -1490,6 +1490,19 @@ export class EbayAdapter implements MarketplaceAdapter {
     const commun = { categoryId, marketplaceId, conditionEbay };
 
     /*
+     * Tout ce qu'eBay exige a été vérifié — catégorie, état, photo,
+     * caractéristiques obligatoires. La suite écrit. On s'arrête ici en
+     * répétition.
+     */
+    if (ctx.dryRun) {
+      return this.ok(
+        ctx,
+        undefined,
+        `Prêt à publier chez eBay : catégorie ${categoryId}, état renseigné, ${product.images?.length ?? 0} photo(s), caractéristiques obligatoires complètes.`,
+      );
+    }
+
+    /*
      * Zéro ou une variante : rien à grouper. Un groupe d'un seul élément n'a
      * pas de déclinaison à proposer, et eBay refuse un `variesBy` sans axe qui
      * varie. On garde donc le chemin mono-SKU d'origine, à un détail près : si

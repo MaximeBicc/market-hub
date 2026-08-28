@@ -27,6 +27,24 @@ export interface MarketplaceContext {
   account: MarketplaceAccount;
   credentials?: Record<string, string> | undefined;
   /**
+   * RÉPÉTITION SANS ÉCRITURE : « qu'est-ce qui manquerait, si j'essayais ? »
+   *
+   * Un adaptateur qui voit ce drapeau exécute TOUTES ses vérifications, puis
+   * s'arrête juste avant sa première écriture chez la plateforme. Il rend le
+   * même verdict qu'une vraie tentative — `manual_required` et le détail de
+   * ce qui manque, ou `success` — sans rien créer.
+   *
+   * POURQUOI PAS UNE MÉTHODE SÉPARÉE. Une seconde fonction qui listerait les
+   * exigences dériverait de celle qui les applique : on corrigerait l'une, on
+   * oublierait l'autre, et l'écran annoncerait « tout est prêt » sur une
+   * publication qui échoue. Ici c'est LE MÊME CODE, arrêté plus tôt : les
+   * deux réponses ne peuvent pas diverger.
+   *
+   * Chaque module décide où placer son arrêt — juste avant sa première
+   * écriture, et après tout ce qu'il sait vérifier sans écrire.
+   */
+  dryRun?: boolean | undefined;
+  /**
    * fetch instrumenté fourni par l'hôte : il compte les sous-requêtes,
    * applique le token bucket de la plateforme et traduit les codes HTTP en
    * erreurs typées. Un adaptateur ne doit JAMAIS appeler le fetch global —

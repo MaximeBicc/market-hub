@@ -275,6 +275,61 @@ describe("écritures", () => {
     expect(r.message).toMatch(/prix vit sur l'offre/);
   });
 
+  it("en répétition, vérifie tout et n'écrit RIEN chez eBay", async () => {
+    /*
+     * Une offre créée puis abandonnée n'est pas gratuite : elle occupe le
+     * plafond d'annonces du vendeur et laisse un objet d'inventaire que la
+     * synchronisation retrouvera. Vérifier ne doit rien créer.
+     */
+    const { http, sent } = fakeHttp([]);
+
+    const r = await adapter.createListing(
+      { ...ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }), dryRun: true },
+      {
+        id: "p1",
+        sku: "NEW-1",
+        title: "Article de test",
+        price: { amount: 1990, currency: "EUR" },
+        stock: 4,
+        condition: "used_good",
+        images: ["https://exemple.fr/photo.jpg"],
+      },
+      "k",
+    );
+
+    expect(r.status).toBe("success");
+    expect(r.remoteId).toBeUndefined();
+    expect(sent.filter((x) => x.method !== "GET")).toHaveLength(0);
+  });
+
+  it("en répétition, refuse pour les mêmes raisons qu'une vraie tentative", async () => {
+    // Sans état déclaré, eBay refuse — et la répétition doit le dire avec
+    // exactement le même message, sinon les deux réponses divergeront un jour.
+    const sansEtat = {
+      id: "p1",
+      sku: "NEW-1",
+      title: "Article de test",
+      price: { amount: 1990, currency: "EUR" },
+      stock: 4,
+      images: ["https://exemple.fr/photo.jpg"],
+    };
+    const creds = { ...PUBLIABLE, defaultCategoryId: "1234" };
+
+    const vrai = await adapter.createListing(
+      ctxWith(fakeHttp([]).http, creds),
+      sansEtat,
+      "k",
+    );
+    const repete = await adapter.createListing(
+      { ...ctxWith(fakeHttp([]).http, creds), dryRun: true },
+      sansEtat,
+      "k",
+    );
+
+    expect(repete.status).toBe(vrai.status);
+    expect(repete.message).toBe(vrai.message);
+  });
+
   it("crée une offre en brouillon, sans la publier", async () => {
     const { http, sent } = fakeHttp([
       // La sonde d'existence passe en premier : 404 = ce SKU est libre.

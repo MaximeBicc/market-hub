@@ -114,6 +114,14 @@ engine.post("/listing", async (c) => {
     accountIds: string[];
     /** Publie immédiatement après la création au lieu de laisser un brouillon. */
     publish?: boolean;
+    /**
+     * Répétition : vérifie tout, n'écrit nulle part.
+     *
+     * Chaque module exécute ses contrôles et s'arrête avant sa première
+     * écriture. On obtient donc, boutique par boutique, exactement ce qui
+     * manque — sans brouillon facturé chez Etsy ni offre orpheline chez eBay.
+     */
+    verifier?: boolean;
     idempotencyKey?: string;
   }>();
   const key = body.idempotencyKey ?? crypto.randomUUID();
@@ -133,7 +141,17 @@ engine.post("/listing", async (c) => {
     productId: body.productId,
     accountIds: comptes,
     idempotencyKey: key,
+    ...(body.verifier ? { dryRun: true } : {}),
   });
+
+  /*
+   * Une répétition s'arrête ici, quoi qu'on ait demandé par ailleurs.
+   * Enchaîner sur la mise en ligne publierait ce qu'on voulait seulement
+   * vérifier — l'exact contraire de la demande.
+   */
+  if (body.verifier) {
+    return c.json({ ...creation, verification: true, idempotencyKey: key });
+  }
 
   if (!body.publish) {
     return c.json({ ...creation, idempotencyKey: key });

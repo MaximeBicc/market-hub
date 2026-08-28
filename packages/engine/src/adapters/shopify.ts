@@ -460,6 +460,20 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       .filter((v) => v.status !== "archived")
       .sort((a, b) => a.position - b.position);
 
+    /*
+     * Shopify n'exige RIEN de plus que la fiche commune : c'est votre
+     * boutique, pas une place de marché avec ses règles de catégorie et ses
+     * déclarations obligatoires. Le dire explicitement vaut mieux qu'un écran
+     * muet — on lit alors « rien à remplir » au lieu de « on ne sait pas ».
+     */
+    if (ctx.dryRun) {
+      return this.ok(
+        ctx,
+        undefined,
+        `Prêt à publier chez Shopify : aucune information supplémentaire exigée. ${axes.length > 0 && variantes.length > 0 ? `${variantes.length} déclinaison(s) sur ${axes.length} axe(s).` : "Produit simple, sans déclinaison."}`,
+      );
+    }
+
     // Sans axe ou sans variante, il n'y a rien à décliner : on reste sur le
     // chemin historique, qui crée un produit à variante unique. Ce cas couvre
     // tout le catalogue importé avant l'arrivée des déclinaisons, et il ne

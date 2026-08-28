@@ -947,6 +947,20 @@ export class EtsyAdapter implements MarketplaceAdapter {
       if (refus) return this.aLaMain(ctx, refus);
     }
 
+    /*
+     * Tout ce qu'Etsy exige a été vérifié — déclarations, éligibilité,
+     * profils, cohérence des axes. La ligne suivante crée un brouillon
+     * FACTURÉ. On s'arrête ici en répétition : c'est précisément le genre
+     * d'écriture qu'on ne veut pas déclencher pour vérifier.
+     */
+    if (ctx.dryRun) {
+      return this.ok(
+        ctx,
+        undefined,
+        `Prêt à publier chez Etsy : catégorie ${taxonomy}, ${whoMade}/${whenMade}${estFourniture ? ", fourniture créative" : partenaire ? ", partenaire de production déclaré" : ""}, ${variantes.length || 1} déclinaison(s).`,
+      );
+    }
+
     // `createDraftListing` n'accepte PAS de JSON : le corps doit être encodé
     // en formulaire. Envoyer du JSON renvoie une erreur de validation qui
     // désigne des champs pourtant présents.

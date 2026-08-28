@@ -885,6 +885,58 @@ describe("déclarations obligatoires", () => {
     expect(r.status).toBe("manual_required");
   });
 
+  it("en répétition, vérifie tout et n'écrit RIEN chez Etsy", async () => {
+    /*
+     * LA PROPRIÉTÉ QUI FAIT TOUT L'INTÉRÊT DE LA RÉPÉTITION.
+     *
+     * Etsy facture chaque brouillon et ne rembourse pas celui qu'on
+     * abandonne. Une vérification qui créerait l'annonce pour savoir si elle
+     * est créable serait pire que le problème qu'elle résout.
+     *
+     * Le test ne regarde pas le message : il regarde les ÉCRITURES. Aucune
+     * requête autre qu'une lecture ne doit partir.
+     */
+    const { http, sent } = fakeHttp([{ body: { listing_id: 7 } }]);
+
+    const r = await adapter.createListing(
+      { ...ctxWith(http, PUBLIABLE), dryRun: true },
+      { ...BASE, whoMade: "someone_else", whenMade: "2020_2026" },
+      "i",
+    );
+
+    expect(r.status).toBe("success");
+    expect(r.remoteId).toBeUndefined();
+    expect(sent.filter((x) => x.method !== "GET")).toHaveLength(0);
+  });
+
+  it("en répétition, rend le MÊME refus qu'une vraie tentative", async () => {
+    /*
+     * Une seconde fonction qui listerait les exigences dériverait de celle
+     * qui les applique. Ici c'est le même code arrêté plus tôt : le refus
+     * doit donc être identique, mot pour mot.
+     */
+    const { productionPartnerId: _sans, ...sansPartenaire } = PUBLIABLE;
+    const produit = {
+      ...BASE,
+      whoMade: "someone_else" as const,
+      whenMade: "2020_2026" as const,
+    };
+
+    const vrai = await adapter.createListing(
+      ctxWith(fakeHttp([]).http, sansPartenaire),
+      produit,
+      "i",
+    );
+    const repete = await adapter.createListing(
+      { ...ctxWith(fakeHttp([]).http, sansPartenaire), dryRun: true },
+      produit,
+      "i",
+    );
+
+    expect(repete.status).toBe(vrai.status);
+    expect(repete.message).toBe(vrai.message);
+  });
+
   it("refuse AVANT d'écrire un article qui n'entre dans aucune catégorie Etsy", async () => {
     /*
      * LE REFUS QU'ETSY N'EXPLIQUE PAS.
