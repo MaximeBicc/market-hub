@@ -6,6 +6,11 @@ import type { RemoteListing } from "@hub/engine";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { normaliserValeur } from "../lib/variantes.js";
 import {
+  estSupprime,
+  leverMarque,
+  marquerSupprime,
+} from "../lib/suppression.js";
+import {
   eventLog,
   listing,
   listingGroup,
@@ -286,7 +291,11 @@ async function syncCatalogue(
       const cleGroupe = item.groupRemoteId ?? item.remoteId;
 
       const groupeExistant = await db
-        .select({ id: listingGroup.id, productId: listingGroup.productId })
+        .select({
+          id: listingGroup.id,
+          productId: listingGroup.productId,
+          marketplaceData: listingGroup.marketplaceData,
+        })
         .from(listingGroup)
         .where(
           and(
@@ -299,10 +308,28 @@ async function syncCatalogue(
       let groupId = groupeExistant[0]?.id ?? null;
       let productId = groupeExistant[0]?.productId ?? prev?.productId ?? null;
 
+      /*
+       * CE QUI A ÉTÉ SUPPRIMÉ DU STOCK NE DOIT PAS RENAÎTRE ICI.
+       *
+       * L'annonce, elle, survit à la suppression : elle est retirée de la
+       * vente chez la plateforme mais conservée, parce que son ancienneté et
+       * ses avis ne se rachètent pas. Le relevé continue donc de la voir.
+       *
+       * Sans cette marque, il n'y trouvait ni produit rattaché ni SKU connu et
+       * en concluait qu'il découvrait un article : il fabriquait un produit
+       * maître, et le produit supprimé réapparaissait dans le stock à la
+       * minute suivante — avec un SKU « auto:… ». C'est le défaut qui rendait
+       * la suppression inopérante.
+       */
+      const supprime =
+        !productId &&
+        (estSupprime(prev?.marketplaceData) ||
+          estSupprime(groupeExistant[0]?.marketplaceData));
+
       // Un SKU connu rattache au produit existant : c'est la voie la plus sûre
       // quand elle est disponible, parce qu'elle survit à un changement de
       // structure chez la plateforme.
-      if (!productId && item.sku) {
+      if (!productId && !supprime && item.sku) {
         const p = await db
           .select({ id: product.id })
           .from(product)
@@ -311,7 +338,7 @@ async function syncCatalogue(
         productId = p[0]?.id ?? null;
       }
 
-      if (!productId) {
+      if (!productId && !supprime) {
         /*
          * Créer le produit maître. Le titre du PARENT, jamais celui de la
          * variante : « Support téléphone », pas « Support téléphone — Violet ».
@@ -353,10 +380,17 @@ async function syncCatalogue(
        * créerait un nouveau produit maître… et recommencerait deux minutes
        * plus tard. Six produits fantômes par quart d'heure.
        */
-      if (groupId && !groupeExistant[0]?.productId) {
+      if (groupId && productId && !groupeExistant[0]?.productId) {
         await db
           .update(listingGroup)
-          .set({ productId, syncedAt: now })
+          .set({
+            productId,
+            // Un groupe de nouveau rattaché n'est plus un groupe supprimé.
+            // Recréer le produit avec le même SKU suffit à le reprendre en
+            // main : un geste humain défait ce qu'un geste humain avait fait.
+            marketplaceData: leverMarque(groupeExistant[0]?.marketplaceData),
+            syncedAt: now,
+          })
           .where(eq(listingGroup.id, groupId));
       }
 
@@ -394,63 +428,72 @@ async function syncCatalogue(
        * Sans la seconde, une variante sans SKU serait recréée à chaque passage
        * de synchronisation, et son stock repartirait de zéro toutes les deux
        * minutes.
+       *
+       * Rien de tout cela pour une annonce dont le produit a été supprimé du
+       * stock : pas de produit maître, donc pas de variante où accrocher un
+       * stock, et pas de stock à rapprocher. On relève l'annonce — elle existe
+       * toujours chez la plateforme — et on s'arrête là.
        */
-      const optionKey = (item.optionValues ?? [])
-        .map(
-          (o) =>
-            `${normaliserValeur(o.name)}=${normaliserValeur(o.value)}`,
-        )
-        .join("|");
+      let variantId: string | null = null;
 
-      const varianteExistante = await db
-        .select({ id: variant.id })
-        .from(variant)
-        .where(
-          item.sku
-            ? and(eq(variant.productId, productId), eq(variant.sku, item.sku))
-            : and(
-                eq(variant.productId, productId),
-                eq(variant.optionKey, optionKey),
+      if (productId) {
+        const optionKey = (item.optionValues ?? [])
+          .map(
+            (o) =>
+              `${normaliserValeur(o.name)}=${normaliserValeur(o.value)}`,
+          )
+          .join("|");
+
+        const varianteExistante = await db
+          .select({ id: variant.id })
+          .from(variant)
+          .where(
+            item.sku
+              ? and(eq(variant.productId, productId), eq(variant.sku, item.sku))
+              : and(
+                  eq(variant.productId, productId),
+                  eq(variant.optionKey, optionKey),
+                ),
+          )
+          .limit(1);
+
+        variantId = varianteExistante[0]?.id ?? null;
+        touches.add(productId);
+
+        if (!variantId) {
+          variantId = randomId();
+          await db
+            .insert(variant)
+            .values({
+              id: variantId,
+              productId,
+              sku: item.sku,
+              optionKey,
+              optionValues: JSON.stringify(
+                (item.optionValues ?? []).map((o) => o.value),
               ),
-        )
-        .limit(1);
+              priceAmount: prix,
+              priceCurrency: devise,
+              imageUrl: item.imageUrl ?? null,
+              position: 0,
+              status: "active",
+              marketplaceData: "{}",
+              createdAt: now,
+              updatedAt: now,
+            })
+            .onConflictDoUpdate({
+              target: [variant.productId, variant.optionKey],
+              set: { sku: item.sku, priceAmount: prix, updatedAt: now },
+            });
 
-      let variantId = varianteExistante[0]?.id ?? null;
-      touches.add(productId);
+          // Variante inconnue : sa valeur distante initialise le stock central.
+          await mod.inventoryService.ensure(variantId, item.stock);
+        }
 
-      if (!variantId) {
-        variantId = randomId();
-        await db
-          .insert(variant)
-          .values({
-            id: variantId,
-            productId,
-            sku: item.sku,
-            optionKey,
-            optionValues: JSON.stringify(
-              (item.optionValues ?? []).map((o) => o.value),
-            ),
-            priceAmount: prix,
-            priceCurrency: devise,
-            imageUrl: item.imageUrl ?? null,
-            position: 0,
-            status: "active",
-            marketplaceData: "{}",
-            createdAt: now,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [variant.productId, variant.optionKey],
-            set: { sku: item.sku, priceAmount: prix, updatedAt: now },
-          });
-
-        // Variante inconnue : sa valeur distante initialise le stock central.
-        await mod.inventoryService.ensure(variantId, item.stock);
-      }
-
-      // Les axes du produit, reconstitués depuis ce que les variantes portent.
-      if ((item.optionValues ?? []).length > 0) {
-        await majAxes(db, productId, item.optionValues ?? [], now);
+        // Les axes du produit, reconstitués depuis ce que les variantes portent.
+        if ((item.optionValues ?? []).length > 0) {
+          await majAxes(db, productId, item.optionValues ?? [], now);
+        }
       }
 
       /*
@@ -479,7 +522,9 @@ async function syncCatalogue(
       let versionCentrale = 0;
       let rapprochement = false;
 
-      if (variantId) {
+      // `productId` va toujours avec `variantId` — la variante appartient au
+      // produit. Le nommer ici dit au compilateur ce que le flux garantit.
+      if (productId && variantId) {
         const central = await repos.inventory.get(variantId);
         if (central) {
           versionCentrale = central.version;
@@ -527,7 +572,28 @@ async function syncCatalogue(
        * vente continuait à ne rien décrémenter. Exactement le défaut que
        * cette refonte devait corriger.
        */
-      const rattachee = Boolean(prev?.variantId && prev?.groupId);
+      /*
+       * La marque de suppression est RECOPIÉE d'un relevé à l'autre.
+       *
+       * Ce champ est réécrit en entier à chaque passage : la laisser tomber
+       * ici l'effacerait au premier relevé, et le produit renaîtrait au
+       * second. Elle disparaît le jour où l'annonce retrouve un produit.
+       */
+      const donneesAnnonce = JSON.stringify({
+        ...(item.marketplaceData ?? {}),
+        // Sans cette trace, impossible de savoir lequel des deux côtés a bougé
+        // au passage suivant.
+        centralVersion: versionCentrale,
+      });
+      const donneesFinales = supprime
+        ? marquerSupprime(donneesAnnonce, now)
+        : donneesAnnonce;
+
+      const rattachee = productId
+        ? Boolean(prev?.variantId && prev?.groupId)
+        : // Détachée volontairement : ne jamais la considérer « à rattacher »,
+          // sinon sa ligne serait réécrite à chaque passage, pour rien.
+          Boolean(prev?.groupId);
       if (prev?.contentHash === hash && !rapprochement && rattachee) continue;
 
       writes.push(
@@ -549,12 +615,7 @@ async function syncCatalogue(
             status: statut,
             url: item.url ?? null,
             imageUrl: item.imageUrl ?? null,
-            marketplaceData: JSON.stringify({
-              ...(item.marketplaceData ?? {}),
-              // Sans cette trace, impossible de savoir lequel des deux côtés
-              // a bougé au passage suivant.
-              centralVersion: versionCentrale,
-            }),
+            marketplaceData: donneesFinales,
             contentHash: hash,
             syncedAt: now,
           })
@@ -576,10 +637,7 @@ async function syncCatalogue(
               quantity: item.stock,
               status: statut,
               imageUrl: item.imageUrl ?? null,
-              marketplaceData: JSON.stringify({
-                ...(item.marketplaceData ?? {}),
-                centralVersion: versionCentrale,
-              }),
+              marketplaceData: donneesFinales,
               contentHash: hash,
               syncedAt: now,
             },

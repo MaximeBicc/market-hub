@@ -1399,10 +1399,31 @@ export class EtsyAdapter implements MarketplaceAdapter {
     const id = listing.remoteId;
     if (!id) throw new Error("Etsy : annonce sans identifiant distant");
 
-    await this.call(ctx, `/shops/${this.shopId(ctx)}/listings/${id}`, {
-      method: "PATCH",
-      form: { state },
-    });
+    try {
+      await this.call(ctx, `/shops/${this.shopId(ctx)}/listings/${id}`, {
+        method: "PATCH",
+        form: { state },
+      });
+    } catch (e) {
+      /*
+       * UNE ANNONCE DÉJÀ ABSENTE N'EST PAS UN ÉCHEC — quand on la retirait.
+       *
+       * Effacée depuis Etsy, elle répond 404. Traiter cela en échec bloquait
+       * la suppression du produit, qui commence par retirer partout, alors que
+       * l'état voulu — plus rien en vente — est déjà atteint. Dans l'autre
+       * sens, republier ce qui n'existe plus reste un échec.
+       */
+      const introuvable =
+        state === "inactive" &&
+        e instanceof Error &&
+        /réponse 404/.test(e.message);
+      if (!introuvable) throw e;
+      return this.ok(
+        ctx,
+        id,
+        "Annonce absente d'Etsy — il n'y avait plus rien à retirer de la vente.",
+      );
+    }
     return this.ok(ctx, id);
   }
 

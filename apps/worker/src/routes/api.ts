@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { and, desc, eq, gte, gt, sql, lte, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, gt, or, sql, lte, inArray } from "drizzle-orm";
 import type { QueueTask } from "@hub/core";
 import {
   consumable,
@@ -26,6 +26,7 @@ import {
   retirerPartout,
 } from "../lib/disponibilite.js";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
+import { marquerSupprime } from "../lib/suppression.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
 import { sendPushToUser } from "../lib/push.js";
 import { buildEngine } from "../engine/module.js";
@@ -1638,7 +1639,19 @@ api.post("/products", async (c) => {
       },
     });
 
-  // Maintenir la table de stock central `inventory` synchronisée
+  /*
+   * Maintenir la table de stock central `inventory` synchronisée.
+   *
+   * LA VERSION S'INCRÉMENTE, sans quoi la saisie est annulée deux minutes plus
+   * tard. Le rapprochement tranche « qui a bougé » en comparant la version du
+   * stock central à celle que l'annonce avait vue : écrire la quantité sans
+   * toucher au compteur revenait à jurer que personne n'avait rien changé
+   * ici — donc que la plateforme faisait foi. Le relevé suivant recopiait
+   * consciencieusement l'ancienne quantité par-dessus la nouvelle.
+   *
+   * Seulement quand la valeur CHANGE : enregistrer une fiche sans toucher au
+   * stock ne doit pas déclencher d'écriture vers les plateformes.
+   */
   await db
     .insert(inventory)
     .values({
@@ -1652,6 +1665,7 @@ api.post("/products", async (c) => {
       target: inventory.variantId,
       set: {
         onHand: stock,
+        version: sql`${inventory.version} + (${inventory.onHand} <> ${stock})`,
         updatedAt: now,
       },
     });
@@ -1706,9 +1720,19 @@ api.post("/products/:id/stock", async (c) => {
     .set({ stock: newStock, updatedAt: now })
     .where(eq(product.id, id));
 
+  /*
+   * La version s'incrémente : c'est elle qui dit au rapprochement que le stock
+   * central a bougé de notre fait. Sans elle, le relevé suivant concluait que
+   * seule la plateforme avait changé et réécrivait sa valeur par-dessus —
+   * « je passe le stock à 0 » redevenait « 48 » à la minute d'après.
+   */
   await db
     .update(inventory)
-    .set({ onHand: newStock, updatedAt: now })
+    .set({
+      onHand: newStock,
+      version: sql`${inventory.version} + 1`,
+      updatedAt: now,
+    })
     .where(eq(inventory.variantId, seule));
 
   // Met à jour les listings synchronisés avec ce SKU
@@ -1782,6 +1806,59 @@ api.delete("/products/:id", async (c) => {
     .select({ id: variant.id })
     .from(variant)
     .where(eq(variant.productId, id));
+
+  /*
+   * MARQUER AVANT DE DÉTACHER — sinon le relevé recrée le produit.
+   *
+   * Une annonce détachée n'a plus ni produit rattaché ni SKU connu : au
+   * passage suivant, la synchronisation en déduisait qu'elle découvrait un
+   * article inconnu et lui fabriquait un produit maître. Le produit supprimé
+   * réapparaissait donc dans le stock une minute plus tard, avec un nouvel
+   * identifiant et un SKU « auto:… ».
+   *
+   * Le groupe est identifié par ses annonces, pas seulement par sa colonne
+   * `product_id` : celle-ci peut déjà être nulle — c'est le cas de tout groupe
+   * détaché par une suppression antérieure — et la marque manquerait
+   * précisément là où elle est le plus nécessaire.
+   */
+  const now = Math.floor(Date.now() / 1000);
+
+  /*
+   * DEUX ENDROITS, PARCE QU'AUCUN DES DEUX NE SUFFIT SEUL.
+   *
+   * Sur l'ANNONCE : c'est la marque précise, et la seule disponible pour une
+   * annonce qui vient d'être créée — elle n'a pas encore de groupe, celui-ci
+   * n'apparaissant qu'au premier relevé.
+   *
+   * Sur le GROUPE : c'est la marque qui couvre ce qu'on ne connaît pas encore.
+   * Une déclinaison ajoutée chez la plateforme APRÈS la suppression arriverait
+   * comme une annonce inconnue, sans marque propre, et ferait renaître le
+   * produit par la bande.
+   */
+  const siennesAnnonces = await db
+    .select({ id: listing.id, data: listing.marketplaceData })
+    .from(listing)
+    .where(eq(listing.productId, id));
+
+  for (const l of siennesAnnonces) {
+    await db
+      .update(listing)
+      .set({ marketplaceData: marquerSupprime(l.data, now) })
+      .where(eq(listing.id, l.id));
+  }
+
+  const groupes = await db
+    .selectDistinct({ id: listingGroup.id, data: listingGroup.marketplaceData })
+    .from(listingGroup)
+    .leftJoin(listing, eq(listing.groupId, listingGroup.id))
+    .where(or(eq(listingGroup.productId, id), eq(listing.productId, id)));
+
+  for (const g of groupes) {
+    await db
+      .update(listingGroup)
+      .set({ marketplaceData: marquerSupprime(g.data, now) })
+      .where(eq(listingGroup.id, g.id));
+  }
 
   await db
     .update(listing)

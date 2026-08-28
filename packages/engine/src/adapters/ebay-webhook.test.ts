@@ -369,11 +369,21 @@ describe("mise en place des abonnements", () => {
       "fetch",
       vi.fn(async (url: string | URL, init?: RequestInit) => {
         const u = String(url);
-        appels.push({
-          url: u,
-          methode: init?.method ?? "GET",
-          corps: init?.body ? JSON.parse(String(init.body)) : null,
-        });
+        /*
+         * Le corps n'est pas toujours du JSON : la demande de jeton part en
+         * formulaire. L'analyser sans précaution faisait échouer le journal
+         * AVANT l'enregistrement de l'appel — et le test concluait alors que
+         * l'appel n'avait pas eu lieu.
+         */
+        let corps: unknown = null;
+        if (init?.body) {
+          try {
+            corps = JSON.parse(String(init.body));
+          } catch {
+            corps = String(init.body);
+          }
+        }
+        appels.push({ url: u, methode: init?.method ?? "GET", corps });
         const cle = Object.keys(reponses).find((k) => u.includes(k));
         return new Response(JSON.stringify(cle ? reponses[cle] : {}), {
           status: 200,
@@ -399,6 +409,40 @@ describe("mise en place des abonnements", () => {
     ).rejects.toThrow(/32 à 80/);
     // Rien n'est parti : inutile de déranger eBay pour un refus certain.
     expect(appels).toHaveLength(0);
+  });
+
+  it("emploie le jeton APPLICATIF pour l'alerte et le catalogue des sujets", async () => {
+    /*
+     * Ces deux objets appartiennent à l'application, pas au vendeur : eBay
+     * les refuse avec un jeton d'utilisateur, par un 403 qui parle de jeton
+     * refusé — et envoie chercher du côté des portées alors que le jeton est
+     * simplement du mauvais type.
+     */
+    const appels = fetchAbonnement({
+      "/oauth2/token": { access_token: "jeton-applicatif", expires_in: 7200 },
+      "/destination?": { destinations: [] },
+      "/topic?": { topics: [] },
+      "/subscription?": { subscriptions: [] },
+      "/destination": { destinationId: "d1" },
+    });
+
+    await ebayEnsureNotifications(
+      adapter,
+      // Sans jeton applicatif en cache, la séquence doit aller le chercher.
+      {
+        ...c(),
+        credentials: { clientId: "cid", clientSecret: "csec", accessToken: "u", accessTokenExpiresAt: FUTUR },
+      } as MarketplaceContext,
+      "https://h/api/webhooks/ebay",
+      "a".repeat(32),
+      "a@b.c",
+    );
+
+    // Le jeton applicatif a bien été demandé : c'est la preuve que la
+    // configuration ne part pas avec celui du vendeur.
+    expect(appels.some((a) => a.url.includes("/identity/v1/oauth2/token"))).toBe(
+      true,
+    );
   });
 
   it("pose l'alerte, la destination, puis les abonnements — dans cet ordre", async () => {

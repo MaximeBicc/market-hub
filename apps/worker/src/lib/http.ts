@@ -76,8 +76,26 @@ export function createHttp({
     const res = await fetch(input, init);
 
     if (res.status === 401 || res.status === 403) {
+      /*
+       * NOMMER L'APPEL REFUSÉ, PAS SEULEMENT LE CODE.
+       *
+       * « eBay a refusé le jeton (403) » ne dit pas SUR QUOI. Or une séquence
+       * en enchaîne plusieurs, et un 403 sur la configuration d'alerte n'a
+       * pas la même cause qu'un 403 sur un abonnement : le premier tient au
+       * type de jeton, le second à une portée manquante. Sans le chemin, on
+       * cherche au hasard.
+       *
+       * eBay explique souvent la vraie raison dans son corps de réponse ; on
+       * le rapporte, tronqué, plutôt que de le jeter.
+       */
+      const chemin = new URL(
+        typeof input === "string" ? input : String(input),
+      ).pathname;
+      const detail = await res.text().catch(() => "");
       throw new ConnectorError(
-        `${platform} a refusé le jeton (${res.status})`,
+        `${platform} a refusé le jeton (${res.status}) sur ${chemin}${
+          detail ? ` — ${detail.slice(0, 180)}` : ""
+        }`,
         "auth_expired",
       );
     }

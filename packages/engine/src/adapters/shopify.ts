@@ -206,6 +206,17 @@ interface UserError {
   message: string;
 }
 
+/**
+ * L'objet visé n'existe plus chez Shopify.
+ *
+ * Shopify ne code pas ce cas : il le dit en anglais, dans `message`. Les deux
+ * formulations relevées sont « Product does not exist » (mutation sur un
+ * identifiant effacé) et « … not found ».
+ */
+function estIntrouvable(e: UserError): boolean {
+  return /does not exist|not found/i.test(e.message);
+}
+
 export class ShopifyAdapter implements MarketplaceAdapter {
   readonly id = "shopify";
 
@@ -1153,6 +1164,34 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     listing: Listing,
     status: "ACTIVE" | "DRAFT",
   ): Promise<TargetResult> {
+    /*
+     * UN PRODUIT DÉJÀ DISPARU N'EST PAS UN ÉCHEC — quand on cherchait à le
+     * retirer.
+     *
+     * Le cas est banal : quelqu'un efface le produit depuis l'administration
+     * Shopify. L'annonce reste alors chez nous, marquée « active », et pointe
+     * sur un identifiant que Shopify ne connaît plus. Toute tentative de
+     * retrait répondait « id Product does not exist », donc « échec », et la
+     * suppression du produit — qui commence par retirer partout — était
+     * refusée. DÉFINITIVEMENT : rien ne nettoie une annonce dont la
+     * contrepartie distante a disparu, si bien que l'article restait
+     * insupprimable à vie.
+     *
+     * L'état voulu est pourtant atteint : l'article n'est plus en vente. On
+     * répond donc « réussi ».
+     *
+     * Dans l'autre sens — REMETTRE en vente — l'absence reste un échec : on ne
+     * peut pas republier ce qui n'existe plus, et le dire serait mentir.
+     */
+    const disparu = (): TargetResult | null =>
+      status === "DRAFT"
+        ? this.ok(
+            ctx,
+            listing.remoteId,
+            "Produit absent de Shopify — il n'y avait plus rien à retirer de la vente.",
+          )
+        : null;
+
     let productId = listing.marketplaceData?.["productId"] as string | undefined;
     if (!productId) {
       const found = await this.gql<{
@@ -1163,7 +1202,11 @@ export class ShopifyAdapter implements MarketplaceAdapter {
         { id: listing.remoteId },
       );
       productId = found.productVariant?.product.id;
-      if (!productId) throw new Error("Shopify : produit introuvable");
+      if (!productId) {
+        const acquis = disparu();
+        if (acquis) return acquis;
+        throw new Error("Shopify : produit introuvable");
+      }
     }
 
     const d = await this.gql<{ productUpdate: { userErrors: UserError[] } }>(
@@ -1173,6 +1216,13 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       }`,
       { input: { id: productId, status } },
     );
+
+    // « Product does not exist » : le même cas, vu depuis la mutation.
+    if ((d.productUpdate.userErrors ?? []).some(estIntrouvable)) {
+      const acquis = disparu();
+      if (acquis) return acquis;
+    }
+
     this.assertNoUserErrors(d.productUpdate.userErrors, "statut");
     return this.ok(ctx, listing.remoteId);
   }

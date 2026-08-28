@@ -648,10 +648,12 @@ export async function ebayEnsureNotifications(
    * ne coûte rien et évite de mémoriser un état de plus.
    */
   try {
-    await adapter.appelNotification(ctx, "/config", {
-      method: "PUT",
-      body: JSON.stringify({ alertEmail: emailAlerte }),
-    });
+    await adapter.appelNotification(
+      ctx,
+      "/config",
+      { method: "PUT", body: JSON.stringify({ alertEmail: emailAlerte }) },
+      "application",
+    );
   } catch (err) {
     echecs.push({
       topic: "config",
@@ -712,7 +714,7 @@ export async function ebayEnsureNotifications(
         topicId?: string;
         supportedPayloads?: Array<{ schemaVersion?: string }>;
       }>;
-    }>(ctx, "/topic?limit=100");
+    }>(ctx, "/topic?limit=100", {}, "application");
     for (const t of topics.topics ?? []) {
       const v = t.supportedPayloads?.[0]?.schemaVersion;
       if (t.topicId && v) versions.set(t.topicId, v);
@@ -916,7 +918,48 @@ export class EbayAdapter implements MarketplaceAdapter {
     ctx: MarketplaceContext,
     chemin: string,
     init: RequestInit = {},
+    portee: "vendeur" | "application" = "vendeur",
   ): Promise<T> {
+    /*
+     * DEUX JETONS, ET LE CHOIX N'EST PAS LIBRE.
+     *
+     * L'API des notifications mélange deux natures d'objets :
+     *
+     *   la configuration d'alerte et le catalogue des sujets appartiennent à
+     *   l'APPLICATION — ils ne dépendent d'aucun vendeur, et eBay les refuse
+     *   avec un jeton d'utilisateur ;
+     *
+     *   les destinations et les abonnements appartiennent au VENDEUR, et
+     *   exigent son consentement.
+     *
+     * Se tromper donne un 403 qui parle de jeton refusé, ce qui envoie
+     * chercher du côté des portées alors que le jeton est simplement du
+     * mauvais type.
+     */
+    if (portee === "application") {
+      const jeton = await this.jetonApplicatif(ctx);
+      const base = hosts(ctx.credentials?.["environment"]).api;
+      const res = await fetch(
+        `${base}/commerce/notification/v1${chemin}`,
+        {
+          ...init,
+          headers: {
+            Authorization: `Bearer ${jeton}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            ...(init.headers as Record<string, string> | undefined),
+          },
+        },
+      );
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(
+          `eBay ${res.status} sur ${chemin}${detail ? ` — ${detail.slice(0, 180)}` : ""}`,
+        );
+      }
+      return res.status === 204 ? ({} as T) : ((await res.json()) as T);
+    }
+
     return this.call<T>(ctx, `/commerce/notification/v1${chemin}`, init);
   }
 
@@ -2114,28 +2157,44 @@ export class EbayAdapter implements MarketplaceAdapter {
      * peut republier sans tout recréer. Supprimer l'offre perdrait son
      * historique de vente, et le groupe ses déclinaisons.
      */
-    if (forme.type === "groupe") {
-      await this.call(
-        ctx,
-        "/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            inventoryItemGroupKey: forme.cle,
-            marketplaceId: ctx.credentials?.["marketplaceId"] ?? "EBAY_FR",
-          }),
-        },
-      );
+    /*
+     * UNE OFFRE DÉJÀ ABSENTE N'EST PAS UN ÉCHEC.
+     *
+     * Effacée depuis Seller Hub, elle répond 404. Traiter cela en échec
+     * bloquait la suppression du produit — qui commence par retirer partout —
+     * alors que l'état voulu, « plus en vente », est déjà atteint.
+     */
+    try {
+      if (forme.type === "groupe") {
+        await this.call(
+          ctx,
+          "/sell/inventory/v1/offer/withdraw_by_inventory_item_group",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              inventoryItemGroupKey: forme.cle,
+              marketplaceId: ctx.credentials?.["marketplaceId"] ?? "EBAY_FR",
+            }),
+          },
+        );
+        return this.ok(
+          ctx,
+          listing.remoteId,
+          "Annonce à déclinaisons retirée d'un seul tenant.",
+        );
+      }
+
+      await this.call(ctx, `/sell/inventory/v1/offer/${forme.offerId}/withdraw`, {
+        method: "POST",
+      });
+    } catch (e) {
+      if (!(e instanceof EbayHttpError) || e.status !== 404) throw e;
       return this.ok(
         ctx,
         listing.remoteId,
-        "Annonce à déclinaisons retirée d'un seul tenant.",
+        "Offre absente d'eBay — il n'y avait plus rien à retirer de la vente.",
       );
     }
-
-    await this.call(ctx, `/sell/inventory/v1/offer/${forme.offerId}/withdraw`, {
-      method: "POST",
-    });
     return this.ok(ctx, listing.remoteId);
   }
 
