@@ -636,6 +636,14 @@ const SUJETS_VOULUS = [
   "ORDER_CANCELLATION_ACTIVITY",
 ] as const;
 
+/** Une caractéristique d'article telle qu'eBay la décrit pour une catégorie. */
+export interface AspectEbay {
+  nom: string;
+  obligatoire: boolean;
+  /** Vide quand eBay accepte du texte libre. */
+  valeurs: string[];
+}
+
 /** La portée qu'un abonnement par vendeur exige, et elle seule. */
 export const PORTEE_NOTIFICATION =
   "https://api.ebay.com/oauth/api_scope/commerce.notification.subscription";
@@ -1945,10 +1953,10 @@ export class EbayAdapter implements MarketplaceAdapter {
    * « Material » — parce que l'appel porte `Accept-Language`. C'est aussi
    * sous ces noms-là qu'il faut les renseigner.
    */
-  private async aspectsObligatoires(
+  async aspectsCategorie(
     ctx: MarketplaceContext,
     categoryId: string,
-  ): Promise<string[]> {
+  ): Promise<AspectEbay[]> {
     const c = ctx.credentials ?? {};
     // Le bac à sable répond au hasard sur la taxonomie : ne rien exiger.
     if (c["environment"] === "sandbox") return [];
@@ -1985,16 +1993,48 @@ export class EbayAdapter implements MarketplaceAdapter {
       const d = (await res.json()) as {
         aspects?: Array<{
           localizedAspectName?: string;
-          aspectConstraint?: { aspectRequired?: boolean };
+          aspectConstraint?: {
+            aspectRequired?: boolean;
+            aspectMode?: string;
+          };
+          aspectValues?: Array<{ localizedValue?: string }>;
         }>;
       };
       return (d.aspects ?? [])
-        .filter((a) => a.aspectConstraint?.aspectRequired === true)
-        .map((a) => a.localizedAspectName)
-        .filter((n): n is string => typeof n === "string" && n.length > 0);
+        .filter((a) => typeof a.localizedAspectName === "string")
+        .map((a) => ({
+          nom: a.localizedAspectName!,
+          obligatoire: a.aspectConstraint?.aspectRequired === true,
+          /*
+           * Les valeurs proposées, quand eBay en impose une liste fermée.
+           * Une liste vide veut dire « texte libre », pas « aucune valeur
+           * possible » : la distinction décide si l'écran montre un menu ou
+           * un champ de saisie.
+           */
+          valeurs: (a.aspectValues ?? [])
+            .map((v) => v.localizedValue)
+            .filter((v): v is string => typeof v === "string" && v.length > 0)
+            .slice(0, 200),
+        }))
+        .filter((a) => a.nom.length > 0);
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Les noms des caractéristiques obligatoires, et rien d'autre.
+   *
+   * Le contrôle de publication ne s'intéresse qu'à celles-là ; l'écran de
+   * saisie, lui, a besoin de la liste complète et des valeurs proposées.
+   */
+  private async aspectsObligatoires(
+    ctx: MarketplaceContext,
+    categoryId: string,
+  ): Promise<string[]> {
+    return (await this.aspectsCategorie(ctx, categoryId))
+      .filter((a) => a.obligatoire)
+      .map((a) => a.nom);
   }
   async searchCategories(
     ctx: MarketplaceContext,

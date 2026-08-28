@@ -61,6 +61,13 @@ interface BoutiqueVue {
   commandes: CommandeVue[];
 }
 
+interface AspectVue {
+  nom: string;
+  obligatoire: boolean;
+  /** Vide quand eBay accepte du texte libre. */
+  valeurs: string[];
+}
+
 interface Resultat {
   accountId: string;
   marketplace: string;
@@ -282,6 +289,12 @@ function FicheDiffusion({
   const [whenMade, setWhenMade] = useState(produit.whenMade ?? "");
   const [ebayCategoryId, setEbayCategoryId] = useState(donnees["ebayCategoryId"] ?? "");
   const [etsyTaxonomyId, setEtsyTaxonomyId] = useState(donnees["etsyTaxonomyId"] ?? "");
+  const [ebayAspects, setEbayAspects] = useState<Record<string, string>>(
+    (donnees["ebayAspects"] as unknown as Record<string, string>) ?? {},
+  );
+  const [etsyIsSupply, setEtsyIsSupply] = useState(
+    (donnees["etsyIsSupply"] as unknown) === true,
+  );
   const [photos, setPhotos] = useState<string[]>(imagesDe(produit));
   const [nouvellePhoto, setNouvellePhoto] = useState("");
   const [cibles, setCibles] = useState<Set<string>>(new Set());
@@ -326,6 +339,8 @@ function FicheDiffusion({
     images: photos,
     ebayCategoryId: ebayCategoryId || null,
     etsyTaxonomyId: etsyTaxonomyId || null,
+    ebayAspects,
+    etsyIsSupply,
   });
 
   const enregistrer = useMutation({
@@ -383,6 +398,16 @@ function FicheDiffusion({
       ? [
           { ok: Boolean(whoMade), texte: "Fabricant déclaré pour Etsy" },
           { ok: Boolean(whenMade), texte: "Période déclarée pour Etsy" },
+          {
+            /*
+             * Ce que la publication va vérifier de toute façon, montré avant
+             * plutôt qu'après : eBay refuse la mise en ligne d'une annonce à
+             * qui il manque une caractéristique obligatoire, et n'en nomme
+             * qu'une à la fois.
+             */
+            ok: !ebayCategoryId || Object.keys(ebayAspects).length > 0,
+            texte: "Caractéristiques eBay renseignées",
+          },
         ]
       : []),
   ];
@@ -477,12 +502,24 @@ function FicheDiffusion({
                 <PlateformeBadge plateforme="ebay" />
                 <div className="field"><label htmlFor="cond">État <b>*</b></label><select id="cond" className="input" value={condition} onChange={(e) => setCondition(e.target.value)}><option value="">À renseigner</option>{ETATS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
                 {boutiques.filter((b) => b.plateforme === "ebay").map((b) => <ChercheCategorie key={b.id} accountId={b.id} plateforme="ebay" titre="Catégorie" defaut={title} valeur={ebayCategoryId} onChoix={setEbayCategoryId} />)}
+                {boutiques.filter((b) => b.plateforme === "ebay").slice(0, 1).map((b) => <CaracteristiquesEbay key={b.id} accountId={b.id} categoryId={ebayCategoryId} valeurs={ebayAspects} onChange={setEbayAspects} />)}
               </div>
               <div className="publish-platform-panel publish-platform-panel--etsy">
                 <PlateformeBadge plateforme="etsy" />
                 <div className="field"><label htmlFor="qui">Fabriqué par <b>*</b></label><select id="qui" className="input" value={whoMade} onChange={(e) => setWhoMade(e.target.value)}><option value="">À renseigner</option>{QUI.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
                 <div className="field"><label htmlFor="quand">Période <b>*</b></label><select id="quand" className="input" value={whenMade} onChange={(e) => setWhenMade(e.target.value)}><option value="">À renseigner</option>{QUAND.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
                 {boutiques.filter((b) => b.plateforme === "etsy").map((b) => <ChercheCategorie key={b.id} accountId={b.id} plateforme="etsy" titre="Catégorie" defaut={title} valeur={etsyTaxonomyId} onChoix={setEtsyTaxonomyId} />)}
+                {/*
+                  * L'une des trois portes d'entrée d'Etsy, et la seule qui se
+                  * déclare au niveau de l'article. Un objet fabriqué par
+                  * quelqu'un d'autre n'y est vendable que s'il est fait main
+                  * avec un partenaire déclaré, vintage de vingt ans, ou une
+                  * fourniture — d'où cette case.
+                  */}
+                <label className="field field--check">
+                  <input type="checkbox" checked={etsyIsSupply} onChange={(e) => setEtsyIsSupply(e.target.checked)} />
+                  <span>C'est une fourniture créative <small>Matière, composant ou outil destiné à créer. Ne cochez que si c'est exact : Etsy sanctionne les fausses déclarations.</small></span>
+                </label>
               </div>
               <div className="publish-platform-panel publish-platform-panel--shopify">
                 <PlateformeBadge plateforme="shopify" />
@@ -579,6 +616,104 @@ function motsCles(titre: string): string {
     .filter((m) => m.length > 2)
     .slice(0, 3)
     .join(" ");
+}
+
+/**
+ * LES CARACTÉRISTIQUES QU'EBAY EXIGE, DEMANDÉES AVANT D'ESSAYER.
+ *
+ * Sans cet écran, la seule façon de connaître la liste était de tenter la
+ * publication : eBay crée le brouillon, refuse la mise en ligne, et nomme UNE
+ * caractéristique manquante. Il fallait donc autant d'essais que de
+ * caractéristiques absentes, chacun laissant un brouillon invendable.
+ *
+ * La liste dépend de la catégorie : elle se recharge quand celle-ci change, et
+ * les valeurs déjà saisies sont conservées — changer d'avis sur la catégorie
+ * ne doit pas effacer un travail de saisie encore valable.
+ *
+ * Les noms sont ceux de la place de marché — « Matière » et non « Material »
+ * sur EBAY_FR — parce que c'est sous ces noms-là qu'eBay les attend.
+ */
+function CaracteristiquesEbay({
+  accountId,
+  categoryId,
+  valeurs,
+  onChange,
+}: {
+  accountId: string;
+  categoryId: string;
+  valeurs: Record<string, string>;
+  onChange: (v: Record<string, string>) => void;
+}) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["ebay-aspects", accountId, categoryId],
+    queryFn: () =>
+      api.get<{ aspects: AspectVue[] }>(
+        `/engine/accounts/${accountId}/ebay/aspects?categoryId=${encodeURIComponent(categoryId)}`,
+      ),
+    enabled: categoryId.length > 0,
+    retry: false,
+  });
+
+  if (!categoryId) return null;
+  if (isLoading) {
+    return <PalmLoader compact label="Lecture des caractéristiques exigées par eBay…" />;
+  }
+
+  const aspects = data?.aspects ?? [];
+  if (aspects.length === 0) return null;
+
+  const obligatoires = aspects.filter((a) => a.obligatoire);
+  const facultatives = aspects.filter((a) => !a.obligatoire);
+
+  const champ = (a: AspectVue) => (
+    <div className="field" key={a.nom}>
+      <label htmlFor={`asp-${a.nom}`}>
+        {a.nom}
+        {a.obligatoire ? <b> *</b> : null}
+      </label>
+      {a.valeurs.length > 0 ? (
+        <select
+          id={`asp-${a.nom}`}
+          className="input"
+          value={valeurs[a.nom] ?? ""}
+          onChange={(e) => onChange({ ...valeurs, [a.nom]: e.target.value })}
+        >
+          <option value="">— à choisir —</option>
+          {a.valeurs.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input
+          id={`asp-${a.nom}`}
+          className="input"
+          value={valeurs[a.nom] ?? ""}
+          onChange={(e) => onChange({ ...valeurs, [a.nom]: e.target.value })}
+          placeholder="À renseigner"
+        />
+      )}
+    </div>
+  );
+
+  return (
+    <>
+      {obligatoires.map(champ)}
+      {facultatives.length > 0 && (
+        <details className="publish-legal-note">
+          <summary>
+            {facultatives.length} caractéristique
+            {facultatives.length > 1 ? "s" : ""} facultative
+            {facultatives.length > 1 ? "s" : ""}
+          </summary>
+          {/* Facultatives pour publier, utiles pour être trouvé : eBay s'en
+              sert dans ses filtres de recherche. */}
+          {facultatives.map(champ)}
+        </details>
+      )}
+    </>
+  );
 }
 
 function ChercheCategorie({

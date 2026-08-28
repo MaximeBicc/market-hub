@@ -2745,6 +2745,12 @@ h2.sec:first-child {
 .publish-platform-panel > .platform-badge { margin-bottom: 11px; }
 .publish-platform-panel > p { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .publish-platform-panel--shopify { grid-column: 1 / -1; }
+/* Une case à cocher tient sur une ligne, sa justification dessous : c'est
+   une DÉCLARATION, et elle doit se lire avant d'être cochée. */
+.field--check { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.field--check input { margin-top: 3px; flex: none; width: 16px; height: 16px; }
+.field--check small { display: block; margin-top: 3px; color: var(--muted); line-height: 1.45; }
+
 .publish-legal-note { margin-top: 12px; color: var(--muted); font-size: 12px; }
 .publish-legal-note summary { cursor: pointer; font-weight: 600; }
 .publish-legal-note p { margin-bottom: 0; }

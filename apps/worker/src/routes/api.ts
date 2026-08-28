@@ -2163,6 +2163,10 @@ api.patch("/products/:id/diffusion", async (c) => {
       images?: string[];
       ebayCategoryId?: string | null;
       etsyTaxonomyId?: string | null;
+      /** Les caractéristiques d'article exigées par la catégorie eBay. */
+      ebayAspects?: Record<string, string> | null;
+      /** Fourniture créative : l'une des trois portes d'entrée d'Etsy. */
+      etsyIsSupply?: boolean | null;
     }>()
     .catch(() => ({}) as Record<string, never>);
 
@@ -2199,6 +2203,25 @@ api.patch("/products/:id/diffusion", async (c) => {
   }
   if (body.etsyTaxonomyId !== undefined) {
     donnees["etsyTaxonomyId"] = body.etsyTaxonomyId?.trim() || undefined;
+  }
+  if (body.ebayAspects !== undefined) {
+    /*
+     * Nettoyées ici, pas à l'usage. Une caractéristique au nom ou à la valeur
+     * vide est refusée par eBay avec un message qui parle de la CATÉGORIE :
+     * on la retire plutôt que de la laisser produire un refus incompréhensible
+     * bien plus loin.
+     */
+    const propres: Record<string, string> = {};
+    for (const [nom, valeur] of Object.entries(body.ebayAspects ?? {})) {
+      const n = String(nom).trim();
+      const v = String(valeur ?? "").trim();
+      if (n && v) propres[n] = v.slice(0, 65);
+    }
+    donnees["ebayAspects"] =
+      Object.keys(propres).length > 0 ? propres : undefined;
+  }
+  if (body.etsyIsSupply !== undefined) {
+    donnees["etsyIsSupply"] = body.etsyIsSupply === true ? true : undefined;
   }
 
   const condition = choisir(body.condition, ETATS);

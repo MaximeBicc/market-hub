@@ -1777,6 +1777,63 @@ accounts.post("/:id/ebay/adresse", async (c) => {
  *
  * Lecture pure : rien n'est écrit, ni chez la plateforme ni en base.
  */
+/**
+ * LES CARACTÉRISTIQUES QU'EBAY EXIGE POUR UNE CATÉGORIE.
+ *
+ * Sans cet écran, la seule façon de connaître la liste était de tenter la
+ * publication : eBay crée le brouillon, refuse la mise en ligne, et nomme UNE
+ * caractéristique manquante. Il fallait donc autant d'essais que de
+ * caractériques absentes, chacun laissant un brouillon invendable derrière
+ * lui.
+ *
+ * La liste complète se demande, et se remplit d'avance.
+ */
+accounts.get("/:id/ebay/aspects", async (c) => {
+  const id = c.req.param("id");
+  const categoryId = (c.req.query("categoryId") ?? "").trim();
+  if (!categoryId) return c.json({ aspects: [] });
+
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+  const account = await repos.accounts.get(id);
+  if (!account) return c.json({ error: "Boutique inconnue" }, 404);
+  if (account.marketplace !== "ebay") return c.json({ aspects: [] });
+
+  const mod = buildEngine(c.env, { used: 0 });
+  const adapter = mod.registry.get("ebay") as EbayAdapter;
+
+  const credentials = { ...(await repos.credentials.get(id)) };
+  try {
+    const aspects = await adapter.aspectsCategorie(
+      {
+        account,
+        credentials,
+        http: mod.httpFor(account),
+        saveCredentials: async (patch) => {
+          Object.assign(credentials, patch);
+          await repos.credentials.put(id, credentials);
+        },
+      },
+      categoryId,
+    );
+    /*
+     * Les obligatoires d'abord : ce sont elles qui bloquent la publication.
+     * Les autres suivent, parce qu'une annonce mieux décrite se trouve mieux
+     * — mais rien n'oblige à les remplir.
+     */
+    return c.json({
+      aspects: [
+        ...aspects.filter((a) => a.obligatoire),
+        ...aspects.filter((a) => !a.obligatoire),
+      ].slice(0, 40),
+    });
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Lecture impossible" },
+      400,
+    );
+  }
+});
+
 accounts.get("/:id/categories", async (c) => {
   const id = c.req.param("id");
   const q = (c.req.query("q") ?? "").trim();
