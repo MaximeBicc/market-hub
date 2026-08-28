@@ -241,6 +241,19 @@ async function syncCatalogue(
     const known = new Map(existing.map((r) => [r.externalId, r]));
 
     const writes = [];
+    /*
+     * Les annonces trouvées chez la plateforme que l'outil ne reconnaît pas.
+     *
+     * Elles sont recensées pour être montrées, jamais absorbées : voir la
+     * règle du stock plus bas. Le journal en garde la trace même quand
+     * personne ne regarde l'écran — c'est ainsi qu'on découvre qu'une
+     * boutique s'est mise à publier de son côté.
+     */
+    const intruses: Array<{
+      remoteId: string;
+      titre: string;
+      sku: string | null;
+    }> = [];
 
     for (const item of page.items) {
       const prev = known.get(item.remoteId);
@@ -339,33 +352,32 @@ async function syncCatalogue(
         productId = p[0]?.id ?? null;
       }
 
+      /*
+       * ══ LE STOCK DE L'OUTIL FAIT FOI ══
+       *
+       * Une annonce qu'on ne reconnaît ni par son produit ni par son SKU n'a
+       * pas été créée ici : elle a été saisie directement chez la plateforme.
+       *
+       * L'ABSORBER ÉTAIT LE PIRE DES DEUX MONDES, et c'est ce qu'on faisait —
+       * un produit maître au SKU « auto:… », dont le stock entrait dans les
+       * comptes. Or ce stock, personne ne l'a jamais compté ici. L'outil se
+       * mettait donc à promettre sur les autres boutiques des pièces dont il
+       * ignore tout, et à retirer des annonces sur la foi d'un total faux.
+       * C'est aussi ce qui a fabriqué un « produit » nommé
+       * « ALI-1601446602207-106700283643 », à zéro euro et sans photo : une
+       * variante promue produit par ce chemin.
+       *
+       * L'annonce est donc SIGNALÉE, et n'entre pas dans le stock. Son
+       * retrait chez la plateforme reste un geste explicite : le déclencher
+       * ici, dans une tâche de fond, retirerait d'un coup tout ce qui existait
+       * sur les boutiques avant l'arrivée de l'outil — y compris ce qui se
+       * vend.
+       */
       if (!productId && !supprime) {
-        /*
-         * Créer le produit maître. Le titre du PARENT, jamais celui de la
-         * variante : « Support téléphone », pas « Support téléphone — Violet ».
-         *
-         * Le SKU du parent est de repli quand la plateforme n'en donne pas —
-         * il n'est plus la clé de rapprochement, ce sont les variantes qui
-         * portent les vrais SKU, mais la colonne reste NOT NULL UNIQUE.
-         */
-        productId = randomId();
-        await db.insert(product).values({
-          id: productId,
-          sku: item.sku ?? `auto:${cleGroupe.slice(-40)}`,
-          title: item.groupTitle ?? item.title,
-          description: null,
-          // Les mêmes valeurs préservées : un relevé de stock ne connaît pas
-          // le prix, et l'écrire ici mettrait le produit maître à zéro.
-          priceAmount: prix,
-          priceCurrency: devise,
-          stock: 0,
-          images: JSON.stringify(item.imageUrl ? [item.imageUrl] : []),
-          tags: "[]",
-          marketplaceData: "{}",
-          options: "[]",
-          variantCount: 0,
-          createdAt: now,
-          updatedAt: now,
+        intruses.push({
+          remoteId: item.remoteId,
+          titre: item.groupTitle ?? item.title,
+          sku: item.sku ?? null,
         });
       }
 
@@ -647,6 +659,26 @@ async function syncCatalogue(
     }
 
     if (writes.length) await db.batch(writes as never);
+
+    /*
+     * Les intruses sont CONSIGNÉES, jamais absorbées.
+     *
+     * Sans cette trace, une boutique qui se met à publier de son côté ne se
+     * remarque pas : ses annonces n'entrent plus dans le stock — c'est voulu —
+     * mais rien ne dit qu'elles existent. On les découvrirait à la première
+     * vente d'un article que l'outil ne connaît pas.
+     */
+    if (intruses.length > 0) {
+      await db.insert(eventLog).values({
+        id: randomId(),
+        at: now,
+        level: "warn",
+        scope: `intruses:${ctx.account.marketplace}`,
+        shopId: task.shopId,
+        message: `${intruses.length} annonce(s) trouvée(s) chez ${ctx.account.marketplace} sans équivalent dans l'outil. Elles n'entrent pas dans le stock : leur stock n'a jamais été compté ici, et l'ajouter fausserait ce qui est promis aux autres boutiques.`,
+        data: JSON.stringify(intruses.slice(0, 20)),
+      });
+    }
 
     cursor = page.cursor;
     if (!cursor) break;
