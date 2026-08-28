@@ -271,7 +271,15 @@ accounts.post("/shopify", async (c) => {
   const displayName = body.displayName?.trim() || domain.replace(".myshopify.com", "");
   const slug = `shopify_${displayName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
 
+  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
+
+  /*
+   * Mêmes précautions que pour eBay : reconnecter ne doit pas effacer
+   * l'emplacement d'inventaire, ni le marqueur d'abonnement aux webhooks.
+   * Les valeurs neuves l'emportent, le reste survit.
+   */
   const credentials: Record<string, string> = {
+    ...(await repos.credentials.get(accountId)),
     shopDomain: domain,
     ...(clientId ? { clientId, clientSecret } : {}),
     ...(legacyToken ? { accessToken: legacyToken } : {}),
@@ -286,8 +294,6 @@ accounts.post("/shopify", async (c) => {
    * contrepartie, le compte n'est marqué « actif » que si le test réussit —
    * un échec le laisse en erreur, jamais en état trompeur.
    */
-  const repos = d1Repositories(c.env.DB, c.env.MASTER_KEY);
-
   await db
     .insert(shop)
     .values({
@@ -563,7 +569,19 @@ accounts.post("/ebay/token", async (c) => {
     body.displayName?.trim() ||
     `eBay ${marketplaceId.replace("EBAY_", "")}${environment === "sandbox" ? " (bac à sable)" : ""}`;
 
+  /*
+   * RECONNECTER NE DOIT PAS EFFACER CE QUI A ÉTÉ CONFIGURÉ À LA MAIN.
+   *
+   * Ce coffre porte aussi l'adresse d'expédition et les trois politiques
+   * eBay, sans lesquelles aucune annonce ne peut être publiée. Les écrire à
+   * neuf — ce que faisait ce bloc — les effaçait silencieusement à chaque
+   * reconnexion, et la perte ne se voyait qu'à la première publication
+   * refusée, sans lien évident avec le geste de la veille.
+   *
+   * Les valeurs neuves l'emportent, le reste survit.
+   */
   const credentials: Record<string, string> = {
+    ...(await repos.credentials.get(accountId)),
     clientId,
     clientSecret,
     refreshToken,
