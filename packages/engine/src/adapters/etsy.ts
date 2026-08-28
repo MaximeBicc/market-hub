@@ -816,6 +816,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
     remoteId?: string,
     message?: string,
     marketplaceData?: Record<string, unknown>,
+    url?: string,
   ): TargetResult {
     return {
       accountId: ctx.account.id,
@@ -824,6 +825,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
       ...(remoteId ? { remoteId } : {}),
       ...(message ? { message } : {}),
       ...(marketplaceData ? { marketplaceData } : {}),
+      ...(url ? { url } : {}),
     };
   }
 
@@ -941,6 +943,12 @@ export class EtsyAdapter implements MarketplaceAdapter {
           taxonomy_id: String(taxonomy),
           shipping_profile_id: String(shipping),
           readiness_state_id: String(readiness),
+          ...((product.tags?.length ?? 0) > 0
+            ? { tags: product.tags!.join(",") }
+            : {}),
+          ...((product.materials?.length ?? 0) > 0
+            ? { materials: product.materials!.join(",") }
+            : {}),
           // Créée en brouillon : Etsy débite un frais d'insertion à la
           // publication, et une annonce publiée sans relecture se paie.
           state: "draft",
@@ -1449,6 +1457,16 @@ export class EtsyAdapter implements MarketplaceAdapter {
         ctx,
         id,
         "Annonce absente d'Etsy — il n'y avait plus rien à retirer de la vente.",
+      );
+    }
+    if (state === "active") {
+      const url = `https://www.etsy.com/listing/${id}`;
+      return this.ok(
+        ctx,
+        id,
+        "Annonce publiée et visible sur Etsy.",
+        { listingId: id },
+        url,
       );
     }
     return this.ok(ctx, id);

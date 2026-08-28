@@ -278,6 +278,8 @@ describe("création d'annonce", () => {
       description: "Cire de soja",
       price: { amount: 1500, currency: "EUR" },
       stock: 4,
+      tags: ["bougie", "cadeau"],
+      materials: ["cire de soja", "coton"],
       // Désormais exigées : déclarer « fait main par moi » d'office sur de la
       // revente expose à la suspension de la boutique.
       whoMade: "i_did",
@@ -296,6 +298,8 @@ describe("création d'annonce", () => {
     expect(b["shipping_profile_id"]).toBe("sp1");
     expect(b["readiness_state_id"]).toBe("rs1");
     expect(b["taxonomy_id"]).toBe("1234");
+    expect(b["tags"]).toBe("bougie,cadeau");
+    expect(b["materials"]).toBe("cire de soja,coton");
     expect(r.remoteId).toBe("4242");
   });
 });
@@ -395,8 +399,9 @@ describe("état d'une annonce", () => {
 
   it("réactive", async () => {
     const { http, sent } = fakeHttp([{ status: 200 }]);
-    await adapter.activateListing(ctxWith(http), annonce);
+    const r = await adapter.activateListing(ctxWith(http), annonce);
     expect(form(sent[0]?.raw ?? null)["state"]).toBe("active");
+    expect(r.url).toBe("https://www.etsy.com/listing/999");
   });
 
   /*

@@ -2151,6 +2151,12 @@ api.patch("/products/:id/diffusion", async (c) => {
   const id = c.req.param("id");
   const body = await c.req
     .json<{
+      title?: string;
+      description?: string | null;
+      priceAmount?: number;
+      tags?: string[];
+      material?: string | null;
+      color?: string | null;
       condition?: string | null;
       whoMade?: string | null;
       whenMade?: string | null;
@@ -2198,10 +2204,39 @@ api.patch("/products/:id/diffusion", async (c) => {
   const condition = choisir(body.condition, ETATS);
   const whoMade = choisir(body.whoMade, QUI);
   const whenMade = choisir(body.whenMade, QUAND);
+  const title = body.title === undefined ? undefined : body.title.trim().slice(0, 200);
+  if (title !== undefined && !title) {
+    return c.json({ error: "Le titre ne peut pas être vide" }, 400);
+  }
+  if (
+    body.priceAmount !== undefined &&
+    (!Number.isInteger(body.priceAmount) || body.priceAmount < 0)
+  ) {
+    return c.json({ error: "Le prix doit être un nombre entier positif en centimes" }, 400);
+  }
+  const description =
+    body.description === undefined
+      ? undefined
+      : body.description?.trim().slice(0, 5000) || null;
+  const tags = body.tags
+    ? [...new Set(body.tags.map((t) => t.trim()).filter(Boolean))]
+        .slice(0, 13)
+        .map((t) => t.slice(0, 20))
+    : undefined;
+  const material =
+    body.material === undefined ? undefined : body.material?.trim().slice(0, 200) || null;
+  const color =
+    body.color === undefined ? undefined : body.color?.trim().slice(0, 120) || null;
 
   await db
     .update(product)
     .set({
+      ...(title !== undefined ? { title } : {}),
+      ...(description !== undefined ? { description } : {}),
+      ...(body.priceAmount !== undefined ? { priceAmount: body.priceAmount } : {}),
+      ...(tags !== undefined ? { tags: JSON.stringify(tags) } : {}),
+      ...(material !== undefined ? { material } : {}),
+      ...(color !== undefined ? { color } : {}),
       ...(condition !== undefined ? { condition } : {}),
       ...(whoMade !== undefined ? { whoMade } : {}),
       ...(whenMade !== undefined ? { whenMade } : {}),
@@ -2210,6 +2245,20 @@ api.patch("/products/:id/diffusion", async (c) => {
       updatedAt: Math.floor(Date.now() / 1000),
     })
     .where(eq(product.id, id));
+
+  // Le produit simple porte aussi son prix sur sa variante vide. eBay et
+  // Shopify lisent cette unité vendable : ne mettre à jour que le parent
+  // publierait l'ancien prix tout en affichant le nouveau dans le formulaire.
+  if (body.priceAmount !== undefined) {
+    await db
+      .update(variant)
+      .set({
+        priceAmount: body.priceAmount,
+        priceCurrency: existant.priceCurrency,
+        updatedAt: Math.floor(Date.now() / 1000),
+      })
+      .where(and(eq(variant.productId, id), eq(variant.optionKey, "")));
+  }
 
   const rejetees = (body.images?.length ?? 0) - (images?.length ?? 0);
   return c.json({

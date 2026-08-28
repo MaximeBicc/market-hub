@@ -112,6 +112,8 @@ engine.post("/listing", async (c) => {
   const body = await c.req.json<{
     productId: string;
     accountIds: string[];
+    /** Publie immédiatement après la création au lieu de laisser un brouillon. */
+    publish?: boolean;
     idempotencyKey?: string;
   }>();
   const key = body.idempotencyKey ?? crypto.randomUUID();
@@ -127,11 +129,68 @@ engine.post("/listing", async (c) => {
     return c.json({ error: "Aucune boutique cible" }, 400);
   }
 
-  const outcome = await mod.orchestrator.createListing({
+  const creation = await mod.orchestrator.createListing({
     productId: body.productId,
     accountIds: comptes,
     idempotencyKey: key,
   });
+
+  if (!body.publish) {
+    return c.json({ ...creation, idempotencyKey: key });
+  }
+
+  // Une création est volontairement transactionnelle en deux temps chez les
+  // trois plateformes : objet complet, puis mise en ligne. On ne publie que
+  // les objets effectivement créés (ou un brouillon local déjà connu).
+  const aActiver = creation.results
+    .filter(
+      (r) =>
+        r.status === "success" &&
+        r.marketplaceData?.["alreadyActive"] !== true,
+    )
+    .map((r) => r.accountId);
+
+  if (aActiver.length === 0) {
+    return c.json({ ...creation, idempotencyKey: key });
+  }
+
+  const activation = await mod.orchestrator.setActive({
+    productId: body.productId,
+    accountIds: aActiver,
+    active: true,
+    idempotencyKey: `${key}:publish`,
+  });
+  const parCompte = new Map(activation.results.map((r) => [r.accountId, r]));
+  const results = creation.results.map((cree) => {
+    const active = parCompte.get(cree.accountId);
+    if (!active) return cree;
+    if (active.status === "success") {
+      return {
+        ...cree,
+        ...active,
+        remoteId: active.remoteId ?? cree.remoteId,
+        marketplaceData: {
+          ...(cree.marketplaceData ?? {}),
+          ...(active.marketplaceData ?? {}),
+        },
+        message: active.message ?? "Annonce publiée et visible.",
+      };
+    }
+    return {
+      ...active,
+      // « unsupported » est normal pour une commande optionnelle. Ici, après
+      // création d'un brouillon, cela signifie bien que l'objectif demandé —
+      // une annonce en ligne — n'a pas été atteint.
+      status: active.status === "unsupported" ? "failed" as const : active.status,
+      remoteId: active.remoteId ?? cree.remoteId,
+      message: `Le brouillon a été créé, mais sa mise en ligne a échoué : ${active.message ?? "raison inconnue"}`,
+    };
+  });
+  const outcome = {
+    results,
+    anySuccess: results.some((r) => r.status === "success"),
+    anyManual: results.some((r) => r.status === "manual_required"),
+  };
 
   return c.json({ ...outcome, idempotencyKey: key });
 });

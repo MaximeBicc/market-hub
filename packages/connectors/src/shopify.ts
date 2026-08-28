@@ -121,7 +121,7 @@ export const shopifyConnector: MarketplaceConnector = {
     const shopDomain = new URL(redirectUri).searchParams.get("shop") ?? "";
     const p = new URLSearchParams({
       client_id: creds.clientId,
-      scope: "read_orders,read_products,write_products,read_inventory,write_inventory",
+      scope: "read_orders,read_products,write_products,read_inventory,write_inventory,read_publications,write_publications",
       redirect_uri: redirectUri,
       state,
       "grant_options[]": "", // vide = jeton offline, qui n'expire pas

@@ -353,6 +353,8 @@ export type TargetResult = {
   marketplace: MarketplaceId;
   status: TargetStatus;
   remoteId?: string | undefined;
+  /** Adresse publique de l'annonce, uniquement une fois réellement en ligne. */
+  url?: string | undefined;
   message?: string | undefined;
   /**
    * Identifiants secondaires rendus par la plateforme à la création.

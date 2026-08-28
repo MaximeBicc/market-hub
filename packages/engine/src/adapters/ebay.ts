@@ -1100,6 +1100,8 @@ export class EbayAdapter implements MarketplaceAdapter {
     ctx: MarketplaceContext,
     remoteId?: string,
     message?: string,
+    marketplaceData?: Record<string, unknown>,
+    url?: string,
   ): TargetResult {
     return {
       accountId: ctx.account.id,
@@ -1107,6 +1109,8 @@ export class EbayAdapter implements MarketplaceAdapter {
       status: "success",
       ...(remoteId ? { remoteId } : {}),
       ...(message ? { message } : {}),
+      ...(marketplaceData ? { marketplaceData } : {}),
+      ...(url ? { url } : {}),
     };
   }
 
@@ -2213,10 +2217,16 @@ export class EbayAdapter implements MarketplaceAdapter {
           }),
         },
       );
+      const listingId = r?.listingId ?? listing.remoteId;
+      const url = listingId
+        ? `https://www.${ctx.credentials?.["environment"] === "sandbox" ? "sandbox." : ""}ebay.fr/itm/${listingId}`
+        : undefined;
       return this.ok(
         ctx,
-        r?.listingId ?? listing.remoteId,
+        listingId,
         "Annonce à déclinaisons publiée d'un seul tenant.",
+        listingId ? { listingId } : undefined,
+        url,
       );
     }
 
@@ -2225,7 +2235,17 @@ export class EbayAdapter implements MarketplaceAdapter {
       `/sell/inventory/v1/offer/${forme.offerId}/publish`,
       { method: "POST" },
     );
-    return this.ok(ctx, r?.listingId ?? listing.remoteId);
+    const listingId = r?.listingId ?? listing.remoteId;
+    const url = listingId
+      ? `https://www.${ctx.credentials?.["environment"] === "sandbox" ? "sandbox." : ""}ebay.fr/itm/${listingId}`
+      : undefined;
+    return this.ok(
+      ctx,
+      listingId,
+      "Annonce publiée et visible sur eBay.",
+      listingId ? { listingId } : undefined,
+      url,
+    );
   }
 
   /**

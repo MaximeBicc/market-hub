@@ -265,11 +265,17 @@ export class MarketplaceOrchestrator {
     const outcome = await this.fanOut(input.accountIds, "listingCreate", async (ctx, adapter) => {
       const existante = deja.get(ctx.account.id);
       if (existante) {
+        const url = existante.marketplaceData?.["url"] as string | undefined;
         return {
           accountId: ctx.account.id,
           marketplace: ctx.account.marketplace,
           status: "success" as const,
           ...(existante.remoteId ? { remoteId: existante.remoteId } : {}),
+          ...(url ? { url } : {}),
+          marketplaceData: {
+            ...(existante.marketplaceData ?? {}),
+            alreadyActive: existante.status === "active",
+          },
           message:
             "Déjà publié sur ce compte — rien à recréer. Utilisez « prix » ou « stock » pour le mettre à jour.",
         };
@@ -608,6 +614,11 @@ export class MarketplaceOrchestrator {
           await this.listings.put({
             ...l,
             status: input.active ? "active" : "inactive",
+            marketplaceData: {
+              ...(l.marketplaceData ?? {}),
+              ...(dernier.marketplaceData ?? {}),
+              ...(dernier.url ? { url: dernier.url } : {}),
+            },
           });
         }
       }
@@ -625,6 +636,7 @@ export class MarketplaceOrchestrator {
       // le refaire ici n'en couvrirait qu'une, et masquerait les autres.
       return (
         rate ?? {
+          ...(resultats[0] ?? {}),
           accountId: ctx.account.id,
           marketplace: ctx.account.marketplace,
           status: "success",

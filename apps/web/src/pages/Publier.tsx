@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, money } from "../lib/api.js";
 import { Icon } from "../components/Icon.js";
 import { toast } from "../components/Toast.js";
+import { PalmLoader } from "../components/PalmLoader.js";
 
 /**
  * PUBLIER — créer une fois, diffuser vers plusieurs boutiques.
@@ -22,19 +23,22 @@ import { toast } from "../components/Toast.js";
  *  3. Rejouer est sans danger : l'orchestrateur constate qu'une annonce
  *     existe déjà et ne recrée rien.
  *
- * Ce qui est créé est un BROUILLON partout. La mise en vente reste un geste
- * humain, dans l'interface de la plateforme — publier engage un contrat de
- * vente, et Etsy facture chaque publication.
+ * La validation reste détaillée par boutique, mais le clic final va désormais
+ * jusqu'à la mise en ligne et rend l'adresse publique de chaque annonce.
  */
 
 interface ProduitRow {
   id: string;
   sku: string;
   title: string;
+  description: string | null;
   priceAmount: number;
   priceCurrency: string;
   stock: number;
   images: string[] | string | null;
+  tags: string[] | string | null;
+  material: string | null;
+  color: string | null;
   condition: string | null;
   whoMade: string | null;
   whenMade: string | null;
@@ -62,6 +66,7 @@ interface Resultat {
   marketplace: string;
   status: "success" | "pending_remote" | "manual_required" | "unsupported" | "failed";
   remoteId?: string;
+  url?: string;
   message?: string;
 }
 
@@ -111,7 +116,7 @@ const QUAND: Array<[string, string]> = [
 ];
 
 const VERDICTS: Record<Resultat["status"], { libelle: string; cls: string }> = {
-  success: { libelle: "créé", cls: "pill--ok" },
+  success: { libelle: "en ligne", cls: "pill--ok" },
   pending_remote: { libelle: "créé, à vérifier", cls: "pill--warn" },
   manual_required: { libelle: "action requise", cls: "pill--warn" },
   unsupported: { libelle: "non applicable", cls: "pill--mute" },
@@ -131,10 +136,35 @@ function imagesDe(p: ProduitRow): string[] {
   return [];
 }
 
+function tagsDe(p: ProduitRow): string[] {
+  if (Array.isArray(p.tags)) return p.tags;
+  if (typeof p.tags === "string") {
+    try {
+      const j = JSON.parse(p.tags);
+      return Array.isArray(j) ? j : [];
+    } catch {
+      return p.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function PlateformeBadge({ plateforme }: { plateforme: string }) {
+  const nom = plateforme.toLowerCase();
+  return (
+    <span className={`platform-badge platform-badge--${nom}`}>
+      <span aria-hidden="true">
+        {nom === "ebay" ? "e" : nom === "etsy" ? "E" : "S"}
+      </span>
+      {nom === "ebay" ? "eBay" : nom === "etsy" ? "Etsy" : "Shopify"}
+    </span>
+  );
+}
+
 export function Publier() {
   const [choisi, setChoisi] = useState<string | null>(null);
 
-  const { data: produits } = useQuery({
+  const { data: produits, isLoading } = useQuery({
     queryKey: ["produits-publier"],
     queryFn: () => api.get<{ products: ProduitRow[] }>("/products"),
   });
@@ -142,19 +172,28 @@ export function Publier() {
   const liste = produits?.products ?? [];
   const produit = liste.find((p) => p.id === choisi) ?? null;
 
+  if (isLoading) return <PalmLoader label="Préparation de vos produits…" />;
+
   return (
     <>
-      <div className="page-head">
-        <h1>Publier</h1>
+      <div className="publish-hero">
+        <div>
+          <span className="publish-hero__eyebrow">Mise en ligne multicanale</span>
+          <h1>Une fiche. Trois vitrines. En ligne.</h1>
+          <p>
+            Les données déjà connues sont préremplies. Vérifiez, choisissez vos
+            boutiques et récupérez les liens publics immédiatement après l'envoi.
+          </p>
+        </div>
+        <div className="publish-hero__platforms" aria-label="Plateformes compatibles">
+          {(["ebay", "etsy", "shopify"] as const).map((p) => (
+            <PlateformeBadge key={p} plateforme={p} />
+          ))}
+        </div>
       </div>
 
-      <p className="muted" style={{ margin: "0 0 12px" }}>
-        Une fiche, plusieurs boutiques. Tout part en <b>brouillon</b> — la mise
-        en vente reste votre geste.
-      </p>
-
       {liste.length === 0 && (
-        <div className="card">
+        <div className="card publish-empty">
           <p className="muted" style={{ margin: 0 }}>
             Aucun produit. Créez-en un depuis l'onglet Stock, puis revenez ici
             pour le diffuser.
@@ -163,22 +202,29 @@ export function Publier() {
       )}
 
       {liste.length > 0 && !produit && (
-        <div className="rows">
+        <div className="publish-picker">
           {liste.map((p) => (
             <button
-              className="row"
+              className="publish-product"
               key={p.id}
               onClick={() => setChoisi(p.id)}
-              style={{ textAlign: "left", width: "100%", cursor: "pointer" }}
             >
-              <span className="mono-badge">{p.sku.slice(0, 2).toUpperCase()}</span>
-              <div className="row__main">
-                <div className="row__t">{p.title}</div>
-                <div className="row__s">
-                  {p.sku} · {money(p.priceAmount, p.priceCurrency)} · stock {p.stock}
+              <div className="publish-product__image">
+                {imagesDe(p)[0] ? (
+                  <img src={imagesDe(p)[0]} alt="" />
+                ) : (
+                  <span>{p.sku.slice(0, 2).toUpperCase()}</span>
+                )}
+              </div>
+              <div className="publish-product__body">
+                <div className="publish-product__title">{p.title}</div>
+                <div className="publish-product__meta">
+                  <span>{p.sku}</span>
+                  <span>{money(p.priceAmount, p.priceCurrency)}</span>
+                  <span>{p.stock} en stock</span>
                 </div>
               </div>
-              <div className="row__end">
+              <div className="publish-product__arrow">
                 <Icon name="chevronRight" />
               </div>
             </button>
@@ -206,6 +252,12 @@ function FicheDiffusion({
   const qc = useQueryClient();
   const donnees = JSON.parse(produit.marketplaceData ?? "{}") as Record<string, string>;
 
+  const [title, setTitle] = useState(produit.title);
+  const [description, setDescription] = useState(produit.description ?? "");
+  const [prix, setPrix] = useState((produit.priceAmount / 100).toFixed(2));
+  const [tags, setTags] = useState(tagsDe(produit).join(", "));
+  const [material, setMaterial] = useState(produit.material ?? "");
+  const [color, setColor] = useState(produit.color ?? "");
   const [condition, setCondition] = useState(produit.condition ?? "");
   const [whoMade, setWhoMade] = useState(produit.whoMade ?? "");
   const [whenMade, setWhenMade] = useState(produit.whenMade ?? "");
@@ -214,6 +266,7 @@ function FicheDiffusion({
   const [photos, setPhotos] = useState<string[]>(imagesDe(produit));
   const [nouvellePhoto, setNouvellePhoto] = useState("");
   const [cibles, setCibles] = useState<Set<string>>(new Set());
+  const [ciblesInitialisees, setCiblesInitialisees] = useState(false);
   const [resultats, setResultats] = useState<Resultat[] | null>(null);
 
   const { data: catalogue } = useQuery({
@@ -221,16 +274,47 @@ function FicheDiffusion({
     queryFn: () => api.get<{ boutiques: BoutiqueVue[] }>("/engine/catalogue"),
   });
 
+  const boutiques = catalogue?.boutiques ?? [];
+  const creation = (b: BoutiqueVue) => b.commandes.find((c) => c.id === "createListing");
+
+  useEffect(() => {
+    if (ciblesInitialisees || boutiques.length === 0) return;
+    setCibles(
+      new Set(
+        boutiques
+          .filter(
+            (b) =>
+              ["ebay", "etsy", "shopify"].includes(b.plateforme) &&
+              creation(b)?.etat === "possible",
+          )
+          .map((b) => b.id),
+      ),
+    );
+    setCiblesInitialisees(true);
+  }, [boutiques, ciblesInitialisees]);
+
+  const prixCentimes = Math.round(Number(prix.replace(",", ".")) * 100);
+  const payload = () => ({
+    title,
+    description: description || null,
+    priceAmount: Number.isFinite(prixCentimes) ? prixCentimes : -1,
+    tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
+    material: material || null,
+    color: color || null,
+    condition: condition || null,
+    whoMade: whoMade || null,
+    whenMade: whenMade || null,
+    images: photos,
+    ebayCategoryId: ebayCategoryId || null,
+    etsyTaxonomyId: etsyTaxonomyId || null,
+  });
+
   const enregistrer = useMutation({
     mutationFn: () =>
-      api.patch<{ avertissement?: string }>(`/products/${produit.id}/diffusion`, {
-        condition: condition || null,
-        whoMade: whoMade || null,
-        whenMade: whenMade || null,
-        images: photos,
-        ebayCategoryId: ebayCategoryId || null,
-        etsyTaxonomyId: etsyTaxonomyId || null,
-      }),
+      api.patch<{ avertissement?: string }>(
+        `/products/${produit.id}/diffusion`,
+        payload(),
+      ),
     onSuccess: async (r) => {
       toast(r.avertissement ?? "Fiche enregistrée");
       await qc.invalidateQueries({ queryKey: ["produits-publier"] });
@@ -239,272 +323,205 @@ function FicheDiffusion({
   });
 
   const publier = useMutation({
-    mutationFn: () =>
-      api.post<{ results: Resultat[] }>("/engine/listing", {
+    mutationFn: async () => {
+      // Enregistrer d'abord garantit que le texte visible dans ce panneau est
+      // exactement celui envoyé, même si l'utilisateur n'a pas cliqué sur
+      // « Enregistrer » entre sa dernière retouche et la publication.
+      await api.patch(`/products/${produit.id}/diffusion`, payload());
+      return api.post<{ results: Resultat[] }>("/engine/listing", {
         productId: produit.id,
         accountIds: [...cibles],
-      }),
+        publish: true,
+      });
+    },
+    onMutate: () => setResultats(null),
     onSuccess: async (r) => {
       setResultats(r.results);
+      const enLigne = r.results.filter((x) => x.status === "success").length;
+      toast(
+        enLigne > 0
+          ? `${enLigne} annonce${enLigne > 1 ? "s" : ""} mise${enLigne > 1 ? "s" : ""} en ligne`
+          : "Aucune annonce n'a pu être mise en ligne",
+      );
       await qc.invalidateQueries({ queryKey: ["produits-publier"] });
     },
     onError: (e) => toast(e instanceof Error ? e.message : "Diffusion impossible"),
   });
 
-  const boutiques = catalogue?.boutiques ?? [];
-  const creation = (b: BoutiqueVue) => b.commandes.find((c) => c.id === "createListing");
+  const plateformesCibles = new Set(
+    boutiques.filter((b) => cibles.has(b.id)).map((b) => b.plateforme),
+  );
+  const controles = [
+    { ok: title.trim().length > 0, texte: "Titre renseigné" },
+    { ok: description.trim().length > 0, texte: "Description renseignée" },
+    { ok: prixCentimes > 0, texte: "Prix supérieur à 0 €" },
+    { ok: produit.stock > 0, texte: "Stock disponible" },
+    { ok: photos.length > 0, texte: "Au moins une photo" },
+    ...(plateformesCibles.has("ebay")
+      ? [{ ok: Boolean(condition), texte: "État déclaré pour eBay" }]
+      : []),
+    ...(plateformesCibles.has("etsy")
+      ? [
+          { ok: Boolean(whoMade), texte: "Fabricant déclaré pour Etsy" },
+          { ok: Boolean(whenMade), texte: "Période déclarée pour Etsy" },
+        ]
+      : []),
+  ];
+  const pret = cibles.size > 0 && controles.every((c) => c.ok);
 
   return (
     <>
-      <button className="btn btn--small btn--ghost" onClick={onRetour}>
+      <button className="btn btn--small btn--ghost publish-back" onClick={onRetour}>
         <Icon name="chevronLeft" /> Tous les produits
       </button>
 
-      <h2 className="sec" style={{ marginTop: 12 }}>
-        {produit.title} <span>{produit.sku}</span>
-      </h2>
-
-      {/* ---- Déclarations ------------------------------------------- */}
-      <div className="card">
-        <details style={{ marginBottom: 10 }}>
-          <summary className="muted" style={{ cursor: "pointer" }}>
-            Pourquoi ces trois questions sont obligatoires
-          </summary>
-          <p className="row__s" style={{ whiteSpace: "normal", lineHeight: 1.45 }}>
-            Elles étaient répondues d'office par le code : « neuf », « fait main
-            par moi », « à la commande ». Sur de la revente, c'est une fausse
-            déclaration — et Etsy suspend des boutiques pour ce motif. Vides,
-            la diffusion est refusée plutôt qu'inventée.
-          </p>
-        </details>
-
-        <div className="grille-decl">
-        <div className="field">
-          <label htmlFor="cond">État — eBay</label>
-          <select
-            id="cond"
-            className="input"
-            value={condition}
-            onChange={(e) => setCondition(e.target.value)}
-          >
-            <option value="">— à renseigner —</option>
-            {ETATS.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
-              </option>
-            ))}
-          </select>
+      <div className="publish-editor-head">
+        <div>
+          <span className="publish-editor-head__sku">{produit.sku}</span>
+          <h2>Préparer l'annonce</h2>
         </div>
-
-        <div className="field">
-          <label htmlFor="qui">Fabriqué par — Etsy</label>
-          <select
-            id="qui"
-            className="input"
-            value={whoMade}
-            onChange={(e) => setWhoMade(e.target.value)}
-          >
-            <option value="">— à renseigner —</option>
-            {QUI.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="field">
-          <label htmlFor="quand">Quand — Etsy</label>
-          <select
-            id="quand"
-            className="input"
-            value={whenMade}
-            onChange={(e) => setWhenMade(e.target.value)}
-          >
-            <option value="">— à renseigner —</option>
-            {QUAND.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
-              </option>
-            ))}
-          </select>
-        </div>
-        </div>
-
-        {/* Les deux référentiels n'ont aucune correspondance : chercher se
-            fait deux fois, chez chacun. */}
-        {boutiques
-          .filter((b) => b.plateforme === "ebay" || b.plateforme === "etsy")
-          .map((b) => (
-            <ChercheCategorie
-              key={b.id}
-              accountId={b.id}
-              plateforme={b.plateforme}
-              titre={
-                b.plateforme === "ebay" ? "Catégorie eBay" : "Catégorie Etsy"
-              }
-              defaut={produit.title}
-              valeur={b.plateforme === "ebay" ? ebayCategoryId : etsyTaxonomyId}
-              onChoix={(v) =>
-                b.plateforme === "ebay"
-                  ? setEbayCategoryId(v)
-                  : setEtsyTaxonomyId(v)
-              }
-            />
-          ))}
+        <span className="publish-live-pill"><i /> Publication directe</span>
       </div>
 
-      <Variantes produitId={produit.id} />
-
-      {/* ---- Photos -------------------------------------------------- */}
-      <h2 className="sec">Photos <span>{photos.length}</span></h2>
-      <div className="card">
-        <p className="muted" style={{ margin: "0 0 8px" }}>
-          Adresses en <b>HTTPS</b> uniquement. Les plateformes téléchargent
-          l'image et en gardent leur copie.
-        </p>
-
-        {photos.length > 0 && (
-          <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-            {photos.map((url, i) => (
-              <div key={url + i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <img
-                  src={url}
-                  alt=""
-                  style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 6 }}
-                />
-                <span className="row__s" style={{ flex: 1, overflow: "hidden" }}>
-                  {i === 0 ? "principale · " : ""}
-                  {url}
-                </span>
-                <button
-                  className="btn btn--small btn--ghost"
-                  onClick={() => setPhotos(photos.filter((_, j) => j !== i))}
-                >
-                  Retirer
-                </button>
+      <div className="publish-layout">
+        <main className="publish-layout__main">
+          <section className="card publish-section">
+            <div className="publish-section__title">
+              <div><span>01</span><h3>Contenu de l'annonce</h3></div>
+              <div className="publish-section__badges">
+                <PlateformeBadge plateforme="ebay" />
+                <PlateformeBadge plateforme="etsy" />
+                <PlateformeBadge plateforme="shopify" />
               </div>
-            ))}
-          </div>
-        )}
-
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            className="input"
-            value={nouvellePhoto}
-            onChange={(e) => setNouvellePhoto(e.target.value)}
-            placeholder="https://…"
-          />
-          <button
-            className="btn btn--small"
-            onClick={() => {
-              const u = nouvellePhoto.trim();
-              if (u) setPhotos([...photos, u]);
-              setNouvellePhoto("");
-            }}
-          >
-            Ajouter
-          </button>
-        </div>
-      </div>
-
-      <button
-        className="btn btn--wide"
-        style={{ marginTop: 9 }}
-        disabled={enregistrer.isPending}
-        onClick={() => enregistrer.mutate()}
-      >
-        Enregistrer la fiche
-      </button>
-
-      {/* ---- Cibles -------------------------------------------------- */}
-      <h2 className="sec">Vers quelles boutiques</h2>
-      <div style={{ display: "grid", gap: 9 }}>
-        {boutiques.map((b) => {
-          const c = creation(b);
-          const ouvert = c?.etat === "possible";
-          return (
-            <div className="card" key={b.id}>
-              <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: ouvert ? "pointer" : "default" }}>
-                <input
-                  type="checkbox"
-                  disabled={!ouvert}
-                  checked={cibles.has(b.id)}
-                  onChange={(e) => {
-                    const n = new Set(cibles);
-                    if (e.target.checked) n.add(b.id);
-                    else n.delete(b.id);
-                    setCibles(n);
-                  }}
-                  style={{ marginTop: 3 }}
-                />
-                <div style={{ flex: 1 }}>
-                  <div className="row__t">
-                    {b.nom}{" "}
-                    <span className="muted" style={{ fontWeight: 400 }}>
-                      {b.plateforme}
-                    </span>
-                  </div>
-                  {c && c.etat !== "possible" && (
-                    <div
-                      className="row__s"
-                      style={{ whiteSpace: "normal", lineHeight: 1.45, marginTop: 3 }}
-                    >
-                      {c.etat === "bloquee"
-                        ? `Manque : ${c.manque?.join(", ")}. ${c.raison}`
-                        : c.raison}
-                    </div>
-                  )}
-                </div>
-              </label>
             </div>
-          );
-        })}
-      </div>
+            <div className="field">
+              <label htmlFor="publish-title">Titre <b>*</b></label>
+              <input id="publish-title" className="input" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
+              <span className="publish-field-help">Le titre eBay/Etsy sera automatiquement ajusté à leur limite.</span>
+            </div>
+            <div className="field">
+              <label htmlFor="publish-description">Description <b>*</b></label>
+              <textarea id="publish-description" className="input publish-textarea" value={description} maxLength={5000} onChange={(e) => setDescription(e.target.value)} placeholder="Décrivez l'article, ses dimensions, son état et ce qui est inclus…" />
+              <span className="publish-counter">{description.length} / 5 000</span>
+            </div>
+            <div className="publish-fields-grid">
+              <div className="field">
+                <label htmlFor="publish-price">Prix <b>*</b></label>
+                <div className="publish-price"><input id="publish-price" className="input" inputMode="decimal" value={prix} onChange={(e) => setPrix(e.target.value)} /><span>EUR</span></div>
+              </div>
+              <div className="field"><label htmlFor="publish-color">Couleur</label><input id="publish-color" className="input" value={color} onChange={(e) => setColor(e.target.value)} placeholder="Ex. bleu nuit" /></div>
+              <div className="field"><label htmlFor="publish-material">Matière</label><input id="publish-material" className="input" value={material} onChange={(e) => setMaterial(e.target.value)} placeholder="Ex. coton, acier" /></div>
+            </div>
+            <div className="field">
+              <label htmlFor="publish-tags">Mots-clés</label>
+              <input id="publish-tags" className="input" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="vintage, décoration, cadeau" />
+              <span className="publish-field-help">Séparez les mots-clés par une virgule · 13 maximum pour Etsy.</span>
+            </div>
+          </section>
 
-      <button
-        className="btn btn--primary btn--wide"
-        style={{ marginTop: 12 }}
-        disabled={cibles.size === 0 || publier.isPending}
-        onClick={() => publier.mutate()}
-      >
-        <Icon name="upload" />
-        {publier.isPending
-          ? "Diffusion…"
-          : `Créer le brouillon sur ${cibles.size} boutique${cibles.size > 1 ? "s" : ""}`}
-      </button>
-
-      {/* ---- Résultats ----------------------------------------------- */}
-      {resultats && (
-        <>
-          <h2 className="sec">Résultat, compte par compte</h2>
-          <div className="rows">
-            {resultats.map((r) => {
-              const v = VERDICTS[r.status];
-              const nom =
-                boutiques.find((b) => b.id === r.accountId)?.nom ?? r.marketplace;
-              return (
-                <div className="row" key={r.accountId}>
-                  <span className={`pill ${v.cls}`}>{v.libelle}</span>
-                  <div className="row__main">
-                    <div className="row__t">{nom}</div>
-                    <div
-                      className="row__s"
-                      style={{ whiteSpace: "normal", lineHeight: 1.45 }}
-                    >
-                      {r.message ?? "—"}
+          <section className="card publish-section">
+            <div className="publish-section__title">
+              <div><span>02</span><h3>Photos</h3></div>
+              <strong>{photos.length} / 20</strong>
+            </div>
+            {photos.length > 0 ? (
+              <div className="publish-photos">
+                {photos.map((url, i) => (
+                  <div className="publish-photo" key={url + i}>
+                    <img src={url} alt={`Photo ${i + 1}`} />
+                    {i === 0 && <span>Principale</span>}
+                    <div className="publish-photo__actions">
+                      {i > 0 && <button onClick={() => setPhotos([url, ...photos.filter((_, j) => j !== i)])}>★</button>}
+                      <button onClick={() => setPhotos(photos.filter((_, j) => j !== i))} aria-label="Retirer la photo">×</button>
                     </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-          <p className="muted" style={{ marginTop: 8 }}>
-            Rien n'est en vente. Relancer est sans risque : une annonce déjà
-            créée n'est pas recréée.
-          </p>
-        </>
-      )}
+                ))}
+              </div>
+            ) : (
+              <div className="publish-photo-empty"><Icon name="upload" /><b>Ajoutez au moins une photo</b><span>Une belle photo principale améliore la visibilité sur les trois plateformes.</span></div>
+            )}
+            <div className="publish-add-photo">
+              <input className="input" value={nouvellePhoto} onChange={(e) => setNouvellePhoto(e.target.value)} placeholder="https://… (plusieurs URL séparées par une virgule)" />
+              <button className="btn btn--small" onClick={() => {
+                const urls = nouvellePhoto.split(/[\n,]+/).map((u) => u.trim()).filter((u) => /^https:\/\//i.test(u));
+                setPhotos([...photos, ...urls].slice(0, 20));
+                setNouvellePhoto("");
+              }}>Ajouter</button>
+            </div>
+            <span className="publish-field-help">URL HTTPS uniquement. Les plateformes conservent leur propre copie.</span>
+          </section>
+
+          <section className="card publish-section">
+            <div className="publish-section__title"><div><span>03</span><h3>Informations par plateforme</h3></div></div>
+            <div className="publish-platform-fields">
+              <div className="publish-platform-panel publish-platform-panel--ebay">
+                <PlateformeBadge plateforme="ebay" />
+                <div className="field"><label htmlFor="cond">État <b>*</b></label><select id="cond" className="input" value={condition} onChange={(e) => setCondition(e.target.value)}><option value="">À renseigner</option>{ETATS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
+                {boutiques.filter((b) => b.plateforme === "ebay").map((b) => <ChercheCategorie key={b.id} accountId={b.id} plateforme="ebay" titre="Catégorie" defaut={title} valeur={ebayCategoryId} onChoix={setEbayCategoryId} />)}
+              </div>
+              <div className="publish-platform-panel publish-platform-panel--etsy">
+                <PlateformeBadge plateforme="etsy" />
+                <div className="field"><label htmlFor="qui">Fabriqué par <b>*</b></label><select id="qui" className="input" value={whoMade} onChange={(e) => setWhoMade(e.target.value)}><option value="">À renseigner</option>{QUI.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
+                <div className="field"><label htmlFor="quand">Période <b>*</b></label><select id="quand" className="input" value={whenMade} onChange={(e) => setWhenMade(e.target.value)}><option value="">À renseigner</option>{QUAND.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></div>
+                {boutiques.filter((b) => b.plateforme === "etsy").map((b) => <ChercheCategorie key={b.id} accountId={b.id} plateforme="etsy" titre="Catégorie" defaut={title} valeur={etsyTaxonomyId} onChoix={setEtsyTaxonomyId} />)}
+              </div>
+              <div className="publish-platform-panel publish-platform-panel--shopify">
+                <PlateformeBadge plateforme="shopify" />
+                <p>Shopify utilise directement le titre, la description, le prix, les photos et le stock de la fiche commune.</p>
+              </div>
+            </div>
+            <details className="publish-legal-note"><summary>Pourquoi certaines déclarations sont obligatoires ?</summary><p>eBay impose l'état de l'article. Etsy exige de déclarer qui l'a fabriqué et quand. MarketHub ne les invente jamais afin d'éviter une fausse déclaration.</p></details>
+          </section>
+
+          <Variantes produitId={produit.id} />
+        </main>
+
+        <aside className="publish-layout__aside">
+          <section className="card publish-side-card">
+            <h3>Boutiques de destination</h3>
+            {catalogue === undefined ? (
+              <PalmLoader compact label="Lecture des boutiques…" />
+            ) : boutiques.length === 0 ? (
+              <p className="muted">Aucune boutique compatible connectée.</p>
+            ) : (
+              <div className="publish-targets">
+                {boutiques.map((b) => {
+                  const c = creation(b);
+                  const ouvert = c?.etat === "possible";
+                  return <label className={`publish-target ${cibles.has(b.id) ? "publish-target--selected" : ""} ${!ouvert ? "publish-target--disabled" : ""}`} key={b.id}>
+                    <input type="checkbox" disabled={!ouvert} checked={cibles.has(b.id)} onChange={(e) => { const n = new Set(cibles); e.target.checked ? n.add(b.id) : n.delete(b.id); setCibles(n); }} />
+                    <div><div className="publish-target__head"><PlateformeBadge plateforme={b.plateforme} /><span>{cibles.has(b.id) ? "Prête" : ouvert ? "Disponible" : "Bloquée"}</span></div><b>{b.nom}</b>{c && !ouvert && <small>{c.etat === "bloquee" ? `Manque : ${c.manque?.join(", ")}. ${c.raison ?? ""}` : c.raison}</small>}</div>
+                  </label>;
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="card publish-side-card publish-readiness">
+            <h3>Prêt à publier ?</h3>
+            <div>{controles.map((c) => <span className={c.ok ? "is-ok" : "is-missing"} key={c.texte}><Icon name={c.ok ? "checkCircle" : "alert"} />{c.texte}</span>)}</div>
+            <button className="btn btn--ghost btn--wide" disabled={enregistrer.isPending} onClick={() => enregistrer.mutate()}>{enregistrer.isPending ? "Enregistrement…" : "Enregistrer sans publier"}</button>
+            <button className="btn btn--primary btn--wide publish-submit" disabled={!pret || publier.isPending} onClick={() => publier.mutate()}><Icon name="upload" />{publier.isPending ? "Mise en ligne…" : `Publier sur ${cibles.size} boutique${cibles.size > 1 ? "s" : ""}`}</button>
+            <small>Le clic rend les annonces visibles immédiatement. Relancer ne crée aucun doublon.</small>
+          </section>
+        </aside>
+      </div>
+
+      {publier.isPending && <div className="card publish-progress"><PalmLoader compact label="Envoi des photos et mise en ligne sur vos boutiques…" /></div>}
+
+      {resultats && <section className="publish-results">
+        <div className="publish-results__head"><div><span>Publication terminée</span><h2>Vos annonces, boutique par boutique</h2></div></div>
+        <div className="publish-results__grid">{resultats.map((r) => {
+          const v = VERDICTS[r.status];
+          const boutique = boutiques.find((b) => b.id === r.accountId);
+          return <article className={`card publish-result publish-result--${r.status}`} key={r.accountId}>
+            <div className="publish-result__top"><PlateformeBadge plateforme={r.marketplace} /><span className={`pill ${v.cls}`}>{v.libelle}</span></div>
+            <h3>{boutique?.nom ?? r.marketplace}</h3>
+            <p>{r.message ?? "Opération terminée."}</p>
+            {r.url ? <a className="btn btn--primary btn--wide" href={r.url} target="_blank" rel="noreferrer"><Icon name="link" />Voir l'annonce en ligne</a> : <small>{r.remoteId ? `Identifiant distant : ${r.remoteId}` : "Aucun lien public disponible."}</small>}
+          </article>;
+        })}</div>
+      </section>}
     </>
   );
 }

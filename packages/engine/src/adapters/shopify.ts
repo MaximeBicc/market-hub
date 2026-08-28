@@ -312,6 +312,8 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     ctx: MarketplaceContext,
     remoteId?: string,
     message?: string,
+    marketplaceData?: Record<string, unknown>,
+    url?: string,
   ): TargetResult {
     return {
       accountId: ctx.account.id,
@@ -319,6 +321,8 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       status: "success",
       ...(remoteId ? { remoteId } : {}),
       ...(message ? { message } : {}),
+      ...(marketplaceData ? { marketplaceData } : {}),
+      ...(url ? { url } : {}),
     };
   }
 
@@ -1287,7 +1291,105 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     }
 
     this.assertNoUserErrors(d.productUpdate.userErrors, "statut");
-    return this.ok(ctx, listing.remoteId);
+    if (status === "DRAFT") return this.ok(ctx, listing.remoteId);
+
+    type ProduitPublie = {
+      id: string;
+      handle: string;
+      onlineStoreUrl: string | null;
+    };
+    const lireProduit = async () => {
+      const lu = await this.gql<{ product: ProduitPublie | null }>(
+        ctx,
+        `query PublicationProduct($id: ID!) {
+          product(id: $id) { id handle onlineStoreUrl }
+        }`,
+        { id: productId },
+      );
+      if (!lu.product) throw new Error("Shopify : produit introuvable après activation");
+      return lu.product;
+    };
+
+    let produit = await lireProduit();
+    if (produit.onlineStoreUrl) {
+      return this.ok(
+        ctx,
+        listing.remoteId,
+        "Annonce publiée et visible sur Shopify.",
+        { productId },
+        produit.onlineStoreUrl,
+      );
+    }
+
+    let publications: Array<{
+      id: string;
+      name: string;
+      supportsFuturePublishing: boolean;
+    }>;
+    try {
+      const p = await this.gql<{
+        publications: {
+          nodes: Array<{
+            id: string;
+            name: string;
+            supportsFuturePublishing: boolean;
+          }>;
+        };
+      }>(
+        ctx,
+        `query SalesChannels {
+          publications(first: 50) { nodes { id name supportsFuturePublishing } }
+        }`,
+      );
+      publications = p.publications.nodes;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (/access|scope|permission|denied|publications/i.test(detail)) {
+        return this.manuel(
+          ctx,
+          "Shopify a créé le produit actif, mais l'application n'a pas les droits read_publications/write_publications pour le rendre visible sur la boutique en ligne. Ajoutez ces autorisations puis reconnectez la boutique.",
+        );
+      }
+      throw error;
+    }
+
+    const canal =
+      publications.find((p) => p.supportsFuturePublishing) ??
+      publications.find((p) => /online store|boutique en ligne/i.test(p.name));
+    if (!canal) {
+      return this.manuel(
+        ctx,
+        "Shopify a créé le produit actif, mais aucun canal Boutique en ligne n'est disponible pour cette boutique.",
+      );
+    }
+
+    const publie = await this.gql<{
+      publishablePublish: { userErrors: UserError[] };
+    }>(
+      ctx,
+      `mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
+        publishablePublish(id: $id, input: $input) {
+          userErrors { field message }
+        }
+      }`,
+      { id: productId, input: [{ publicationId: canal.id }] },
+    );
+    this.assertNoUserErrors(
+      publie.publishablePublish.userErrors,
+      "publication sur la boutique en ligne",
+    );
+
+    produit = await lireProduit();
+    const url =
+      produit.onlineStoreUrl ??
+      `https://${shopDomainOf(ctx)}/products/${produit.handle}`;
+    return this.ok(
+      ctx,
+      listing.remoteId,
+      "Annonce publiée et visible sur Shopify.",
+      { productId, publicationId: canal.id },
+      url,
+    );
   }
 
   /* ---------------------------------------------------------------- */

@@ -119,6 +119,9 @@ export class D1ProductRepository implements ProductRepository {
       stock: row.stock,
       images: parseJson<string[]>(row.images, []),
       tags: parseJson<string[]>(row.tags, []),
+      materials: row.material
+        ? row.material.split(",").map((m) => m.trim()).filter(Boolean)
+        : undefined,
       /*
        * LES AXES DE VARIATION — colonne remplie par la synchronisation et que
        * personne ne relisait.

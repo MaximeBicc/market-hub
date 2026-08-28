@@ -223,6 +223,56 @@ describe("prix et stock", () => {
   });
 });
 
+describe("mise en ligne", () => {
+  it("active le produit, le publie sur la boutique en ligne et rend son URL", async () => {
+    const { http, sent } = fakeHttp([
+      { data: { productUpdate: { userErrors: [] } } },
+      {
+        data: {
+          product: {
+            id: "gid://shopify/Product/9",
+            handle: "sac-besace",
+            onlineStoreUrl: null,
+          },
+        },
+      },
+      {
+        data: {
+          publications: {
+            nodes: [
+              {
+                id: "gid://shopify/Publication/1",
+                name: "Online Store",
+                supportsFuturePublishing: true,
+              },
+            ],
+          },
+        },
+      },
+      { data: { publishablePublish: { userErrors: [] } } },
+      {
+        data: {
+          product: {
+            id: "gid://shopify/Product/9",
+            handle: "sac-besace",
+            onlineStoreUrl: "https://boutique.example/products/sac-besace",
+          },
+        },
+      },
+    ]);
+
+    const r = await adapter.activateListing(ctxWith(http), listing);
+
+    expect(r.status).toBe("success");
+    expect(r.url).toBe("https://boutique.example/products/sac-besace");
+    expect(sent[0]?.body.variables.input.status).toBe("ACTIVE");
+    expect(sent[3]?.body.query).toContain("publishablePublish");
+    expect(sent[3]?.body.variables.input).toEqual([
+      { publicationId: "gid://shopify/Publication/1" },
+    ]);
+  });
+});
+
 describe("expédition", () => {
   it("passe par les fulfillment orders et transmet le suivi", async () => {
     const { http, sent } = fakeHttp([

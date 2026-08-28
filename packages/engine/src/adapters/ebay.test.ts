@@ -601,6 +601,7 @@ describe("annonces à déclinaisons", () => {
     expect(sent[0]?.body.inventoryItemGroupKey).toBe("GRP-CASE");
     expect(sent[0]?.body.marketplaceId).toBe("EBAY_FR");
     expect(r.remoteId).toBe("1122334455");
+    expect(r.url).toBe("https://www.ebay.fr/itm/1122334455");
   });
 
   it("retire un groupe d'un seul tenant", async () => {
@@ -615,10 +616,11 @@ describe("annonces à déclinaisons", () => {
 
   it("garde le chemin de l'offre unique pour une annonce sans déclinaison", async () => {
     const { http, sent } = fakeHttp([{ body: { listingId: "999" } }]);
-    await adapter.activateListing(ctxWith(http), seule);
+    const r = await adapter.activateListing(ctxWith(http), seule);
 
     expect(sent[0]?.url).toContain("/offer/off-9/publish");
     expect(sent[0]?.url).not.toContain("inventory_item_group");
+    expect(r.url).toBe("https://www.ebay.fr/itm/999");
   });
 
   it("préfère le groupe quand l'annonce porte les deux", async () => {
