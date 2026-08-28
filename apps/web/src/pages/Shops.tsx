@@ -105,9 +105,21 @@ export function Shops() {
       }>(`/engine/accounts/${a.id}/temps-reel`);
 
       const poses = r.crees.length + r.dejaLa.length;
+      /*
+       * DIRE CE QUI MARCHE AVANT CE QUI MANQUE.
+       *
+       * Le message ne nommait ni le sujet actif ni le sujet refusé : « 1
+       * actif, 1 refusé » laissait croire qu'une vente sur deux passerait,
+       * alors que les deux sujets ne portent pas le même enjeu. La vente
+       * payée décrémente le stock ; l'annulation le rend, et le relevé la
+       * rattrape de toute façon en un quart d'heure.
+       */
+      const actifs = [...r.crees, ...r.dejaLa];
       toast(
         r.echecs.length > 0
-          ? `${poses} abonnement(s) actif(s), ${r.echecs.length} refusé(s) — ${r.echecs[0]?.message ?? ""}`
+          ? `${actifs.join(", ") || "aucun sujet"} : actif. ${r.echecs
+              .map((e) => e.topic)
+              .join(", ")} : refusé — ${r.echecs[0]?.message ?? ""}`
           : `Temps réel actif — ${poses} abonnement(s), dont le stock`,
       );
       await qc.invalidateQueries({ queryKey: ["accounts"] });

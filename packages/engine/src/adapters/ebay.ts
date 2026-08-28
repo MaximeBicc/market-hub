@@ -77,6 +77,19 @@ function hosts(env?: string): { api: string; auth: string } {
 const TOKEN_SKEW_SEC = 300;
 
 export const EBAY_SCOPES = [
+  /*
+   * LA PORTÉE DE BASE, QUI N'EST PAS QU'UN PRÉFIXE.
+   *
+   * `api_scope` est une portée à part entière, et les sujets de notification
+   * l'exigent EN PLUS de la leur : s'abonner à l'annulation de commande
+   * réclame `sell.fulfillment` ET celle-ci. Ne demander que la première fait
+   * répondre « 195011 — not authorized for this topic », un message qui parle
+   * du sujet et jamais de la portée qui manque.
+   *
+   * Elle ne donne accès à rien de sensible par elle-même — c'est la portée
+   * qu'obtient déjà tout jeton applicatif.
+   */
+  "https://api.ebay.com/oauth/api_scope",
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.account.readonly",
@@ -189,6 +202,15 @@ class EbayHttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /**
+     * Les codes d'erreur d'eBay, conservés tels quels.
+     *
+     * Le texte est traduit, reformulé, parfois tronqué ; le code, lui, est
+     * stable et documenté. Ne garder que le texte oblige à reconnaître des
+     * phrases en anglais pour décider quoi faire — ce qui casse au premier
+     * changement de formulation.
+     */
+    readonly codes: readonly number[] = [],
   ) {
     super(message);
     this.name = "EbayHttpError";
@@ -799,16 +821,26 @@ export async function ebayEnsureNotifications(
    * une valeur inventée fait échouer la création sans dire laquelle attendre.
    */
   const versions = new Map<string, string>();
+  /*
+   * Les portées que CHAQUE sujet réclame. eBay les publie dans le même
+   * catalogue que les versions de schéma : les ignorer, c'était se priver de
+   * la seule information qui explique un refus « 195011 ».
+   */
+  const porteesSujet = new Map<string, string[]>();
   try {
     const topics = await adapter.appelNotification<{
       topics?: Array<{
         topicId?: string;
+        authorizationScopes?: string[];
         supportedPayloads?: Array<{ schemaVersion?: string }>;
       }>;
     }>(ctx, "/topic?limit=100", {}, "application");
     for (const t of topics.topics ?? []) {
       const v = t.supportedPayloads?.[0]?.schemaVersion;
       if (t.topicId && v) versions.set(t.topicId, v);
+      if (t.topicId && t.authorizationScopes?.length) {
+        porteesSujet.set(t.topicId, t.authorizationScopes);
+      }
     }
   } catch {
     // Sans le catalogue, on tentera la valeur usuelle et l'échec le dira.
@@ -849,14 +881,65 @@ export async function ebayEnsureNotifications(
       });
       crees.push(topicId);
     } catch (err) {
+      const brut = err instanceof Error ? err.message : String(err);
+      /*
+       * Le code se lit sur l'exception quand elle vient de l'adaptateur, et
+       * dans le texte quand elle vient de la couche HTTP — celle-ci
+       * intercepte les 403 plus tôt et recopie le corps brut d'eBay. Les deux
+       * chemins existent réellement : ne couvrir que l'un des deux faisait
+       * passer le refus pour un message opaque en production.
+       */
+      const refusSujet =
+        (err instanceof EbayHttpError && err.codes.includes(195011)) ||
+        /195011/.test(brut);
       echecs.push({
         topic: topicId,
-        message: err instanceof Error ? err.message : String(err),
+        message: refusSujet
+          ? await expliquerRefusSujet(ctx, topicId, porteesSujet.get(topicId))
+          : brut,
       });
     }
   }
 
   return { destination: endpoint, crees, dejaLa, echecs };
+}
+
+
+/**
+ * NOMMER LA PORTÉE QUI MANQUE, PLUTÔT QUE LE SUJET QUI REFUSE.
+ *
+ * « 195011 — not authorized for this topic » désigne le sujet, jamais la
+ * cause. Or la cause est toujours la même : le consentement du vendeur ne
+ * couvre pas l'une des portées que ce sujet réclame. eBay publie ces portées
+ * dans son catalogue, et la sonde sait demander à eBay si une portée donnée a
+ * été accordée. Croiser les deux donne la réponse exacte, en un message.
+ *
+ * Sans ça, le refus envoie chercher un réglage de sujet — qui n'existe pas —
+ * pendant que le vrai geste est une reconnexion. On a déjà perdu trois
+ * allers-retours sur ce genre de message.
+ *
+ * Le coût est un appel de jeton par portée candidate, et UNIQUEMENT sur
+ * échec : un abonnement qui réussit ne sonde rien.
+ */
+async function expliquerRefusSujet(
+  ctx: MarketplaceContext,
+  topicId: string,
+  portees: readonly string[] | undefined,
+): Promise<string> {
+  if (!portees?.length) {
+    return `eBay refuse l'abonnement à « ${topicId} » : le consentement du vendeur ne couvre pas les portées que ce sujet exige. eBay n'a pas dit lesquelles — son catalogue de sujets n'a pas répondu.`;
+  }
+
+  const manquantes: string[] = [];
+  for (const portee of portees) {
+    if (!(await ebayPorteeAccordee(ctx, portee))) manquantes.push(portee);
+  }
+
+  if (manquantes.length === 0) {
+    return `eBay refuse l'abonnement à « ${topicId} » alors que toutes les portées qu'il exige (${portees.join(", ")}) sont bien accordées. La cause est ailleurs : ce sujet peut être réservé à certains comptes ou à certaines places de marché.`;
+  }
+
+  return `eBay refuse l'abonnement à « ${topicId} » : il manque ${manquantes.length > 1 ? "les portées" : "la portée"} ${manquantes.map((m) => `« ${m.replace("https://api.ebay.com/oauth/api_scope", "api_scope")} »`).join(" et ")}. Une portée ne s'ajoute pas à un jeton existant : clique sur « Reconnecter ».`;
 }
 
 export class EbayAdapter implements MarketplaceAdapter {
@@ -1091,6 +1174,7 @@ export class EbayAdapter implements MarketplaceAdapter {
       throw new EbayHttpError(
         res.status,
         detail || `eBay a répondu ${res.status} sur ${path.split("?")[0]}`,
+        errs.map((e) => Number(e.errorId)).filter((n) => Number.isFinite(n)),
       );
     }
     return json as T;

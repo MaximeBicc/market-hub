@@ -485,6 +485,95 @@ describe("mise en place des abonnements", () => {
     expect(r.crees).toContain("ORDER_CONFIRMATION");
   });
 
+  it("nomme la PORTÉE manquante quand eBay refuse un sujet (195011)", async () => {
+    /*
+     * « 195011 — not authorized for this topic » désigne le sujet, jamais la
+     * cause. Le lire au premier degré envoie chercher un réglage de sujet,
+     * qui n'existe pas, pendant que le vrai geste est une reconnexion.
+     *
+     * Ici : le catalogue dit que le sujet réclame deux portées, la sonde
+     * répond que la première n'est pas accordée. Le message doit la nommer.
+     */
+    const BASE = "https://api.ebay.com/oauth/api_scope";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        const corps = String(init?.body ?? "");
+
+        if (u.includes("/oauth2/token")) {
+          // La sonde : seule la portée de base fait défaut.
+          const refuse =
+            corps.includes(`scope=${encodeURIComponent(BASE)}`) &&
+            !corps.includes("sell.fulfillment") &&
+            !corps.includes("commerce.notification");
+          return refuse
+            ? new Response(JSON.stringify({ error: "invalid_scope" }), {
+                status: 400,
+              })
+            : new Response(
+                JSON.stringify({ access_token: "t", expires_in: 7200 }),
+                { status: 200 },
+              );
+        }
+        if (u.includes("/topic?")) {
+          return new Response(
+            JSON.stringify({
+              topics: [
+                {
+                  topicId: "ORDER_CANCELLATION_ACTIVITY",
+                  authorizationScopes: [
+                    BASE,
+                    "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+                  ],
+                  supportedPayloads: [{ schemaVersion: "1.0" }],
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (u.includes("/subscription") && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              errors: [
+                {
+                  errorId: 195011,
+                  domain: "API_NOTIFICATION",
+                  message: "not authorized for this topic.",
+                },
+              ],
+            }),
+            { status: 403 },
+          );
+        }
+        if (u.includes("/destination") && init?.method === "POST") {
+          return new Response(JSON.stringify({ destinationId: "d1" }), {
+            status: 200,
+          });
+        }
+        return new Response("{}", { status: 200 });
+      }),
+    );
+
+    const rapport = await ebayEnsureNotifications(
+      adapter,
+      { ...c(), credentials: { ...c().credentials, refreshToken: "rtok" } },
+      "https://h/api/webhooks/ebay",
+      "a".repeat(32),
+      "a@b.c",
+    );
+
+    const refus = rapport.echecs.find(
+      (e) => e.topic === "ORDER_CANCELLATION_ACTIVITY",
+    );
+    expect(refus).toBeDefined();
+    // La portée manquante est nommée, la portée accordée ne l'est pas.
+    expect(refus!.message).toContain("api_scope »");
+    expect(refus!.message).not.toContain("sell.fulfillment");
+    expect(refus!.message).toContain("Reconnecter");
+  });
+
   it("nomme la reconnexion quand la portée n'a jamais été accordée", async () => {
     /*
      * LE SCÉNARIO QUI A COÛTÉ TROIS ALLERS-RETOURS.
