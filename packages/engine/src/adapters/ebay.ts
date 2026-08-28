@@ -94,6 +94,20 @@ export const EBAY_SCOPES = [
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.account.readonly",
   /*
+   * L'ANNULATION A SES PROPRES PORTÉES, ET EBAY SEUL LES CONNAISSAIT.
+   *
+   * La documentation annonce `sell.fulfillment` pour le sujet
+   * `ORDER_CANCELLATION_ACTIVITY`. Son catalogue de sujets, interrogé en
+   * direct, en réclame deux autres — celles-ci. C'est le catalogue qui fait
+   * foi : c'est lui que le service consulte pour accepter ou refuser.
+   *
+   * Elles sont en LECTURE des annulations, rien de plus : savoir qu'une
+   * commande a été annulée pour rendre l'article au stock. Aucune des deux ne
+   * permet d'annuler quoi que ce soit à la place du vendeur.
+   */
+  "https://api.ebay.com/oauth/api_scope/sell.cancellation.read",
+  "https://api.ebay.com/oauth/api_scope/sell.cancellation",
+  /*
    * Créer un abonnement aux notifications exige SA PROPRE portée, en plus de
    * celles du sujet. Un jeton applicatif ne suffit pas : `ORDER_CONFIRMATION`
    * est un sujet à portée UTILISATEUR, donc un abonnement par vendeur, créé
@@ -939,7 +953,22 @@ async function expliquerRefusSujet(
     return `eBay refuse l'abonnement à « ${topicId} » alors que toutes les portées qu'il exige (${portees.join(", ")}) sont bien accordées. La cause est ailleurs : ce sujet peut être réservé à certains comptes ou à certaines places de marché.`;
   }
 
-  return `eBay refuse l'abonnement à « ${topicId} » : il manque ${manquantes.length > 1 ? "les portées" : "la portée"} ${manquantes.map((m) => `« ${m.replace("https://api.ebay.com/oauth/api_scope", "api_scope")} »`).join(" et ")}. Une portée ne s'ajoute pas à un jeton existant : clique sur « Reconnecter ».`;
+  /*
+   * « et » serait un contresens. eBay liste des portées ACCEPTABLES, pas
+   * cumulatives : une seule suffit à ouvrir le sujet. Écrire « il manque X et
+   * Y » fait croire qu'il faut les deux, et laisse penser qu'on est plus loin
+   * du but qu'on ne l'est.
+   */
+  /*
+   * La portée de base n'a pas de suffixe : lui retirer un préfixe qui se
+   * termine par une barre oblique ne fait rien, et elle s'afficherait en URL
+   * complète au milieu de noms courts. On la nomme explicitement.
+   */
+  const court = manquantes.map((m) => {
+    const nu = m.replace(/^https:\/\/api\.ebay\.com\/oauth\/api_scope\/?/, "");
+    return `« ${nu || "api_scope"} »`;
+  });
+  return `eBay refuse l'abonnement à « ${topicId} » : le vendeur n'a accordé aucune des portées qui l'ouvrent (${court.join(", ")}) — une seule suffirait. Une portée ne s'ajoute pas à un jeton existant : clique sur « Reconnecter ».`;
 }
 
 export class EbayAdapter implements MarketplaceAdapter {
