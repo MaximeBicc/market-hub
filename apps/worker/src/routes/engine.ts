@@ -157,15 +157,30 @@ engine.post("/listing", async (c) => {
     return c.json({ ...creation, idempotencyKey: key });
   }
 
-  // Une création est volontairement transactionnelle en deux temps chez les
-  // trois plateformes : objet complet, puis mise en ligne. On ne publie que
-  // les objets effectivement créés (ou un brouillon local déjà connu).
+  /*
+   * PUBLIER, C'EST TOUJOURS PUBLIER — MÊME CE QUI SE CROIT DÉJÀ EN LIGNE.
+   *
+   * Une création est transactionnelle en deux temps chez les trois
+   * plateformes : objet complet, puis mise en ligne. La seconde étape était
+   * sautée pour les annonces localement « actives », au motif qu'il n'y
+   * avait rien à faire.
+   *
+   * C'était vrai quand publier ne faisait que publier. Ça ne l'est plus :
+   * l'activation porte désormais les réparations — restaurer une déclinaison
+   * qu'eBay a retirée, réécrire les quantités que la plateforme a mises à
+   * zéro. Le raccourci rendait donc tout ce travail INATTEIGNABLE, et
+   * précisément dans le cas qui en avait besoin : une annonce en ligne mais
+   * fausse. L'écran répondait « Déjà publié — rien à recréer », l'annonce
+   * restait en rupture, et rien ne s'exécutait.
+   *
+   * Le raccourci disparaît. L'activation est idempotente sur les trois
+   * plateformes — eBay rend « already published », Shopify et Etsy
+   * réappliquent le même état — et il s'agit d'un geste EXPLICITE de
+   * l'utilisateur, pas d'une tâche de fond : quelques appels de plus valent
+   * mieux qu'une réparation qu'on ne peut pas déclencher.
+   */
   const aActiver = creation.results
-    .filter(
-      (r) =>
-        r.status === "success" &&
-        r.marketplaceData?.["alreadyActive"] !== true,
-    )
+    .filter((r) => r.status === "success")
     .map((r) => r.accountId);
 
   if (aActiver.length === 0) {
