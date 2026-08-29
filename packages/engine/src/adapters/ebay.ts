@@ -704,6 +704,48 @@ function refusEbay(err: unknown, code: number): boolean {
   );
 }
 
+/**
+ * REND LISIBLE UN REFUS D'ÉCRITURE GROUPÉE.
+ *
+ * `bulk_update_price_quantity` ne rend pas une erreur, mais un TABLEAU de
+ * réponses — une par objet touché, article puis offre. Quand la couche HTTP
+ * intercepte le 400, elle recopie ce corps brut et le tronque : l'utilisateur
+ * reçoit un pavé de JSON coupé au milieu du seul champ qui explique quoi que
+ * ce soit. C'est exactement ce qui s'est passé sur un refus 25004, dont le
+ * message français est resté invisible.
+ *
+ * On extrait donc les messages longs — ceux qu'eBay écrit pour être lus — et
+ * on rend le brut tel quel si la forme n'est pas celle attendue.
+ */
+export function lireRefusGroupe(message: string): string {
+  const debut = message.indexOf("{");
+  if (debut < 0) return message;
+  try {
+    const corps = JSON.parse(message.slice(debut)) as {
+      responses?: Array<{
+        sku?: string;
+        errors?: Array<{
+          errorId?: number;
+          longMessage?: string;
+          message?: string;
+        }>;
+      }>;
+    };
+    const dits: string[] = [];
+    for (const r of corps.responses ?? []) {
+      for (const e of r.errors ?? []) {
+        const texte = e.longMessage || e.message;
+        if (!texte) continue;
+        const ligne = `${r.sku ? `${r.sku} : ` : ""}${texte}${e.errorId ? ` (${e.errorId})` : ""}`;
+        if (!dits.includes(ligne)) dits.push(ligne);
+      }
+    }
+    return dits.length > 0 ? dits.join(" ; ") : message;
+  } catch {
+    return message;
+  }
+}
+
 /** Une caractéristique d'article telle qu'eBay la décrit pour une catégorie. */
 export interface AspectEbay {
   nom: string;
@@ -2428,22 +2470,32 @@ export class EbayAdapter implements MarketplaceAdapter {
     // `bulk_update_price_quantity` met à jour l'article ET son offre en un
     // seul appel. Passer par l'inventory_item seul laisserait l'offre publiée
     // avec l'ancienne quantité.
-    await this.call(ctx, "/sell/inventory/v1/bulk_update_price_quantity", {
-      method: "POST",
-      body: JSON.stringify({
-        requests: [
-          {
-            sku,
-            shipToLocationAvailability: { quantity: stock },
-            // L'offre est celle de CETTE déclinaison, pas celle de l'annonce :
-            // sur un groupe, chaque SKU a la sienne.
-            ...(offerId
-              ? { offers: [{ offerId, availableQuantity: stock }] }
-              : {}),
-          },
-        ],
-      }),
-    });
+    try {
+      await this.call(ctx, "/sell/inventory/v1/bulk_update_price_quantity", {
+        method: "POST",
+        body: JSON.stringify({
+          requests: [
+            {
+              sku,
+              shipToLocationAvailability: { quantity: stock },
+              // L'offre est celle de CETTE déclinaison, pas celle de l'annonce :
+              // sur un groupe, chaque SKU a la sienne.
+              ...(offerId
+                ? { offers: [{ offerId, availableQuantity: stock }] }
+                : {}),
+            },
+          ],
+        }),
+      });
+    } catch (err) {
+      /*
+       * Le corps d'une écriture groupée est un TABLEAU de réponses, illisible
+       * une fois tronqué. On en extrait ce qu'eBay a écrit pour être lu.
+       */
+      throw new Error(
+        lireRefusGroupe(err instanceof Error ? err.message : String(err)),
+      );
+    }
 
     return this.ok(ctx, sku);
   }

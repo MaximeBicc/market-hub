@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { aspectsCommuns, EbayAdapter, ebayConsentUrl } from "./ebay.js";
+import { aspectsCommuns, EbayAdapter, lireRefusGroupe, ebayConsentUrl } from "./ebay.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 import type { Listing, Product, Variant } from "../domain/types.js";
 
@@ -1018,6 +1018,38 @@ describe("aspects communs face aux axes de variation", () => {
       Type: ["Magnétique"],
       Fixation: ["Magnétique"],
     });
+  });
+});
+
+describe("lisibilité d'un refus d'écriture groupée", () => {
+  it("extrait le message long au lieu de rendre le JSON tronqué", () => {
+    /*
+     * LE CAS VÉCU. `bulk_update_price_quantity` rend un TABLEAU de réponses —
+     * une par objet touché, l'article puis l'offre. La couche HTTP recopie ce
+     * corps brut et le tronque : l'utilisateur reçoit un pavé coupé au milieu
+     * du seul champ qui explique quelque chose. Le message français d'eBay
+     * était là, invisible.
+     */
+    const brut =
+      `ebay 400 : {"responses":[{"statusCode":400,"sku":"ALI-643"},` +
+      `{"statusCode":400,"sku":"ALI-643","offerId":"248362810011","errors":` +
+      `[{"errorId":25004,"domain":"API_INVENTORY","longMessage":` +
+      `"Quantite disponible inferieure a celle de l annonce eBay."}]}]}`;
+
+    expect(lireRefusGroupe(brut)).toBe(
+      "ALI-643 : Quantite disponible inferieure a celle de l annonce eBay. (25004)",
+    );
+  });
+
+  it("rend le message d'origine quand la forme n'est pas celle attendue", () => {
+    // Un refus qui n'est pas une écriture groupée ne doit pas être avalé :
+    // mieux vaut un texte brut qu'un message vidé de sa substance.
+    expect(lireRefusGroupe("ebay 500 : passerelle indisponible")).toBe(
+      "ebay 500 : passerelle indisponible",
+    );
+    expect(lireRefusGroupe('ebay 400 : {"pas":"la bonne forme"}')).toBe(
+      'ebay 400 : {"pas":"la bonne forme"}',
+    );
   });
 });
 

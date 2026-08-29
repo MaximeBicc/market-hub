@@ -1968,6 +1968,21 @@ export class EtsyAdapter implements MarketplaceAdapter {
         : undefined;
 
       const stock = stockDuSien ?? l.quantity ?? 0;
+
+      /*
+       * L'ÉTAT SE LIT SUR L'ANNONCE, LE STOCK SUR LA DÉCLINAISON.
+       *
+       * Confondre les deux a fait disparaître une annonce bien vivante :
+       * l'état était déduit du stock, devenu celui du seul coloris rattaché.
+       * Mettre le noir à zéro faisait donc passer TOUTE l'annonce en
+       * « épuisée » chez nous, alors que le blanc restait en vente chez Etsy
+       * — et l'écran la montrait comme retirée.
+       *
+       * Une annonce reste vendable tant qu'UNE de ses déclinaisons l'est :
+       * c'est le total qu'Etsy annonce, et lui seul, qui dit si elle est
+       * épuisée.
+       */
+      const totalAnnonce = l.quantity ?? 0;
       return {
         remoteId: String(l.listing_id),
         sku,
@@ -1981,7 +1996,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
           l.state === "draft"
             ? "draft"
             : l.state === "active"
-              ? stock > 0
+              ? totalAnnonce > 0
                 ? "active"
                 : "sold"
               : l.state === "sold_out"
