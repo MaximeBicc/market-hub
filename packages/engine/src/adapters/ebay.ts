@@ -2734,6 +2734,26 @@ export class EbayAdapter implements MarketplaceAdapter {
       }
     }
 
+    /*
+     * RESTAURER UNE DÉCLINAISON QU'EBAY A RETIRÉE.
+     *
+     * Par défaut, eBay SUPPRIME d'une annonce à déclinaisons celle dont la
+     * quantité tombe à zéro. Le vendeur peut l'en empêcher — préférence
+     * « les annonces restent actives même en rupture de stock » — mais
+     * l'option ne rend pas ce qui est déjà parti : le coloris disparaît du
+     * menu, son offre n'est plus rattachée, et toute écriture de quantité
+     * sur lui échoue en 25004. L'annonce se retrouve amputée sans que rien
+     * ne le signale.
+     *
+     * On compare donc, avant de publier, la liste des déclinaisons du groupe
+     * chez eBay à celle que porte la fiche. Si elle a maigri, on la réécrit.
+     * Le PUT du groupe est un remplacement complet : renvoyer la liste
+     * entière suffit à rattacher ce qui manquait.
+     */
+    if (forme.type === "groupe" && product) {
+      await this.restaurerDeclinaisons(ctx, forme.cle, product);
+    }
+
     let r: { listingId?: string } | undefined;
     try {
       r = await publier();
@@ -2797,6 +2817,72 @@ export class EbayAdapter implements MarketplaceAdapter {
         : "Annonce publiée et visible sur eBay.",
       listingId ? { listingId } : undefined,
       url,
+    );
+  }
+
+/**
+   * Remet dans le groupe les déclinaisons qu'eBay en a retirées.
+   *
+   * Silencieuse en cas d'échec de LECTURE : ne pas savoir ne doit pas
+   * empêcher une publication qui aurait réussi. En revanche, un échec
+   * d'ÉCRITURE remonte — réécrire le groupe est précisément ce qui rend la
+   * publication possible, et le taire ferait échouer la suite sans raison
+   * apparente.
+   */
+  private async restaurerDeclinaisons(
+    ctx: MarketplaceContext,
+    cle: string,
+    product: Product,
+  ): Promise<void> {
+    const variantes = (product.variants ?? [])
+      .filter((v) => v.status === "active")
+      .slice()
+      .sort((a, b) => a.position - b.position);
+    if (variantes.length < 2) return;
+
+    const prep = preparerUnites(product, variantes);
+    if (!prep.ok) return;
+    const attendus = prep.unites.map((u) => u.sku);
+
+    let groupe: { variantSKUs?: string[] } | undefined;
+    try {
+      groupe = await this.call<{ variantSKUs?: string[] }>(
+        ctx,
+        `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(cle)}`,
+      );
+    } catch {
+      // Groupe illisible : on laisse la publication tenter sa chance.
+      return;
+    }
+
+    const presents = new Set(groupe?.variantSKUs ?? []);
+    const manquants = attendus.filter((sku) => !presents.has(sku));
+    if (manquants.length === 0) return;
+
+    /*
+     * Les articles d'inventaire existent toujours — eBay retire la
+     * déclinaison du GROUPE, il n'efface pas le SKU. Il suffit donc de
+     * rendre au groupe sa liste complète ; leur quantité, elle, sera écrite
+     * par le rapprochement de stock qui suit.
+     */
+    const communs = aspectsCommuns(product);
+    await this.call(
+      ctx,
+      `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(cle)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          title: product.title.slice(0, TITRE_MAX),
+          description: product.description ?? product.title,
+          imageUrls: galerieGroupe(product, prep.unites),
+          variantSKUs: attendus,
+          ...(communs ? { aspects: communs } : {}),
+          variesBy: {
+            ...(prep.axeImage ? { aspectsImageVariesBy: [prep.axeImage] } : {}),
+            specifications: prep.specifications,
+          },
+        }),
+      },
     );
   }
 

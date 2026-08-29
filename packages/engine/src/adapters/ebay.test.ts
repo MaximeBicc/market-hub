@@ -1021,6 +1021,105 @@ describe("aspects communs face aux axes de variation", () => {
   });
 });
 
+describe("restaurer une déclinaison retirée par eBay", () => {
+  it("réécrit le groupe amputé avant de publier", async () => {
+    /*
+     * LE CAS VÉCU, CONSTATÉ SUR L'ANNONCE.
+     *
+     * eBay supprime d'une annonce à déclinaisons celle dont la quantité tombe
+     * à zéro. Le menu ne proposait plus que « Blanc (En rupture de stock) » —
+     * le noir avait disparu, et toute écriture de quantité sur lui échouait
+     * en 25004. La préférence « rester actif en rupture » évite que ça se
+     * reproduise, mais ne rend pas ce qui est déjà parti.
+     */
+    const produit: Product = {
+      id: "p1",
+      sku: "GRP-1",
+      title: "Clip",
+      price: { amount: 599, currency: "EUR" },
+      stock: 25,
+      condition: "new",
+      images: ["https://ex.fr/p.jpg"],
+      options: [{ name: "Couleur", values: ["Noir", "Blanc"] }],
+      variants: [
+        variante("couleur=noir", ["Noir"], "GRP-1-N"),
+        variante("couleur=blanc", ["Blanc"], "GRP-1-B"),
+      ],
+    };
+    const groupe: Listing = {
+      id: "l-grp",
+      productId: "p1",
+      accountId: "acc-ebay",
+      remoteId: "GRP-1",
+      status: "inactive",
+      price: { amount: 599, currency: "EUR" },
+      stock: 25,
+      marketplaceData: {
+        inventoryItemGroupKey: "GRP-1",
+        offers: { "GRP-1-N": "o1", "GRP-1-B": "o2" },
+      },
+    };
+
+    const { http, sent } = fakeHttp([
+      // Le groupe tel qu'eBay le détient : le noir n'y est plus.
+      { body: { variantSKUs: ["GRP-1-B"] } },
+      { status: 204, body: {} }, // réécriture du groupe
+      { body: { listingId: "5566" } }, // publication
+    ]);
+
+    const r = await adapter.activateListing(
+      ctxWith(http, { categoryTreeId: "3", appToken: "app", appTokenExpiresAt: FUTUR }),
+      groupe,
+      "i",
+      produit,
+    );
+
+    expect(r.status).toBe("success");
+    const ecriture = sent.find(
+      (a) => a.method === "PUT" && a.url.includes("/inventory_item_group/"),
+    );
+    expect(ecriture).toBeDefined();
+    // La liste ENTIÈRE est renvoyée : le PUT est un remplacement complet.
+    expect(ecriture!.body.variantSKUs).toEqual(["GRP-1-N", "GRP-1-B"]);
+  });
+
+  it("ne touche à rien quand le groupe est complet", async () => {
+    // Une réécriture inutile est une écriture chez le marchand : on lit, on
+    // compare, et on s'abstient.
+    const produit: Product = {
+      id: "p1", sku: "GRP-1", title: "Clip",
+      price: { amount: 599, currency: "EUR" }, stock: 25, condition: "new",
+      images: ["https://ex.fr/p.jpg"],
+      options: [{ name: "Couleur", values: ["Noir", "Blanc"] }],
+      variants: [
+        variante("couleur=noir", ["Noir"], "GRP-1-N"),
+        variante("couleur=blanc", ["Blanc"], "GRP-1-B"),
+      ],
+    };
+    const groupe: Listing = {
+      id: "l-grp", productId: "p1", accountId: "acc-ebay", remoteId: "GRP-1",
+      status: "inactive", price: { amount: 599, currency: "EUR" }, stock: 25,
+      marketplaceData: { inventoryItemGroupKey: "GRP-1", offers: { "GRP-1-N": "o1" } },
+    };
+
+    const { http, sent } = fakeHttp([
+      { body: { variantSKUs: ["GRP-1-N", "GRP-1-B"] } },
+      { body: { listingId: "5566" } },
+    ]);
+
+    await adapter.activateListing(
+      ctxWith(http, { categoryTreeId: "3", appToken: "app", appTokenExpiresAt: FUTUR }),
+      groupe,
+      "i",
+      produit,
+    );
+
+    expect(
+      sent.some((a) => a.method === "PUT" && a.url.includes("/inventory_item_group/")),
+    ).toBe(false);
+  });
+});
+
 describe("lisibilité d'un refus d'écriture groupée", () => {
   it("extrait le message long au lieu de rendre le JSON tronqué", () => {
     /*

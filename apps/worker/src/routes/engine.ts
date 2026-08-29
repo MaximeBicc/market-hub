@@ -201,7 +201,20 @@ engine.post("/listing", async (c) => {
       // une annonce en ligne — n'a pas été atteint.
       status: active.status === "unsupported" ? "failed" as const : active.status,
       remoteId: active.remoteId ?? cree.remoteId,
-      message: `Le brouillon a été créé, mais sa mise en ligne a échoué : ${active.message ?? "raison inconnue"}`,
+      /*
+       * NE PAS ANNONCER UNE CRÉATION QUI N'A PAS EU LIEU.
+       *
+       * Ce message était le même pour une annonce fraîchement créée et pour
+       * une annonce qui existait déjà et qu'on cherchait seulement à remettre
+       * en vente. « Le brouillon a été créé » envoyait alors chercher un
+       * brouillon inexistant, et faisait craindre un doublon là où il n'y
+       * avait qu'une réactivation refusée.
+       */
+      message: `${
+        cree.marketplaceData?.["alreadyActive"] !== undefined
+          ? "L'annonce existe déjà, mais sa remise en vente a échoué"
+          : "Le brouillon a été créé, mais sa mise en ligne a échoué"
+      } : ${active.message ?? "raison inconnue"}`,
     };
   });
   const outcome = {
