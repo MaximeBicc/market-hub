@@ -243,6 +243,39 @@ export class ShopifyAdapter implements MarketplaceAdapter {
 
   /* ---------------------------------------------------------------- */
 
+
+  /**
+   * Les droits que le jeton porte RÉELLEMENT, demandés à Shopify.
+   *
+   * `/admin/oauth/access_scopes.json` répond pour le jeton présenté, quelle
+   * que soit l'application. C'est la seule source qui tranche « la case est
+   * cochée » contre « le jeton l'a » — deux états que l'interface de Shopify
+   * permet de désaccorder. Échec silencieux : cette lecture n'existe que
+   * pour enrichir un message d'erreur, elle ne doit jamais en créer un.
+   */
+  private async porteesDuJeton(
+    ctx: MarketplaceContext,
+  ): Promise<string | null> {
+    try {
+      const token = await accessToken(ctx);
+      const http = ctx.http ?? fetch;
+      const res = await http(
+        `https://${shopDomainOf(ctx)}/admin/oauth/access_scopes.json`,
+        { headers: { "X-Shopify-Access-Token": token } },
+      );
+      if (!res.ok) return null;
+      const d = (await res.json()) as {
+        access_scopes?: Array<{ handle?: string }>;
+      };
+      const noms = (d.access_scopes ?? [])
+        .map((x) => x.handle)
+        .filter((x): x is string => Boolean(x));
+      return noms.length > 0 ? noms.sort().join(", ") : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async gql<T>(
     ctx: MarketplaceContext,
     query: string,
@@ -1361,17 +1394,20 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       const detail = error instanceof Error ? error.message : String(error);
       if (/access|scope|permission|denied|publications/i.test(detail)) {
         /*
-         * LE REFUS BRUT ACCOMPAGNE LE DIAGNOSTIC. Sans lui, impossible de
-         * distinguer « droits jamais enregistrés » de « droits enregistrés
-         * mais pas encore actifs » : la phrase de Shopify nomme le scope
-         * exact qui manque encore, et c'est elle qui permet de vérifier que
-         * le clic sur Enregistrer a réellement porté. Pas de reconnexion à
-         * demander : une application personnalisée applique ses nouveaux
-         * droits au jeton existant.
+         * DIRE CE QUE LE JETON PORTE, PAS SEULEMENT CE QUI LUI MANQUE.
+         *
+         * « J'ai coché les droits » et « le jeton ne les a pas » peuvent être
+         * vrais en même temps : coché dans la mauvaise application, dans la
+         * section Storefront au lieu d'Admin, ou sans cliquer Enregistrer.
+         * Le refus seul ne départage pas ces trois cas. La liste des droits
+         * effectivement portés par le jeton — que Shopify sait donner — les
+         * départage : si elle contient les droits produits mais pas
+         * `read_publications`, la saisie n'a pas atteint CE jeton.
          */
+        const portes = await this.porteesDuJeton(ctx);
         return this.manuel(
           ctx,
-          `Shopify a créé le produit actif, mais refuse de le rendre visible sur la boutique en ligne — il manque les droits read_publications/write_publications sur l'application. Coche-les dans Shopify (Paramètres → Applications → ton app → Configuration → Admin API), Enregistre, puis relance : le jeton actuel suffit. Refus exact de Shopify : « ${detail.slice(0, 160)} »`,
+          `Shopify a créé le produit actif, mais refuse de le rendre visible sur la boutique en ligne — il manque les droits read_publications/write_publications sur l'application. Coche-les dans Shopify (Paramètres → Applications → ton app → Configuration → « Admin API integration », pas Storefront), Enregistre, puis relance : le jeton actuel suffit. Refus exact de Shopify : « ${detail.slice(0, 160)} »${portes ? ` — Droits actuellement portés par le jeton : ${portes}.` : ""}`,
         );
       }
       throw error;
