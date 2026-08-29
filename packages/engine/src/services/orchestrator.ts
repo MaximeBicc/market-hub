@@ -681,6 +681,14 @@ export class MarketplaceOrchestrator {
           await this.listings.put({
             ...l,
             status: input.active ? "active" : "inactive",
+            /*
+             * L'adresse rendue par la plateforme est CONSERVÉE, pas
+             * seulement affichée. Elle ne vivait que dans `marketplaceData`,
+             * que le relevé suivant réécrit de fond en comble : le lien
+             * « voir l'annonce » disparaissait au premier passage de
+             * synchronisation. Sa colonne, elle, survit.
+             */
+            ...(dernier.url ?? l.url ? { url: dernier.url ?? l.url } : {}),
             marketplaceData: {
               ...(l.marketplaceData ?? {}),
               ...(dernier.marketplaceData ?? {}),

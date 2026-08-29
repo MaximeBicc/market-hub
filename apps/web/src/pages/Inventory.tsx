@@ -39,6 +39,70 @@ function getTagsArray(tags: unknown): string[] {
   return [];
 }
 
+/**
+ * OÙ CE PRODUIT EST-IL EN VENTE, ET COMMENT Y ALLER.
+ *
+ * Une pastille par boutique qui porte une annonce. Cliquable quand on connaît
+ * son adresse, inerte sinon — un lien qui tombe sur une page d'erreur coûte
+ * plus cher que pas de lien.
+ *
+ * Le statut se lit sans ouvrir : une annonce hors ligne est grisée. C'est la
+ * distinction qui manquait le plus — « publié » et « en vente » ne sont pas
+ * la même chose, et rien dans l'inventaire ne les séparait.
+ */
+const BOUTIQUES: Record<string, { nom: string; lettre: string }> = {
+  ebay: { nom: "eBay", lettre: "e" },
+  etsy: { nom: "Etsy", lettre: "E" },
+  shopify: { nom: "Shopify", lettre: "S" },
+  alibaba: { nom: "Alibaba", lettre: "A" },
+};
+
+function Annonces({ listings }: { listings?: ListingRow[] | undefined }) {
+  const rows = listings ?? [];
+  if (rows.length === 0) return null;
+
+  return (
+    <span className="annonces">
+      {rows.map((l) => {
+        const b = BOUTIQUES[l.platform];
+        const enLigne = l.status === "active";
+        const contenu = (
+          <>
+            <span aria-hidden="true">{b?.lettre ?? l.platform[0]?.toUpperCase()}</span>
+            {b?.nom ?? l.platform}
+          </>
+        );
+        const titre = `${b?.nom ?? l.platform} — ${
+          enLigne ? "en vente" : "hors ligne"
+        }${l.url ? "" : " (adresse inconnue)"}`;
+
+        return l.url ? (
+          <a
+            key={l.id}
+            className={`annonce-pastille annonce-pastille--${l.platform}${enLigne ? "" : " annonce-pastille--off"}`}
+            href={l.url}
+            target="_blank"
+            rel="noreferrer"
+            title={titre}
+            /* Le clic ne doit pas ouvrir la fiche produit en dessous. */
+            onClick={(e) => e.stopPropagation()}
+          >
+            {contenu}
+          </a>
+        ) : (
+          <span
+            key={l.id}
+            className={`annonce-pastille annonce-pastille--${l.platform} annonce-pastille--muet${enLigne ? "" : " annonce-pastille--off"}`}
+            title={titre}
+          >
+            {contenu}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 export function Inventory() {
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<"products" | "consumables" | "channels">("products");
@@ -375,6 +439,7 @@ export function Inventory() {
                         )}
                         <span className="product-card-title">{p.title}</span>
                         <code className="product-card-sku">{p.sku}</code>
+                        <Annonces listings={p.listings} />
                         {isOut && <span className="pill pill--stop">Rupture</span>}
                         {isLow && <span className="pill pill--warn">Stock bas (≤ {p.minAlert})</span>}
                       </div>

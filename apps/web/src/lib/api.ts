@@ -197,6 +197,9 @@ export interface ListingRow {
   quantity: number;
   status: string;
   imageUrl: string | null;
+  /** L'adresse publique de l'annonce, stockée ou déduite. Absente si aucune
+   *  ne peut être construite sans deviner. */
+  url?: string | null;
   shopId: string;
   shopName: string;
   platform: string;

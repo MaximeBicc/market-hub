@@ -658,6 +658,13 @@ async function syncCatalogue(
               priceCurrency: devise,
               quantity: item.stock,
               status: statut,
+              /*
+               * L'adresse publique se met à jour mais ne s'efface pas : les
+               * plateformes ne la rendent pas toutes au relevé, et la
+               * remettre à NULL ferait disparaître le lien d'une annonce
+               * pourtant en ligne.
+               */
+              url: sql`coalesce(${item.url ?? null}, ${listing.url})`,
               imageUrl: item.imageUrl ?? null,
               marketplaceData: donneesFinales,
               contentHash: hash,

@@ -210,6 +210,7 @@ export class D1ListingRepository implements ListingRepository {
       status: row.status as Listing["status"],
       price: { amount: row.priceAmount, currency: row.priceCurrency },
       stock: row.quantity,
+      ...(row.url ? { url: row.url } : {}),
       marketplaceData: parseJson<Record<string, unknown>>(row.marketplaceData, {}),
     };
   }
@@ -322,7 +323,7 @@ export class D1ListingRepository implements ListingRepository {
         priceCurrency: l.price.currency,
         quantity: l.stock,
         status: l.status,
-        url: null,
+        url: l.url ?? null,
         imageUrl: null,
         marketplaceData: JSON.stringify(l.marketplaceData ?? {}),
         contentHash: hash,
@@ -336,6 +337,14 @@ export class D1ListingRepository implements ListingRepository {
           priceCurrency: l.price.currency,
           quantity: l.stock,
           status: l.status,
+          /*
+           * L'adresse connue ne s'efface jamais. Une écriture qui n'en porte
+           * pas — un simple changement de stock — remettrait la colonne à
+           * NULL et ferait disparaître le lien de tous les écrans. La
+           * nouvelle valeur l'emporte quand elle existe, sinon l'ancienne
+           * reste.
+           */
+          url: sql`coalesce(${l.url ?? null}, ${listing.url})`,
           marketplaceData: JSON.stringify(l.marketplaceData ?? {}),
           contentHash: hash,
           syncedAt: now,

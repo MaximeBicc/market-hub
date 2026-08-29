@@ -212,6 +212,16 @@ export interface Listing {
   status: "draft" | "active" | "inactive" | "sold" | "error";
   price: Money;
   stock: number;
+  /**
+   * L'adresse publique de l'annonce, celle qu'un acheteur ouvrirait.
+   *
+   * Elle vivait uniquement dans le résultat d'une publication : affichée une
+   * fois sur la carte, puis perdue. Le relevé suivant réécrivait
+   * `marketplaceData` et effaçait la seule trace qui restait, si bien
+   * qu'aucun écran ne pouvait plus proposer « voir l'annonce » une heure
+   * après l'avoir publiée. Elle a désormais sa place propre.
+   */
+  url?: string | undefined;
   marketplaceData?: Record<string, unknown> | undefined;
 }
 

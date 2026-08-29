@@ -1952,6 +1952,73 @@ api.delete("/consumables/:id", async (c) => {
 /* Vue d'ensemble du Stock (Produits + Consommables + Multi-canaux)    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * L'ADRESSE PUBLIQUE D'UNE ANNONCE, DÉDUITE QUAND ELLE N'EST PAS STOCKÉE.
+ *
+ * La colonne `url` n'a été remplie que récemment : toutes les annonces
+ * publiées avant restent sans adresse, et le resteront jusqu'à leur prochaine
+ * republication. Plutôt que d'afficher un lien mort ou rien du tout, on la
+ * reconstruit depuis ce qu'on possède déjà — l'identifiant distant suffit
+ * chez Etsy, l'identifiant d'annonce chez eBay, celui du produit chez
+ * Shopify.
+ *
+ * Rien n'est deviné : quand la pièce manque, on ne rend RIEN, et l'écran
+ * n'affiche pas de lien. Un lien qui tombe sur une page d'erreur coûte plus
+ * cher que pas de lien du tout.
+ */
+function adresseAnnonce(l: {
+  url: string | null;
+  externalId: string;
+  platform: string;
+  shopExternalId: string;
+  marketplaceData: string | null;
+}): string | null {
+  if (l.url) return l.url;
+
+  let md: Record<string, unknown> = {};
+  try {
+    md = JSON.parse(l.marketplaceData ?? "{}") as Record<string, unknown>;
+  } catch {
+    // Une donnée illisible ne doit pas priver les autres annonces de lien.
+  }
+
+  if (l.platform === "etsy") {
+    // L'identifiant distant EST l'identifiant d'annonce Etsy.
+    return /^\d+$/.test(l.externalId)
+      ? `https://www.etsy.com/listing/${l.externalId}`
+      : null;
+  }
+
+  if (l.platform === "ebay") {
+    /*
+     * Seul `listingId` ouvre la page publique. Le SKU et l'identifiant
+     * d'offre ne mènent nulle part chez eBay : sans lui, pas de lien.
+     */
+    const id = md["listingId"];
+    return typeof id === "string" && /^\d+$/.test(id)
+      ? `https://www.ebay.fr/itm/${id}`
+      : null;
+  }
+
+  if (l.platform === "shopify") {
+    /*
+     * L'administration plutôt que la vitrine : on possède l'identifiant du
+     * produit, pas son « handle », et c'est ce dernier que compose l'adresse
+     * publique. Le lien d'administration, lui, se construit exactement et
+     * mène là où l'on veut agir.
+     */
+    const gid = md["productId"];
+    const num =
+      typeof gid === "string" ? /(\d+)$/.exec(gid)?.[1] : undefined;
+    const boutique = l.shopExternalId.replace(".myshopify.com", "");
+    return num && boutique
+      ? `https://admin.shopify.com/store/${boutique}/products/${num}`
+      : null;
+  }
+
+  return null;
+}
+
 api.get("/inventory", async (c) => {
   const db = drizzle(c.env.DB);
   const [productRows, consumableRows, listingRows] = await Promise.all([
@@ -1969,8 +2036,11 @@ api.get("/inventory", async (c) => {
         quantity: listing.quantity,
         status: listing.status,
         imageUrl: listing.imageUrl,
+        url: listing.url,
+        marketplaceData: listing.marketplaceData,
         shopId: listing.shopId,
         shopName: shop.displayName,
+        shopExternalId: shop.externalId,
         platform: shop.platform,
       })
       .from(listing)
@@ -2012,6 +2082,22 @@ api.get("/inventory", async (c) => {
     .filter(([, v]) => v.length > 1)
     .map(([sku, v]) => ({ sku, listings: v }));
 
+  /*
+   * Chaque annonce reçoit son adresse — stockée ou déduite — et perd les
+   * données brutes de plateforme, qui n'ont rien à faire dans un écran.
+   */
+  const annonces = listingRows.map(({ marketplaceData, ...l }) => ({
+    ...l,
+    url: adresseAnnonce({ ...l, marketplaceData }),
+  }));
+  const parProduit = new Map<string, typeof annonces>();
+  for (const a of annonces) {
+    if (!a.productId) continue;
+    const liste = parProduit.get(a.productId) ?? [];
+    liste.push(a);
+    parProduit.set(a.productId, liste);
+  }
+
   const mappedProducts = productRows.map((p) => {
     let images: string[] = [];
     let tags: string[] = [];
@@ -2031,6 +2117,31 @@ api.get("/inventory", async (c) => {
       ...p,
       images,
       tags,
+      /*
+       * UNE LIGNE PAR BOUTIQUE, PAS PAR DÉCLINAISON. Un produit à trois
+       * coloris a trois annonces Shopify : les afficher toutes donnerait
+       * trois logos identiques côte à côte. On garde la première de chaque
+       * boutique, en préférant celle qui est en ligne — c'est elle qu'on
+       * veut ouvrir.
+       */
+      listings: (() => {
+        /*
+         * `new Map` garde la DERNIÈRE valeur d'une clé répétée. Construire la
+         * carte depuis une liste triée « en ligne d'abord » sélectionnait
+         * donc exactement l'inverse : le brouillon sans adresse, pastille
+         * inerte, à la place de l'annonce en vente et cliquable. On retient
+         * explicitement la première rencontrée.
+         */
+        const gardees = new Map<string, (typeof annonces)[number]>();
+        for (const l of (parProduit.get(p.id) ?? [])
+          .slice()
+          .sort((a, b) =>
+            a.status === b.status ? 0 : a.status === "active" ? -1 : 1,
+          )) {
+          if (!gardees.has(l.shopId)) gardees.set(l.shopId, l);
+        }
+        return [...gardees.values()];
+      })(),
     };
   });
 
@@ -2043,7 +2154,7 @@ api.get("/inventory", async (c) => {
   return c.json({
     products: mappedProducts,
     consumables,
-    listings: listingRows,
+    listings: annonces,
     multiChannel,
     stats: {
       totalProducts: productRows.length,
