@@ -117,7 +117,19 @@ export function createHttp({
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new ConnectorError(
-        `${platform} ${res.status} : ${body.slice(0, 300)}`,
+        /*
+         * TROIS CENTS CARACTÈRES COUPAIENT LA SEULE PHRASE UTILE.
+         *
+         * Les écritures groupées d'eBay rendent un TABLEAU de réponses : le
+         * message explicatif arrive après plusieurs centaines de caractères
+         * d'enveloppe. Tronquer si tôt le coupait systématiquement en deux —
+         * et l'extracteur de l'adaptateur, qui doit relire ce JSON, se
+         * retrouvait devant un objet inachevé qu'aucun analyseur n'accepte.
+         *
+         * Deux mille : de quoi contenir une réponse groupée entière, et loin
+         * du volume qui encombrerait un journal.
+         */
+        `${platform} ${res.status} : ${body.slice(0, 2000)}`,
         "permanent",
       );
     }

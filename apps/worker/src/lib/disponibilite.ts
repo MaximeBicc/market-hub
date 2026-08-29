@@ -163,12 +163,36 @@ export async function appliquerDisponibilite(
    * donc n'y toucherait pas. Mieux vaut retenter au passage suivant.
    */
   if (outcome.anySuccess) {
+    /*
+     * CE QUI N'EST PAS REVENU RESTE NOTÉ.
+     *
+     * À la remise en vente, la marque était effacée dès qu'UNE plateforme
+     * avait suivi — et les autres étaient oubliées. C'est arrivé : eBay et
+     * Shopify sont remontés, Etsy est resté couché, et plus rien ne savait
+     * qu'il fallait le relever. L'annonce serait restée invisible pour
+     * toujours, sans erreur nulle part.
+     *
+     * On ne retire donc de la liste que les annonces effectivement relevées.
+     * Tant qu'il en reste une, la marque demeure, et le prochain mouvement de
+     * stock retentera — ce qui est exactement ce qu'on veut d'un filet.
+     */
+    const echouees = new Set(
+      outcome.results
+        .filter((r) => r.status !== "success")
+        .map((r) => r.accountId),
+    );
+    const restantes = doitEtreRetire
+      ? visees.map((v) => v.id)
+      : visees.filter((v) => echouees.has(v.shopId)).map((v) => v.id);
+
     await memoriser(
       env,
       productId,
       donnees,
-      doitEtreRetire,
-      visees.map((v) => v.id),
+      // Une remise en vente incomplète laisse la marque en place, avec les
+      // seules annonces encore à relever.
+      doitEtreRetire || restantes.length > 0,
+      restantes,
     );
   }
 
