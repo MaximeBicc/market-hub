@@ -113,6 +113,20 @@ function cleOptions(valeurs: readonly string[]): string {
   return valeurs.map((v) => v.trim().toLowerCase()).join(SEP_OPTIONS);
 }
 
+/**
+ * Le texte alternatif d'une photo de déclinaison — « Clip magnétique — Noir ».
+ *
+ * Calculé ICI et nulle part ailleurs : c'est la clé qui relie un média Shopify
+ * à sa variante après téléversement. Deux formules qui divergeraient d'un
+ * espace laisseraient les photos non rattachées sans qu'aucune erreur ne le
+ * signale.
+ */
+function altVariante(product: Product, v: Variant): string {
+  const valeurs = v.optionValues.map((x) => x.trim()).filter(Boolean);
+  const suffixe = valeurs.length > 0 ? ` — ${valeurs.join(" / ")}` : "";
+  return `${product.title}${suffixe}`.slice(0, 512);
+}
+
 function shopDomainOf(ctx: MarketplaceContext): string {
   const d =
     ctx.credentials?.["shopDomain"] ?? ctx.account.externalAccountId ?? "";
@@ -427,31 +441,118 @@ export class ShopifyAdapter implements MarketplaceAdapter {
    * récupérateur de Shopify est anonyme, donc une URL protégée contre les
    * liens directs échouera silencieusement.
    *
-   * Les visuels PROPRES AUX VARIANTES sont joints à la même liste. Ils ne
-   * sont pas rattachés à leur variante — le champ qui le permettrait n'a pas
-   * été vérifié sur cette version d'API, et une supposition ferait rejeter
-   * tout le lot. Sans ce versement, la photo du coloris violet n'existerait
-   * nulle part chez Shopify et il faudrait la retéléverser à la main.
+   * Les visuels PROPRES AUX VARIANTES sont joints à la même liste, et leur
+   * texte alternatif NOMME la déclinaison — « Clip magnétique — Noir ».
+   *
+   * Ce n'est pas cosmétique : c'est ce texte qui permet ensuite de retrouver
+   * quel média correspond à quel coloris pour le lui rattacher. Shopify
+   * réhéberge les photos sous ses propres adresses, l'URL d'origine ne
+   * survit donc pas ; et se fier au RANG serait fragile — un téléversement
+   * qui échoue décale tous les suivants et donnerait la photo du noir au
+   * blanc. Le texte, lui, voyage avec le média.
+   *
+   * Il fait d'ailleurs un meilleur texte alternatif que le titre répété :
+   * un lecteur d'écran annonce enfin de quelle déclinaison il s'agit.
    */
+/**
+   * Relie chaque média à la déclinaison qu'il montre.
+   *
+   * Le lien se fait par le TEXTE ALTERNATIF, posé au téléversement par
+   * `altVariante`. Shopify réhéberge les photos sous ses propres adresses —
+   * l'URL d'origine ne survit pas — et se fier au rang serait fragile : un
+   * téléversement raté décale les suivants et donnerait la photo du noir au
+   * blanc. Un mauvais rattachement se voit sur la boutique et trompe
+   * l'acheteur ; mieux vaut ne rien rattacher.
+   *
+   * Rend une note à ajouter au message, vide quand tout s'est bien passé.
+   */
+  private async rattacherPhotosVariantes(
+    ctx: MarketplaceContext,
+    productId: string,
+    product: Product,
+    variantes: readonly Variant[],
+    distantes: Map<string, { id: string }>,
+  ): Promise<string> {
+    const aRattacher = variantes.filter((v) => v.imageUrl);
+    if (aRattacher.length === 0) return "";
+
+    try {
+      /*
+       * Le téléversement est ASYNCHRONE chez Shopify : le média peut ne pas
+       * être encore prêt. On lit ce qui est là, et on rattache ce qu'on
+       * trouve — le reste se rattrapera à la prochaine republication plutôt
+       * que de faire attendre l'utilisateur sur une boucle d'attente.
+       */
+      const lu = await this.gql<{
+        product: { media: { nodes: Array<{ id: string; alt: string | null }> } } | null;
+      }>(
+        ctx,
+        `query MediaProduit($id: ID!) {
+          product(id: $id) { media(first: 250) { nodes { id alt } } }
+        }`,
+        { id: productId },
+      );
+
+      const parAlt = new Map<string, string>();
+      for (const m of lu.product?.media?.nodes ?? []) {
+        if (m.alt && !parAlt.has(m.alt)) parAlt.set(m.alt, m.id);
+      }
+
+      const liens: Array<{ id: string; mediaId: string }> = [];
+      for (const v of aRattacher) {
+        const mediaId = parAlt.get(altVariante(product, v));
+        const distante = distantes.get(cleOptions(v.optionValues));
+        if (mediaId && distante) liens.push({ id: distante.id, mediaId });
+      }
+      if (liens.length === 0) {
+        return " · photos des coloris non rattachées (médias pas encore prêts chez Shopify)";
+      }
+
+      const r = await this.gql<{
+        productVariantsBulkUpdate: { userErrors: UserError[] };
+      }>(
+        ctx,
+        `mutation PhotosVariantes($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+            userErrors { field message }
+          }
+        }`,
+        { productId, variants: liens },
+      );
+      this.assertNoUserErrors(
+        r.productVariantsBulkUpdate.userErrors,
+        "photos des déclinaisons",
+      );
+
+      const manque = aRattacher.length - liens.length;
+      return manque > 0
+        ? ` · ${manque} photo(s) de coloris non rattachée(s)`
+        : "";
+    } catch (err) {
+      return ` · photos des coloris non rattachées (${err instanceof Error ? err.message.slice(0, 90) : "échec"})`;
+    }
+  }
+
   private mediaDe(
     product: Product,
     variantes: readonly Variant[],
   ): Array<{ originalSource: string; mediaContentType: string; alt: string }> {
-    const vues = new Set<string>();
-    const urls: string[] = [];
-    for (const url of [
-      ...(product.images ?? []),
-      ...variantes.map((v) => v.imageUrl ?? ""),
-    ]) {
-      if (!url || vues.has(url)) continue;
-      vues.add(url);
-      urls.push(url);
+    const parUrl = new Map<string, string>();
+    for (const url of product.images ?? []) {
+      if (url && !parUrl.has(url)) parUrl.set(url, product.title.slice(0, 512));
     }
-    return urls.slice(0, 250).map((url) => ({
-      originalSource: url,
-      mediaContentType: "IMAGE",
-      alt: product.title.slice(0, 512),
-    }));
+    for (const v of variantes) {
+      const url = v.imageUrl ?? "";
+      if (!url || parUrl.has(url)) continue;
+      parUrl.set(url, altVariante(product, v));
+    }
+    return [...parUrl.entries()]
+      .slice(0, 250)
+      .map(([originalSource, alt]) => ({
+        originalSource,
+        mediaContentType: "IMAGE",
+        alt,
+      }));
   }
 
   /** Refus explicite : la plateforme ne peut pas, quelqu'un doit trancher. */
@@ -974,6 +1075,28 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       return partiel("aucune variante n'a pu être rattachée");
     }
 
+    /*
+     * RATTACHER SA PHOTO À CHAQUE DÉCLINAISON.
+     *
+     * Les photos des coloris étaient bien versées chez Shopify, mais dans la
+     * galerie commune : choisir « Noir » ne changeait pas l'image, alors
+     * qu'eBay le fait depuis toujours. Le rattachement se fait en deux temps,
+     * parce que `productCreate` n'accepte pas de variantes — le média doit
+     * exister sur le produit avant qu'une variante puisse le désigner.
+     *
+     * NON BLOQUANT, à dessein : le produit et ses variantes existent déjà.
+     * Échouer ici rendrait `pending_remote` et ferait croire à une création
+     * incomplète, alors qu'il ne manquerait qu'un agrément visuel — et un
+     * nouvel essai créerait un doublon. On note, et on continue.
+     */
+    const notePhotos = await this.rattacherPhotosVariantes(
+      ctx,
+      productId,
+      product,
+      variantes,
+      distantes,
+    );
+
     // L'identifiant retenu est celui de la PREMIÈRE variante : c'est un
     // identifiant de variante que portent les lignes de commande, donc le seul
     // qui permette de rattacher une vente. Le produit parent, lui, voyage dans
@@ -996,7 +1119,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
         status: "pending_remote",
         remoteId: premiere.id,
         marketplaceData,
-        message: `Créé en brouillon, mais ${manquantes} variante(s) sur ${variantes.length} n'ont pas été rattachées — à vérifier dans l'admin Shopify${noteStock}`,
+        message: `Créé en brouillon, mais ${manquantes} variante(s) sur ${variantes.length} n'ont pas été rattachées — à vérifier dans l'admin Shopify${noteStock}${notePhotos}`,
       };
     }
 
@@ -1004,7 +1127,7 @@ export class ShopifyAdapter implements MarketplaceAdapter {
       ...this.ok(
         ctx,
         premiere.id,
-        `Créé en brouillon avec ${rendu.length} variante(s) — à publier depuis l'admin Shopify après relecture${noteStock}`,
+        `Créé en brouillon avec ${rendu.length} variante(s) — à publier depuis l'admin Shopify après relecture${noteStock}${notePhotos}`,
       ),
       marketplaceData,
     };

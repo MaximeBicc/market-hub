@@ -1084,6 +1084,133 @@ describe("création avec déclinaisons", () => {
     expect(quantites).toEqual([6, 4]);
   });
 
+  it("rattache la photo de chaque coloris à sa déclinaison", async () => {
+    /*
+     * Les photos des coloris partaient bien chez Shopify, mais dans la
+     * galerie commune : choisir « Noir » ne changeait pas l'image, alors
+     * qu'eBay le fait. Le rattachement passe par le TEXTE ALTERNATIF, parce
+     * que Shopify réhéberge les photos sous ses propres adresses et que se
+     * fier au rang donnerait la photo du noir au violet dès qu'un
+     * téléversement échoue.
+     */
+    const AVEC_PHOTOS: Product = {
+      ...MULTI,
+      variants: [
+        { ...MULTI.variants![0]!, imageUrl: "https://exemple.fr/violet.jpg" },
+        { ...MULTI.variants![1]!, imageUrl: "https://exemple.fr/noir.jpg" },
+      ],
+    };
+
+    const { http, sent } = fakeHttp([
+      {
+        data: {
+          productCreate: {
+            product: { id: "gid://shopify/Product/1", variants: { nodes: [] } },
+            userErrors: [],
+          },
+        },
+      },
+      {
+        data: {
+          productVariantsBulkCreate: {
+            productVariants: [
+              {
+                id: "gid://v/1",
+                selectedOptions: [{ name: "Couleur", value: "Violet" }],
+                inventoryItem: { id: "gid://ii/1" },
+              },
+              {
+                id: "gid://v/2",
+                selectedOptions: [{ name: "Couleur", value: "Noir" }],
+                inventoryItem: { id: "gid://ii/2" },
+              },
+            ],
+            userErrors: [],
+          },
+        },
+      },
+      // La relecture des médias : Shopify rend SES adresses, pas les nôtres.
+      {
+        data: {
+          product: {
+            media: {
+              nodes: [
+                { id: "gid://m/0", alt: "Support téléphone" },
+                { id: "gid://m/1", alt: "Support téléphone — Violet" },
+                { id: "gid://m/2", alt: "Support téléphone — Noir" },
+              ],
+            },
+          },
+        },
+      },
+      { data: { productVariantsBulkUpdate: { userErrors: [] } } },
+    ]);
+
+    const r = await adapter.createListing(ctxWith(http), AVEC_PHOTOS, "k");
+    expect(r.status).toBe("success");
+
+    // Le texte alternatif posé au téléversement nomme la déclinaison.
+    const creation = sent.find((x) =>
+      String(x.body.query).includes("productCreate"),
+    );
+    expect(creation?.body.variables.media).toEqual([
+      expect.objectContaining({ alt: "Support téléphone" }),
+      expect.objectContaining({ alt: "Support téléphone — Violet" }),
+      expect.objectContaining({ alt: "Support téléphone — Noir" }),
+    ]);
+
+    // Et chaque variante reçoit LE média qui la montre.
+    const rattachement = sent.find((x) =>
+      String(x.body.query).includes("productVariantsBulkUpdate"),
+    );
+    expect(rattachement?.body.variables.variants).toEqual([
+      { id: "gid://v/1", mediaId: "gid://m/1" },
+      { id: "gid://v/2", mediaId: "gid://m/2" },
+    ]);
+  });
+
+  it("ne fait pas échouer la création quand le rattachement des photos rate", async () => {
+    /*
+     * Le produit et ses variantes existent déjà à ce stade. Rendre un échec
+     * ferait croire à une création incomplète — et un nouvel essai créerait
+     * un doublon — alors qu'il ne manque qu'un agrément visuel.
+     */
+    const AVEC_PHOTOS: Product = {
+      ...MULTI,
+      variants: [{ ...MULTI.variants![0]!, imageUrl: "https://exemple.fr/v.jpg" }],
+    };
+    const { http } = fakeHttp([
+      {
+        data: {
+          productCreate: {
+            product: { id: "gid://shopify/Product/1", variants: { nodes: [] } },
+            userErrors: [],
+          },
+        },
+      },
+      {
+        data: {
+          productVariantsBulkCreate: {
+            productVariants: [
+              {
+                id: "gid://v/1",
+                selectedOptions: [{ name: "Couleur", value: "Violet" }],
+                inventoryItem: { id: "gid://ii/1" },
+              },
+            ],
+            userErrors: [],
+          },
+        },
+      },
+      // Les médias ne sont pas encore prêts : aucun alt ne correspond.
+      { data: { product: { media: { nodes: [] } } } },
+    ]);
+
+    const r = await adapter.createListing(ctxWith(http), AVEC_PHOTOS, "k");
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/photos des coloris non rattachées/);
+  });
+
   it("refuse une mise à jour de stock qui écraserait les autres coloris", async () => {
     // La valeur mémorisée est celle de la PREMIÈRE variante : l'écrire
     // laisserait les autres à zéro, sans erreur, pour toujours.
