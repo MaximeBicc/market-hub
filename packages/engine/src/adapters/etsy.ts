@@ -1498,10 +1498,26 @@ export class EtsyAdapter implements MarketplaceAdapter {
     const id = listing.remoteId;
     if (!id) throw new Error("Etsy : annonce sans identifiant distant");
 
+    /*
+     * LA POLITIQUE DE RETOUR ACCOMPAGNE L'ACTIVATION.
+     *
+     * Un brouillon né sans elle — créé avant que l'outil l'exige, ou importé
+     * — reste refusé à l'activation (« /return/policy : cannot be null »)
+     * même une fois le réglage renseigné : le PATCH n'envoyait que l'état,
+     * rien ne posait jamais la politique sur l'annonce existante. La joindre
+     * ici répare ces annonces-là au moment précis où l'on essaie de les
+     * mettre en vente. Inutile à la désactivation, et jamais envoyée vide.
+     */
+    const retour = ctx.credentials?.["returnPolicyId"];
     try {
       await this.call(ctx, `/shops/${this.shopId(ctx)}/listings/${id}`, {
         method: "PATCH",
-        form: { state },
+        form: {
+          state,
+          ...(state === "active" && retour
+            ? { return_policy_id: String(retour) }
+            : {}),
+        },
       });
     } catch (e) {
       /*

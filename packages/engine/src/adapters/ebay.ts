@@ -461,6 +461,29 @@ function aspectsCommuns(
   return Object.keys(sortie).length > 0 ? sortie : undefined;
 }
 
+/**
+ * La galerie d'un groupe : les photos du produit ET celles des coloris.
+ *
+ * Quand l'axe-image est déclaré (`aspectsImageVariesBy`), eBay exige une
+ * image pour CHAQUE valeur de l'axe dans la galerie DU GROUPE — les photos
+ * posées sur les articles ne comptent pas pour cette règle. Ne mettre que
+ * les photos du parent faisait donc refuser un groupe dont chaque coloris
+ * avait pourtant sa photo, avec un message qui parle d'images sans dire où
+ * les mettre. Dédupliquée, parce qu'une photo de coloris peut déjà être
+ * dans la galerie du parent.
+ */
+function galerieGroupe(
+  product: Product,
+  unites: ReadonlyArray<{ imageUrl?: string | undefined }>,
+): string[] {
+  return [
+    ...new Set([
+      ...(product.images ?? []),
+      ...unites.map((u) => u.imageUrl).filter((u): u is string => Boolean(u)),
+    ]),
+  ];
+}
+
 type Preparation =
   | {
       ok: true;
@@ -1747,7 +1770,7 @@ export class EbayAdapter implements MarketplaceAdapter {
           body: JSON.stringify({
             title: product.title.slice(0, TITRE_MAX),
             description: product.description ?? product.title,
-            imageUrls: product.images ?? [],
+            imageUrls: galerieGroupe(product, prep.unites),
             // Remplacement COMPLET : la liste envoyée devient la liste du
             // groupe. Un SKU omis est un SKU détaché.
             variantSKUs: prep.unites.map((u) => u.sku),
@@ -2598,7 +2621,7 @@ export class EbayAdapter implements MarketplaceAdapter {
           body: JSON.stringify({
             title: product.title.slice(0, TITRE_MAX),
             description: product.description ?? product.title,
-            imageUrls: product.images ?? [],
+            imageUrls: galerieGroupe(product, prep.unites),
             variantSKUs: prep.unites.map((u) => u.sku),
             ...(communs ? { aspects: communs } : {}),
             variesBy: {

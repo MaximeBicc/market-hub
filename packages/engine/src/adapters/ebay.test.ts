@@ -834,6 +834,64 @@ describe("réparer une annonce refusée pour caractéristique manquante", () => 
   });
 });
 
+describe("galerie d'un groupe à photos par coloris", () => {
+  it("joint les photos des coloris à la galerie du groupe, sans doublon", async () => {
+    /*
+     * Quand chaque coloris a sa photo, l'axe-image est déclaré — et eBay
+     * exige alors une image PAR VALEUR DE L'AXE dans la galerie du GROUPE.
+     * Les photos posées sur les articles ne comptent pas pour cette règle :
+     * n'envoyer que celles du parent faisait refuser un groupe pourtant
+     * complet, avec un message qui parle d'images sans dire où les mettre.
+     */
+    const produit: Product = {
+      id: "p1",
+      sku: "GRP-1",
+      title: "Clip",
+      price: { amount: 599, currency: "EUR" },
+      stock: 12,
+      condition: "new",
+      images: ["https://ex.fr/parent.jpg", "https://ex.fr/noir.jpg"],
+      options: [{ name: "Couleur", values: ["Noir", "Vert"] }],
+      variants: [
+        {
+          ...variante("couleur=noir", ["Noir"], "GRP-1-N"),
+          imageUrl: "https://ex.fr/noir.jpg",
+        },
+        {
+          ...variante("couleur=vert", ["Vert"], "GRP-1-V"),
+          imageUrl: "https://ex.fr/vert.jpg",
+        },
+      ],
+    };
+    const { http, sent } = fakeHttp([
+      { status: 404, body: {} }, // SKU 1 libre
+      { status: 404, body: {} }, // SKU 2 libre
+      { status: 404, body: {} }, // groupe libre
+      { status: 204, body: {} }, // item 1
+      { status: 204, body: {} }, // item 2
+      { status: 204, body: {} }, // groupe
+      { body: { offerId: "o1" } },
+      { body: { offerId: "o2" } },
+    ]);
+
+    await adapter.createListing(
+      ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }),
+      produit,
+      "i",
+    );
+
+    // Le PUT, pas la sonde d'existence : les deux visent la même URL.
+    const groupe = sent.find(
+      (a) => a.method === "PUT" && a.url.includes("/inventory_item_group/"),
+    );
+    expect(groupe?.body.imageUrls).toEqual([
+      "https://ex.fr/parent.jpg",
+      "https://ex.fr/noir.jpg", // déjà dans la galerie : pas dupliquée
+      "https://ex.fr/vert.jpg", // celle qui manquait
+    ]);
+  });
+});
+
 describe("stock d'une déclinaison", () => {
   /**
    * eBay tient son stock PAR ARTICLE D'INVENTAIRE, donc par SKU, même à

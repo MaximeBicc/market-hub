@@ -967,6 +967,28 @@ describe("déclarations obligatoires", () => {
     expect(sent2).toHaveLength(0);
   });
 
+  it("répare à l'activation un brouillon né sans politique de retour", async () => {
+    /*
+     * Le brouillon a été créé AVANT que l'outil exige la politique — le cas
+     * réel : l'annonce 4564650504, draftée sans, refusée à l'activation même
+     * une fois le réglage renseigné, parce que le PATCH n'envoyait que
+     * l'état. La politique doit accompagner l'activation, et jamais la
+     * désactivation.
+     */
+    const { http, sent } = fakeHttp([{ body: {} }, { body: {} }]);
+    const ctx = ctxWith(http, PUBLIABLE);
+
+    await adapter.activateListing(ctx, annonce, "i");
+    const actif = form(sent[0]?.raw ?? null);
+    expect(actif["state"]).toBe("active");
+    expect(actif["return_policy_id"]).toBe("rp1");
+
+    await adapter.deactivateListing(ctx, annonce, "i");
+    const inactif = form(sent[1]?.raw ?? null);
+    expect(inactif["state"]).toBe("inactive");
+    expect(inactif["return_policy_id"]).toBeUndefined();
+  });
+
   it("refuse AVANT d'écrire un article qui n'entre dans aucune catégorie Etsy", async () => {
     /*
      * LE REFUS QU'ETSY N'EXPLIQUE PAS.
