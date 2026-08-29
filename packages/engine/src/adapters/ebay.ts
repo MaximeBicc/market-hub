@@ -443,15 +443,34 @@ function quantiteVariante(v: Variant): number | null {
  * que le produit porte sous `marketplaceData.ebayAspects`, et seulement s'il
  * a la forme attendue.
  */
-function aspectsCommuns(
+export function aspectsCommuns(
   product: Product,
 ): Record<string, string[]> | undefined {
   const brut = product.marketplaceData?.["ebayAspects"];
   if (!brut || typeof brut !== "object" || Array.isArray(brut)) return undefined;
 
+  /*
+   * UN AXE DE DÉCLINAISON N'EST JAMAIS UN ASPECT COMMUN.
+   *
+   * L'écran des caractéristiques liste tout ce que la catégorie exige — y
+   * compris « Couleur » quand la catégorie la demande. Or si Couleur est
+   * l'axe du groupe, sa valeur VARIE par article : chaque déclinaison porte
+   * la sienne, et le groupe la déclare dans `variesBy`. Envoyer en plus
+   * « Couleur : Blanc » comme aspect PARTAGÉ contredit l'axe — eBay refuse
+   * alors le groupe entier, sur une saisie que l'écran avait lui-même
+   * invitée. On écarte donc tout aspect qui porte le nom d'un axe : sa
+   * valeur vraie est déjà dans les déclinaisons.
+   */
+  const axes = new Set(
+    (product.options ?? [])
+      .map((o) => (o.name ? nomAspect(o.name).toLowerCase() : ""))
+      .filter(Boolean),
+  );
+
   const sortie: Record<string, string[]> = {};
   for (const [nom, valeur] of Object.entries(brut as Record<string, unknown>)) {
     const cle = nomAspect(nom);
+    if (axes.has(cle.toLowerCase())) continue;
     const valeurs = (Array.isArray(valeur) ? valeur : [valeur])
       .filter((v): v is string | number => typeof v === "string" || typeof v === "number")
       .map((v) => valeurAspect(String(v)))

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EbayAdapter, ebayConsentUrl } from "./ebay.js";
+import { aspectsCommuns, EbayAdapter, ebayConsentUrl } from "./ebay.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 import type { Listing, Product, Variant } from "../domain/types.js";
 
@@ -925,6 +925,39 @@ describe("réparer une annonce refusée pour caractéristique manquante", () => 
       adapter.activateListing(ctxWith(http), annonce, "i", fiche),
     ).rejects.toThrow();
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe("aspects communs face aux axes de variation", () => {
+  it("écarte du groupe l'aspect qui porte le nom d'un axe", () => {
+    /*
+     * LE CAS RÉEL : l'écran des caractéristiques liste « Couleur » parce que
+     * la catégorie l'exige — et l'utilisateur la remplit (« Blanc »), alors
+     * que Couleur est l'AXE du groupe. Un aspect partagé qui contredit l'axe
+     * fait refuser le groupe entier par eBay, sur une saisie que l'écran
+     * avait lui-même invitée. La valeur vraie vit dans les déclinaisons.
+     */
+    const produit: Product = {
+      id: "p1",
+      sku: "GRP-1",
+      title: "Clip",
+      price: { amount: 599, currency: "EUR" },
+      stock: 12,
+      options: [{ name: "Couleur", values: ["Noir", "Vert", "Blanc"] }],
+      marketplaceData: {
+        ebayAspects: {
+          Marque: "Sans marque/Générique",
+          Type: "Magnétique",
+          Couleur: "Blanc",
+          Fixation: "Magnétique",
+        },
+      },
+    };
+    expect(aspectsCommuns(produit)).toEqual({
+      Marque: ["Sans marque/Générique"],
+      Type: ["Magnétique"],
+      Fixation: ["Magnétique"],
+    });
   });
 });
 

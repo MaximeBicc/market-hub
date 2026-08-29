@@ -550,19 +550,33 @@ accounts.post("/:id/reconnecter", async (c) => {
     });
   }
 
-  if (account.marketplace === "etsy" || account.marketplace === "shopify") {
+  if (account.marketplace === "shopify") {
     /*
-     * Ces deux-là passent par le parcours OAuth générique, qui sait déjà
-     * retrouver une boutique existante. On rend simplement l'adresse.
+     * UNE APPLICATION PERSONNALISÉE NE SE « RECONNECTE » PAS.
+     *
+     * Cette boutique est reliée par une application créée dans son propre
+     * admin Shopify : le jeton est permanent, et les autorisations qu'on
+     * coche s'appliquent à CE jeton dès qu'on clique « Mettre à jour
+     * l'application » — il n'existe aucun consentement à refaire. Le bouton
+     * envoyait pourtant vers le parcours OAuth public, qui exige une clé
+     * d'application (SHOPIFY_API_KEY) que cette installation n'a pas :
+     * Shopify répondait « application_cannot_be_found, api_key undefined »,
+     * une page d'erreur pour un geste qui n'avait pas lieu d'être.
      */
+    return c.json(
+      {
+        error:
+          "Cette boutique Shopify est reliée par une application personnalisée : il n'y a pas de consentement à refaire. Les autorisations ajoutées s'appliquent au jeton actuel dès que tu cliques « Mettre à jour l'application » dans Shopify (Paramètres → Applications → ton app). Ensuite, « Tester » ou relance simplement la publication.",
+      },
+      400,
+    );
+  }
+
+  if (account.marketplace === "etsy") {
+    // Etsy passe par le parcours OAuth générique, qui sait retrouver une
+    // boutique existante. On rend simplement l'adresse.
     const base = c.env.APP_URL.replace(/\/+$/, "");
-    const domaine = creds["shopDomain"];
-    return c.json({
-      url:
-        account.marketplace === "shopify" && domaine
-          ? `${base}/api/oauth/shopify/start?shop=${encodeURIComponent(domaine)}`
-          : `${base}/api/oauth/${account.marketplace}/start`,
-    });
+    return c.json({ url: `${base}/api/oauth/etsy/start` });
   }
 
   return c.json(
