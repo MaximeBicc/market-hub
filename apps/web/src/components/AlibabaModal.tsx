@@ -132,6 +132,62 @@ function axeParDefaut(declinaisons: DeclinaisonAlibaba[], axes: string[]): numbe
  * ici, parce qu'elles n'existent pas chez le fournisseur : les photos qu'on
  * garde, le prix auquel on vend, et le stock qu'on possède.
  */
+/**
+ * OUVRIR CHATGPT AVEC LA CONSIGNE DÉJÀ ÉCRITE.
+ *
+ * ChatGPT ne sait pas aller chercher une image par son adresse : il faut la
+ * lui déposer. Ce lien ne fait donc PAS de miracle — il ouvre la conversation
+ * avec la consigne rédigée et l'adresse sous la main, pour n'avoir plus qu'à
+ * glisser l'image. Le bouton voisin copie l'adresse, parce que c'est le geste
+ * qui manque le plus souvent.
+ *
+ * Prétendre transmettre la photo aurait été plus élégant et faux : le lien
+ * s'ouvrirait sur une conversation vide et on chercherait pourquoi.
+ */
+function lienChatGPT(url: string, quoi: string): string {
+  const consigne = [
+    `Voici une photo produit (${quoi}) que je vends en ligne.`,
+    "Je vais te la déposer juste après ce message.",
+    "Retouche-la pour une fiche produit : fond net, cadrage centré, lumière homogène.",
+    "Rends-la au format carré, en haute définition.",
+    "",
+    `Adresse de l'original : ${url}`,
+  ].join(String.fromCharCode(10));
+  return `https://chatgpt.com/?q=${encodeURIComponent(consigne)}`;
+}
+
+/** Les deux gestes qu'on répète sur chaque photo : ouvrir, et copier. */
+function OutilsPhoto({ url, quoi }: { url: string; quoi: string }) {
+  return (
+    <span className="photo-outils">
+      <a
+        className="photo-outil"
+        href={lienChatGPT(url, quoi)}
+        target="_blank"
+        rel="noreferrer"
+        title="Ouvrir ChatGPT avec la consigne de retouche déjà écrite — l'image reste à déposer"
+        onClick={(e) => e.stopPropagation()}
+      >
+        Retoucher
+      </a>
+      <button
+        type="button"
+        className="photo-outil"
+        title="Copier l'adresse de l'image"
+        onClick={(e) => {
+          e.stopPropagation();
+          void navigator.clipboard
+            .writeText(url)
+            .then(() => toast("Adresse copiée"))
+            .catch(() => toast("Copie impossible"));
+        }}
+      >
+        Copier
+      </button>
+    </span>
+  );
+}
+
 export function AlibabaModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
 
@@ -140,6 +196,41 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
   const [erreur, setErreur] = useState<string | null>(null);
 
   const [photos, setPhotos] = useState<Set<string>>(new Set());
+  /*
+   * DEUX ORIGINES, DEUX ZONES.
+   *
+   * Les photos du fournisseur et celles qu'on fabrique soi-même ne se
+   * traitent pas pareil : les premières se trient, les secondes s'ajoutent
+   * une par une et se retirent. Les mélanger dans une seule grille rendait
+   * impossible de savoir laquelle on peut refaire — et laquelle porte encore
+   * le filigrane du fournisseur.
+   */
+  const [miennes, setMiennes] = useState<string[]>([]);
+  const [saisie, setSaisie] = useState("");
+  /** Une photo de remplacement par coloris, indexée par sa clé d'option. */
+  const [photosColoris, setPhotosColoris] = useState<Record<string, string>>({});
+
+  /**
+   * Ajoute une photo à soi, en refusant ce qui ne marchera pas.
+   *
+   * Les plateformes VONT CHERCHER l'image à cette adresse : une adresse
+   * locale, en HTTP simple ou déjà présente ne produirait pas d'erreur ici,
+   * mais une annonce sans photo là-bas. Autant le dire tout de suite.
+   */
+  function ajouterMienne() {
+    const url = saisie.trim();
+    if (!url) return;
+    if (!/^https:\/\//i.test(url)) {
+      toast("L'adresse doit commencer par https:// — les plateformes vont la chercher elles-mêmes.");
+      return;
+    }
+    if (miennes.includes(url) || photos.has(url)) {
+      toast("Cette photo est déjà là.");
+      return;
+    }
+    setMiennes((l) => [...l, url]);
+    setSaisie("");
+  }
   const [prixCommun, setPrixCommun] = useState("");
   const [choix, setChoix] = useState<Record<string, Choix>>({});
   /** Les groupes ouverts. Tout est replié au départ : on voit la structure
@@ -221,7 +312,16 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
             .join(""),
           categorie: fiche.categorie,
           lien: fiche.lien,
-          images: fiche.images.filter((u) => photos.has(u)),
+          /*
+           * Les siennes APRÈS celles du fournisseur : la première photo de la
+           * liste devient l'image principale chez les trois plateformes, et
+           * une retouche vaut mieux qu'un original — mais seulement si elle
+           * existe. On ne réordonne donc pas, on concatène.
+           */
+          images: [
+            ...fiche.images.filter((u) => photos.has(u)),
+            ...miennes,
+          ],
           prixVente: commun,
           coutDebarque: fiche.coutDebarqueUnitaire,
           axes: fiche.axes,
@@ -232,7 +332,9 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
               nom: d.nom,
               optionKey: d.optionKey,
               optionValues: d.optionValues,
-              image: d.image,
+              // La photo qu'on a fabriquée l'emporte : une variante n'en
+              // porte qu'une, et c'est celle qu'on a choisie qui doit partir.
+              image: photosColoris[d.optionKey] || d.image,
               // Un prix laissé vide suit le prix commun : c'est le cas
               // ordinaire, et forcer une saisie par coloris serait pénible.
               prixVente: c.prix.trim() ? centimes(c.prix) : commun,
@@ -469,40 +571,103 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                 </p>
               )}
 
-              {/* Les photos : toutes montrées, à décocher */}
+              {/* ── Zone 1 : ce que le fournisseur fournit ── */}
               <div className="field">
                 <label className="field__label">
-                  Photos — {photos.size} retenue{photos.size > 1 ? "s" : ""} sur{" "}
-                  {fiche.images.length}
+                  Photos du fournisseur — {photos.size} retenue
+                  {photos.size > 1 ? "s" : ""} sur {fiche.images.length}
                 </label>
+                <p className="row__s photos-note">
+                  Elles portent souvent le filigrane du fournisseur. « Retoucher »
+                  ouvre ChatGPT avec la consigne prête ; l'image reste à y
+                  déposer, il ne sait pas la chercher par son adresse.
+                </p>
                 <div className="photos-grille">
                   {fiche.images.map((url) => {
                     const prise = photos.has(url);
                     return (
-                      <button
-                        type="button"
+                      <div
                         key={url}
                         className={`photo-choix ${prise ? "photo-choix--prise" : ""}`}
-                        title={prise ? "Retirer cette photo" : "Reprendre cette photo"}
-                        onClick={() =>
-                          setPhotos((s) => {
-                            const n = new Set(s);
-                            if (n.has(url)) n.delete(url);
-                            else n.add(url);
-                            return n;
-                          })
-                        }
                       >
-                        <img
-                          src={vignette(url)}
-                          alt=""
-                          loading="lazy"
-                          title={url}
-                        />
-                        {prise && <span className="photo-choix__coche">✓</span>}
-                      </button>
+                        <button
+                          type="button"
+                          className="photo-choix__image"
+                          title={
+                            prise ? "Retirer cette photo" : "Reprendre cette photo"
+                          }
+                          onClick={() =>
+                            setPhotos((s) => {
+                              const n = new Set(s);
+                              if (n.has(url)) n.delete(url);
+                              else n.add(url);
+                              return n;
+                            })
+                          }
+                        >
+                          <img src={vignette(url)} alt="" loading="lazy" title={url} />
+                          {prise && <span className="photo-choix__coche">✓</span>}
+                        </button>
+                        <OutilsPhoto url={url} quoi={fiche.titre} />
+                      </div>
                     );
                   })}
+                </div>
+              </div>
+
+              {/* ── Zone 2 : ce qu'on fabrique soi-même ── */}
+              <div className="field">
+                <label className="field__label">
+                  Mes photos — {miennes.length} ajoutée
+                  {miennes.length > 1 ? "s" : ""}
+                </label>
+                <p className="row__s photos-note">
+                  Collez ici l'adresse d'une image retouchée. Elle passera après
+                  celles du fournisseur, et partira telle quelle sur les trois
+                  boutiques — l'adresse doit donc rester accessible en HTTPS.
+                </p>
+                {miennes.length > 0 && (
+                  <div className="photos-grille">
+                    {miennes.map((url) => (
+                      <div key={url} className="photo-choix photo-choix--prise">
+                        <span className="photo-choix__image">
+                          <img src={url} alt="" loading="lazy" title={url} />
+                          <span className="photo-choix__coche">✓</span>
+                        </span>
+                        <button
+                          type="button"
+                          className="photo-outil photo-outil--retirer"
+                          title="Retirer cette photo"
+                          onClick={() =>
+                            setMiennes((l) => l.filter((x) => x !== url))
+                          }
+                        >
+                          Retirer
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <input
+                    type="url"
+                    className="input"
+                    placeholder="https://… adresse de l'image retouchée"
+                    value={saisie}
+                    onChange={(e) => setSaisie(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      ajouterMienne();
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    onClick={ajouterMienne}
+                  >
+                    Ajouter
+                  </button>
                 </div>
               </div>
 
@@ -819,7 +984,24 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                                   })
                                 }
                               />
-                              {d.image ? (
+                              {photosColoris[d.optionKey] ? (
+                                /*
+                                 * LA MIENNE L'EMPORTE, ET SE VOIT.
+                                 *
+                                 * Une variante ne porte qu'UNE image : la
+                                 * sienne remplace celle du fournisseur plutôt
+                                 * que de s'y ajouter. Le liseré dit laquelle
+                                 * partira — sans lui, deux vignettes presque
+                                 * identiques laisseraient le doute.
+                                 */
+                                <img
+                                  className="decl-import__mienne"
+                                  src={photosColoris[d.optionKey]}
+                                  alt=""
+                                  loading="lazy"
+                                  title={`Ma photo : ${photosColoris[d.optionKey]}`}
+                                />
+                              ) : d.image ? (
                                 <img
                                   src={vignette(d.image)}
                                   alt=""
@@ -836,6 +1018,47 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                                     revient {money(d.coutDebarque)}
                                   </span>
                                 )}
+                                {/*
+                                  * Les mêmes gestes que sur les photos du
+                                  * produit, au niveau du coloris : retoucher
+                                  * l'originale, puis coller l'adresse du
+                                  * résultat. « Reprendre » revient à celle du
+                                  * fournisseur — on ne s'enferme pas dans un
+                                  * choix qu'on ne saurait plus défaire.
+                                  */}
+                                <span className="decl-photo">
+                                  {d.image && (
+                                    <OutilsPhoto url={d.image} quoi={d.nom} />
+                                  )}
+                                  <input
+                                    type="url"
+                                    className="input decl-photo__champ"
+                                    placeholder="https://… ma photo"
+                                    value={photosColoris[d.optionKey] ?? ""}
+                                    onChange={(e) =>
+                                      setPhotosColoris((m) => ({
+                                        ...m,
+                                        [d.optionKey]: e.target.value.trim(),
+                                      }))
+                                    }
+                                  />
+                                  {photosColoris[d.optionKey] && (
+                                    <button
+                                      type="button"
+                                      className="photo-outil"
+                                      title="Revenir à la photo du fournisseur"
+                                      onClick={() =>
+                                        setPhotosColoris((m) => {
+                                          const n = { ...m };
+                                          delete n[d.optionKey];
+                                          return n;
+                                        })
+                                      }
+                                    >
+                                      Reprendre
+                                    </button>
+                                  )}
+                                </span>
                               </div>
                               <input
                                 type="text"
