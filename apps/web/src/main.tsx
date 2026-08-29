@@ -31,6 +31,29 @@ const updateSW = registerSW({
   onNeedRefresh() {
     window.dispatchEvent(new CustomEvent("sw:update-available"));
   },
+  /*
+   * CHERCHER LA MISE À JOUR PLUS D'UNE FOIS.
+   *
+   * Le service worker ne vérifiait qu'à l'enregistrement — c'est-à-dire au
+   * tout premier chargement de l'onglet. Une application ouverte depuis des
+   * heures, ou rouverte depuis l'écran d'accueil sans que l'onglet soit
+   * détruit, ne voyait jamais la bannière : on servait l'ancienne version en
+   * annonçant une fonctionnalité livrée. C'est arrivé — un bouton pourtant
+   * présent dans le paquet déployé restait invisible.
+   *
+   * Deux déclencheurs qui couvrent les deux usages : le retour sur l'onglet,
+   * et une vérification périodique pour une fenêtre laissée ouverte.
+   */
+  onRegisteredSW(_url, registration) {
+    if (!registration) return;
+    const verifier = () => void registration.update().catch(() => {});
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") verifier();
+    });
+    // Un quart d'heure : assez rare pour ne rien coûter, assez fréquent pour
+    // qu'un correctif déployé pendant l'usage se propose de lui-même.
+    setInterval(verifier, 15 * 60 * 1000);
+  },
 });
 window.addEventListener("sw:apply-update", () => void updateSW(true));
 
