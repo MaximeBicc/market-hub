@@ -129,8 +129,14 @@ const PRECONDITIONS: Partial<Record<MarketplaceId, Precondition[]>> = {
   etsy: [
     {
       capacite: "listingCreate",
-      cles: ["shippingProfileId", "readinessStateId"],
-      ou: "Etsy impose un profil de livraison et un délai de préparation, tous deux à créer dans les réglages de la boutique. La catégorie, elle, se choisit produit par produit dans l'onglet Publier — un porte-clés et une bougie ne vont pas au même endroit.",
+      /*
+       * La politique de retour est du lot depuis qu'Etsy l'exige à
+       * l'activation : sans elle le brouillon se crée, la facture tombe,
+       * puis la mise en vente échoue sur « /return/policy : cannot be
+       * null ». La précondition doit fermer AVANT la facture.
+       */
+      cles: ["shippingProfileId", "readinessStateId", "returnPolicyId"],
+      ou: "Etsy impose un profil de livraison, un délai de préparation et une politique de retour, tous trois à créer dans les réglages de la boutique Etsy puis à choisir ici. La catégorie, elle, se choisit produit par produit dans l'onglet Publier — un porte-clés et une bougie ne vont pas au même endroit.",
     },
   ],
 };

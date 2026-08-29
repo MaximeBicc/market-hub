@@ -629,12 +629,36 @@ export class MarketplaceOrchestrator {
         };
       }
 
+      /*
+       * La fiche accompagne l'activation pour qu'un module puisse RÉPARER un
+       * article distant resté incomplet — créé avant que la caractéristique
+       * manquante soit renseignée. Introuvable, elle vaut undefined : le
+       * module publie sans filet, comme avant.
+       *
+       * Les variantes actives sont jointes, comme à la création : réparer un
+       * groupe eBay réécrit sa liste de déclinaisons, et une fiche nue la
+       * REMPLACERAIT par rien.
+       */
+      let produit: Product | undefined;
+      if (input.active) {
+        const brut = await this.products.get(input.productId);
+        if (brut) {
+          const actives = (
+            await this.variants.listByProduct(input.productId)
+          ).filter((v) => v.status === "active");
+          produit = {
+            ...brut,
+            ...(actives.length > 0 ? { variants: actives } : {}),
+          };
+        }
+      }
+
       const resultats: TargetResult[] = [];
       for (const l of listings) {
         const cle = `${input.idempotencyKey}:${ctx.account.id}:${l.id}`;
         resultats.push(
           input.active
-            ? await adapter.activateListing(ctx, l, cle)
+            ? await adapter.activateListing(ctx, l, cle, produit)
             : await adapter.deactivateListing(ctx, l, cle),
         );
         const dernier = resultats[resultats.length - 1]!;

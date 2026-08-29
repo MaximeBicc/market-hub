@@ -44,6 +44,7 @@ const EBAY_COMPLET = {
 const ETSY_COMPLET = {
   shippingProfileId: "sp1",
   readinessStateId: "rs1",
+  returnPolicyId: "rp1",
 };
 
 describe("catalogue des commandes", () => {
@@ -139,7 +140,11 @@ describe("préconditions Etsy", () => {
 
     expect(r.etat).toBe("bloquee");
     if (r.etat !== "bloquee") return;
-    expect(r.manque).toEqual(["shippingProfileId", "readinessStateId"]);
+    expect(r.manque).toEqual([
+      "shippingProfileId",
+      "readinessStateId",
+      "returnPolicyId",
+    ]);
   });
 
   it("s'ouvre dès que les trois sont là — accordé avec l'adaptateur", async () => {

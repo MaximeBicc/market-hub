@@ -740,6 +740,100 @@ function variante(optionKey: string, valeurs: string[], sku?: string): Variant {
   };
 }
 
+describe("réparer une annonce refusée pour caractéristique manquante", () => {
+  const annonce: Listing = {
+    id: "l-rep",
+    productId: "p1",
+    accountId: "acc-ebay",
+    remoteId: "SKU-REP",
+    status: "inactive",
+    price: { amount: 599, currency: "EUR" },
+    stock: 12,
+    marketplaceData: { offerId: "off-rep" },
+  };
+  const fiche: Product = {
+    id: "p1",
+    sku: "SKU-REP",
+    title: "Clip range câble",
+    price: { amount: 599, currency: "EUR" },
+    stock: 12,
+    condition: "new",
+    images: ["https://exemple.fr/p.jpg"],
+    marketplaceData: { ebayAspects: { Marque: "Sans marque" } },
+  };
+
+  it("réécrit l'article avec les caractéristiques puis republie, une fois", async () => {
+    /*
+     * LE PIÈGE DU BROUILLON NÉ INCOMPLET.
+     *
+     * L'article a été créé chez eBay AVANT que « Marque » soit renseignée.
+     * eBay refuse le publish en 25002 — et rejouer l'activation rejouait le
+     * même refus pour toujours : rien ne réécrivait jamais l'article distant.
+     * Le seul débouché était de supprimer le brouillon à la main chez eBay.
+     *
+     * Attendu : publish (refusé 25002) → PUT de l'article AVEC les
+     * caractéristiques de la fiche → second publish, réussi.
+     */
+    const { http, sent } = fakeHttp([
+      {
+        status: 400,
+        body: {
+          errors: [
+            {
+              errorId: 25002,
+              message: "La caractéristique de l'objet Marque est manquante.",
+            },
+          ],
+        },
+      },
+      { status: 204, body: {} },
+      { body: { listingId: "9988" } },
+    ]);
+
+    const r = await adapter.activateListing(ctxWith(http), annonce, "i", fiche);
+
+    expect(r.status).toBe("success");
+    expect(r.remoteId).toBe("9988");
+    expect(sent.map((a) => a.method)).toEqual(["POST", "PUT", "POST"]);
+    expect(sent[1]?.url).toContain("/inventory_item/SKU-REP");
+    expect(sent[1]?.body.product.aspects).toEqual({
+      Marque: ["Sans marque"],
+    });
+    // La quantité réécrite est celle de l'ANNONCE, pas un zéro par défaut.
+    expect(
+      sent[1]?.body.availability.shipToLocationAvailability.quantity,
+    ).toBe(12);
+  });
+
+  it("sans la fiche, le refus est rendu tel quel — pas de réécriture aveugle", async () => {
+    const { http, sent } = fakeHttp([
+      {
+        status: 400,
+        body: { errors: [{ errorId: 25002, message: "Marque manquante" }] },
+      },
+    ]);
+    await expect(
+      adapter.activateListing(ctxWith(http), annonce, "i"),
+    ).rejects.toThrow(/Marque/);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("un refus qui n'est PAS un 25002 n'est jamais « réparé »", async () => {
+    // Réécrire l'article sur n'importe quel refus transformerait une panne
+    // passagère en écriture non demandée chez le marchand.
+    const { http, sent } = fakeHttp([
+      {
+        status: 400,
+        body: { errors: [{ errorId: 25001, message: "Autre refus" }] },
+      },
+    ]);
+    await expect(
+      adapter.activateListing(ctxWith(http), annonce, "i", fiche),
+    ).rejects.toThrow();
+    expect(sent).toHaveLength(1);
+  });
+});
+
 describe("stock d'une déclinaison", () => {
   /**
    * eBay tient son stock PAR ARTICLE D'INVENTAIRE, donc par SKU, même à

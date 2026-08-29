@@ -91,6 +91,9 @@ const PUBLIABLE = {
   readinessStateId: "rs1",
   taxonomyId: "1234",
   productionPartnerId: "pp1",
+  // Exigée à l'ACTIVATION par Etsy — l'oublier du décor referait passer au
+  // vert un chemin qui échoue en production après la facture du brouillon.
+  returnPolicyId: "rp1",
 };
 
 const annonce: Listing = {
@@ -935,6 +938,33 @@ describe("déclarations obligatoires", () => {
 
     expect(repete.status).toBe(vrai.status);
     expect(repete.message).toBe(vrai.message);
+  });
+
+  it("envoie la politique de retour dès le brouillon", async () => {
+    /*
+     * Etsy accepte un brouillon sans politique de retour, puis refuse son
+     * ACTIVATION (« /return/policy : cannot be null ») — après la facture.
+     * Le champ doit donc partir dès la création, et manquer doit bloquer
+     * AVANT toute écriture.
+     */
+    const { http, sent } = fakeHttp([{ body: { listing_id: 7 } }]);
+    await adapter.createListing(
+      ctxWith(http, PUBLIABLE),
+      { ...BASE, whoMade: "someone_else", whenMade: "2020_2026" },
+      "i",
+    );
+    expect(form(sent[0]?.raw ?? null)["return_policy_id"]).toBe("rp1");
+
+    const { returnPolicyId: _sans, ...sansRetour } = PUBLIABLE;
+    const { http: http2, sent: sent2 } = fakeHttp([]);
+    const r = await adapter.createListing(
+      ctxWith(http2, sansRetour),
+      { ...BASE, whoMade: "someone_else", whenMade: "2020_2026" },
+      "i",
+    );
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toMatch(/politique de retour/i);
+    expect(sent2).toHaveLength(0);
   });
 
   it("refuse AVANT d'écrire un article qui n'entre dans aucune catégorie Etsy", async () => {

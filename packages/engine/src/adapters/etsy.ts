@@ -675,7 +675,9 @@ export class EtsyAdapter implements MarketplaceAdapter {
      * Ce qui manque vraiment se dit à la création, produit par produit, avec
      * un message qui le nomme.
      */
-    const publiable = Boolean(c["shippingProfileId"] && c["readinessStateId"]);
+    const publiable = Boolean(
+      c["shippingProfileId"] && c["readinessStateId"] && c["returnPolicyId"],
+    );
     return {
       listingCreate: publiable,
       listingUpdate: true,
@@ -864,17 +866,33 @@ export class EtsyAdapter implements MarketplaceAdapter {
     const c = ctx.credentials ?? {};
     const shipping = c["shippingProfileId"];
     const readiness = c["readinessStateId"];
+    /*
+     * LA POLITIQUE DE RETOUR EST LE QUATRIÈME RÉGLAGE OBLIGATOIRE.
+     *
+     * Elle ne bloque pas la création du brouillon — c'est le piège : Etsy
+     * accepte le draft, encaisse le frais d'insertion à la mise en vente,
+     * puis refuse l'ACTIVATION avec « /return/policy : cannot be null ». Le
+     * refus arrive donc après la facture, sur un champ dont rien n'avait
+     * signalé l'absence. On l'exige ici, avant la moindre écriture, et on
+     * l'envoie dès le brouillon pour que l'activation n'ait rien à redire.
+     */
+    const retour = c["returnPolicyId"];
     const taxonomy =
       (product.marketplaceData?.["etsyTaxonomyId"] as string | undefined) ??
       c["taxonomyId"];
 
-    if (!shipping || !readiness || !taxonomy) {
+    if (!shipping || !readiness || !taxonomy || !retour) {
+      const manquent = [
+        !shipping && "un profil d'expédition",
+        !readiness && "un profil de traitement",
+        !taxonomy && "une catégorie",
+        !retour && "une politique de retour",
+      ].filter(Boolean);
       return {
         accountId: ctx.account.id,
         marketplace: ctx.account.marketplace,
         status: "manual_required",
-        message:
-          "Etsy exige un profil d'expédition, un profil de traitement et une catégorie avant toute création. Renseignez-les sur la boutique.",
+        message: `Etsy exige ${manquent.join(", ")} avant toute création. Renseignez-le(s) dans les Réglages de la boutique — la politique de retour se crée dans Etsy → Paramètres → Politiques, puis se choisit ici.`,
       };
     }
 
@@ -986,6 +1004,9 @@ export class EtsyAdapter implements MarketplaceAdapter {
           ...(partenaire ? { production_partner_ids: partenaire } : {}),
           shipping_profile_id: String(shipping),
           readiness_state_id: String(readiness),
+          // Sans elle, l'activation répond « /return/policy : cannot be
+          // null » — après le brouillon, donc après la facture.
+          return_policy_id: String(retour),
           ...((product.tags?.length ?? 0) > 0
             ? { tags: product.tags!.join(",") }
             : {}),
@@ -1738,7 +1759,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
       }
     };
 
-    const [livraison, preparation, partenaires] = await Promise.all([
+    const [livraison, preparation, partenaires, retours] = await Promise.all([
       lire<{
         results?: Array<{
           shipping_profile_id?: number;
@@ -1808,9 +1829,38 @@ export class EtsyAdapter implements MarketplaceAdapter {
           detail: p.location ?? "",
         })),
       ),
+      /*
+       * LES POLITIQUES DE RETOUR. Obligatoires à l'ACTIVATION d'une annonce
+       * physique — pas au brouillon, ce qui rend leur absence invisible
+       * jusqu'à la facture. Le refus d'Etsy (« /return/policy : cannot be
+       * null ») ne dit ni où la créer ni où la choisir.
+       */
+      lire<{
+        results?: Array<{
+          return_policy_id?: number;
+          accepts_returns?: boolean;
+          accepts_exchanges?: boolean;
+          return_deadline?: number;
+        }>;
+      }>(`/shops/${boutique}/policies/return`, (d) =>
+        (d.results ?? []).map((p) => ({
+          id: String(p.return_policy_id),
+          label: p.accepts_returns
+            ? `Retours acceptés sous ${p.return_deadline ?? "?"} jours`
+            : p.accepts_exchanges
+              ? "Échanges seulement"
+              : "Ni retour ni échange",
+        })),
+      ),
     ]);
 
     return [
+      {
+        key: "returnPolicyId",
+        label: "Politique de retour",
+        aide: "À créer dans votre boutique Etsy → Paramètres → Politiques. Obligatoire pour mettre en vente : sans elle, Etsy accepte le brouillon puis refuse l'activation.",
+        options: retours,
+      },
       {
         key: "productionPartnerId",
         label: "Partenaire de production",

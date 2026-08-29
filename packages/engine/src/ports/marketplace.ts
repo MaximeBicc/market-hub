@@ -129,10 +129,22 @@ export interface MarketplaceAdapter {
     unite?: Variant,
   ): Promise<TargetResult>;
 
+  /**
+   * Met l'annonce en vente.
+   *
+   * `product` est la fiche maîtresse, quand l'orchestrateur la connaît. Elle
+   * sert à RÉPARER : une annonce créée avant que la fiche soit complète —
+   * une caractéristique obligatoire ajoutée après coup — reste refusée par
+   * la plateforme tant que l'article distant n'est pas réécrit. Sans la
+   * fiche, le module ne peut que constater le refus ; avec elle, il peut
+   * réécrire puis retenter. Facultative, comme `unite` sur updateStock, et
+   * pour la même raison : le cœur fournit le contexte, le module traduit.
+   */
   activateListing(
     ctx: MarketplaceContext,
     listing: Listing,
     idempotencyKey: string,
+    product?: Product,
   ): Promise<TargetResult>;
 
   deactivateListing(

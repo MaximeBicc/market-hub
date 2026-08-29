@@ -1586,6 +1586,20 @@ export class EbayAdapter implements MarketplaceAdapter {
             title: product.title.slice(0, TITRE_MAX), // eBay tronque à 80 caractères
             description: product.description ?? product.title,
             imageUrls: product.images ?? [],
+            /*
+             * LES CARACTÉRISTIQUES SAISIES DOIVENT PARTIR, PAS SEULEMENT
+             * ÊTRE VÉRIFIÉES.
+             *
+             * Le pré-vol contrôlait que « Marque » était renseignée sur le
+             * produit — puis ce corps ne l'envoyait pas. Résultat : la
+             * vérification disait vert, et la mise en ligne échouait en
+             * 25002 sur la caractéristique que l'utilisateur venait
+             * pourtant de remplir. Un contrôle qui ne garde pas le même
+             * chemin que l'envoi finit toujours par mentir.
+             */
+            ...(aspectsCommuns(product)
+              ? { aspects: aspectsCommuns(product) }
+              : {}),
           },
         }),
       },
@@ -2476,6 +2490,7 @@ export class EbayAdapter implements MarketplaceAdapter {
     ctx: MarketplaceContext,
     listing: Listing,
     _idempotencyKey?: string,
+    product?: Product,
   ): Promise<TargetResult> {
     const forme = this.forme(listing);
     if (!forme) {
@@ -2487,36 +2502,51 @@ export class EbayAdapter implements MarketplaceAdapter {
       };
     }
 
-    if (forme.type === "groupe") {
-      const r = await this.call<{ listingId?: string }>(
-        ctx,
-        "/sell/inventory/v1/offer/publish_by_inventory_item_group",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            inventoryItemGroupKey: forme.cle,
-            marketplaceId: ctx.credentials?.["marketplaceId"] ?? "EBAY_FR",
-          }),
-        },
-      );
-      const listingId = r?.listingId ?? listing.remoteId;
-      const url = listingId
-        ? `https://www.${ctx.credentials?.["environment"] === "sandbox" ? "sandbox." : ""}ebay.fr/itm/${listingId}`
-        : undefined;
-      return this.ok(
-        ctx,
-        listingId,
-        "Annonce à déclinaisons publiée d'un seul tenant.",
-        listingId ? { listingId } : undefined,
-        url,
-      );
+    /*
+     * PUBLIER, ET SAVOIR SE RATTRAPER.
+     *
+     * L'article distant peut dater d'avant la fiche complète : créé sans
+     * « Marque », puis la caractéristique renseignée localement. Le publish
+     * échoue alors en 25002 — et rejouer l'activation rejouait exactement le
+     * même refus, pour toujours : rien ne réécrivait jamais l'article. Le
+     * seul débouché était de supprimer le brouillon chez eBay à la main.
+     *
+     * D'où ce second essai : sur un 25002, si la fiche est fournie, on
+     * réécrit l'article distant avec ce qu'elle porte MAINTENANT, puis on
+     * republie UNE fois. Un échec du second essai est rendu tel quel — il ne
+     * s'agit pas d'insister, mais de synchroniser puis retenter.
+     */
+    const publier = () =>
+      forme.type === "groupe"
+        ? this.call<{ listingId?: string }>(
+            ctx,
+            "/sell/inventory/v1/offer/publish_by_inventory_item_group",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                inventoryItemGroupKey: forme.cle,
+                marketplaceId: ctx.credentials?.["marketplaceId"] ?? "EBAY_FR",
+              }),
+            },
+          )
+        : this.call<{ listingId?: string }>(
+            ctx,
+            `/sell/inventory/v1/offer/${forme.offerId}/publish`,
+            { method: "POST" },
+          );
+
+    let r: { listingId?: string } | undefined;
+    try {
+      r = await publier();
+    } catch (err) {
+      const aspectManquant =
+        err instanceof EbayHttpError && err.codes.includes(25002);
+      if (!aspectManquant || !product) throw err;
+
+      await this.reecrireAspects(ctx, listing, forme, product);
+      r = await publier();
     }
 
-    const r = await this.call<{ listingId?: string }>(
-      ctx,
-      `/sell/inventory/v1/offer/${forme.offerId}/publish`,
-      { method: "POST" },
-    );
     const listingId = r?.listingId ?? listing.remoteId;
     const url = listingId
       ? `https://www.${ctx.credentials?.["environment"] === "sandbox" ? "sandbox." : ""}ebay.fr/itm/${listingId}`
@@ -2524,9 +2554,86 @@ export class EbayAdapter implements MarketplaceAdapter {
     return this.ok(
       ctx,
       listingId,
-      "Annonce publiée et visible sur eBay.",
+      forme.type === "groupe"
+        ? "Annonce à déclinaisons publiée d'un seul tenant."
+        : "Annonce publiée et visible sur eBay.",
       listingId ? { listingId } : undefined,
       url,
+    );
+  }
+
+  /**
+   * Réécrit ce qui porte les caractéristiques, et RIEN d'autre.
+   *
+   * Mono-SKU : les caractéristiques vivent sur `product.aspects` de
+   * l'article — un PUT est un remplacement complet, on renvoie donc le corps
+   * entier de la fiche. Groupe : elles vivent sur le groupe, dont le PUT
+   * réécrit aussi la liste des déclinaisons — d'où la fiche AVEC ses
+   * variantes, jointes par l'orchestrateur.
+   */
+  private async reecrireAspects(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    forme: NonNullable<ReturnType<EbayAdapter["forme"]>>,
+    product: Product,
+  ): Promise<void> {
+    const communs = aspectsCommuns(product);
+
+    if (forme.type === "groupe") {
+      const variantes = (product.variants ?? [])
+        .filter((v) => v.status === "active")
+        .slice()
+        .sort((a, b) => a.position - b.position);
+      const prep = preparerUnites(product, variantes);
+      if (!prep.ok) {
+        throw new Error(
+          `L'annonce refuse une caractéristique et le groupe ne peut pas être réécrit : ${prep.message}`,
+        );
+      }
+      await this.call(
+        ctx,
+        `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(forme.cle)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            title: product.title.slice(0, TITRE_MAX),
+            description: product.description ?? product.title,
+            imageUrls: product.images ?? [],
+            variantSKUs: prep.unites.map((u) => u.sku),
+            ...(communs ? { aspects: communs } : {}),
+            variesBy: {
+              ...(prep.axeImage
+                ? { aspectsImageVariesBy: [prep.axeImage] }
+                : {}),
+              specifications: prep.specifications,
+            },
+          }),
+        },
+      );
+      return;
+    }
+
+    const conditionEbay = product.condition
+      ? ETATS_EBAY[product.condition]
+      : undefined;
+    await this.call(
+      ctx,
+      `/sell/inventory/v1/inventory_item/${encodeURIComponent(listing.remoteId ?? product.sku)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          availability: {
+            shipToLocationAvailability: { quantity: listing.stock },
+          },
+          ...(conditionEbay ? { condition: conditionEbay } : {}),
+          product: {
+            title: product.title.slice(0, TITRE_MAX),
+            description: product.description ?? product.title,
+            imageUrls: product.images ?? [],
+            ...(communs ? { aspects: communs } : {}),
+          },
+        }),
+      },
     );
   }
 
