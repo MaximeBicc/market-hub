@@ -1614,3 +1614,60 @@ describe("une notification devient une vente", () => {
     expect(adapter.webhookSignaux()).toEqual([]);
   });
 });
+
+/*
+ * LA LECTURE DES RÉGLAGES DE BOUTIQUE.
+ *
+ * Ce qui est verrouillé ici n'est pas le contenu des menus mais la
+ * DISTINCTION entre leurs deux façons d'être vides. « Vous n'avez rien créé »
+ * et « Etsy nous a refusé la lecture » s'affichaient à l'identique, et le
+ * second envoyait le vendeur recréer chez Etsy ce qu'il y avait déjà.
+ */
+describe("réglages de boutique : vide par absence ou vide par refus", () => {
+  /** Un `fetch` qui répond selon le chemin, pour ne dépendre d'aucun ordre. */
+  function httpQuiRefuse(...chemins: string[]) {
+    return async (url: string) =>
+      chemins.some((c) => url.includes(c))
+        ? new Response(JSON.stringify({ error: "insufficient_scope" }), {
+            status: 403,
+            headers: { "Content-Type": "application/json" },
+          })
+        : new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+  }
+
+  it("nomme le refus au lieu de le faire passer pour une boutique vide", async () => {
+    const reglages = await adapter.listSettings(
+      ctxWith(httpQuiRefuse("/policies/return")),
+    );
+
+    const retour = reglages.find((r) => r.key === "returnPolicyId");
+    expect(retour?.options).toEqual([]);
+    expect(retour?.panne).toMatch(/403/);
+  });
+
+  it("ne signale aucune panne quand la lecture réussit et ne rapporte rien", async () => {
+    // Une boutique neuve est légitimement vide : l'aide « à créer chez Etsy »
+    // est alors la bonne consigne, et un avertissement serait un faux signal.
+    const reglages = await adapter.listSettings(ctxWith(httpQuiRefuse()));
+
+    for (const r of reglages) {
+      expect(r.options).toEqual([]);
+      expect(r.panne).toBeUndefined();
+    }
+  });
+
+  it("n'attribue le refus qu'à la lecture qui a échoué", async () => {
+    // Les quatre lectures sont indépendantes : une portée manquante sur les
+    // partenaires ne doit pas laisser croire que les trois autres ont échoué.
+    const reglages = await adapter.listSettings(
+      ctxWith(httpQuiRefuse("/production-partners")),
+    );
+
+    expect(reglages.filter((r) => r.panne).map((r) => r.key)).toEqual([
+      "productionPartnerId",
+    ]);
+  });
+});

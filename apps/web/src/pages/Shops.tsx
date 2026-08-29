@@ -1168,6 +1168,8 @@ interface Reglage {
   label: string;
   aide: string;
   options: Array<{ id: string; label: string; detail?: string }>;
+  /** Renseigné quand la liste est vide PARCE QUE la lecture a échoué. */
+  panne?: string;
 }
 
 /**
@@ -1256,7 +1258,25 @@ function Reglages({
       {(data?.reglages ?? []).map((r) => (
         <div className="field" key={r.key}>
           <label htmlFor={`r-${r.key}`}>{r.label}</label>
-          {r.options.length === 0 ? (
+          {r.options.length === 0 && r.panne ? (
+            /*
+             * UNE LISTE VIDE A DEUX CAUSES OPPOSÉES.
+             *
+             * « Rien à proposer — à créer chez la plateforme » était affiché
+             * dans les deux cas : celui du vendeur qui n'a rien créé, et
+             * celui du vendeur qui a TOUT créé mais dont la lecture a été
+             * refusée. Le second se voyait renvoyé refaire ce qu'il venait de
+             * faire, sans que rien ne lui dise que la panne était chez nous.
+             */
+            <div className="banner banner--warn" style={{ marginTop: 6 }}>
+              <span className="banner__t">Lecture refusée par la plateforme</span>
+              <span className="banner__b">
+                {r.panne} — la liste est donc vide ici, mais cela ne dit rien de
+                ce que contient votre boutique. Inutile d'aller y recréer quoi
+                que ce soit avant d'avoir levé ce refus.
+              </span>
+            </div>
+          ) : r.options.length === 0 ? (
             <div className="row__s" style={{ whiteSpace: "normal", lineHeight: 1.45 }}>
               Rien à proposer — {r.aide}
               {/* L'adresse d'expédition d'eBay est le seul objet qui n'existe

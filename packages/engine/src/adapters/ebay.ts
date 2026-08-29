@@ -2192,6 +2192,8 @@ export class EbayAdapter implements MarketplaceAdapter {
     const marketplaceId = ctx.credentials?.["marketplaceId"] ?? "EBAY_FR";
     const q = `?marketplace_id=${marketplaceId}`;
 
+    const pannes = new Map<string, string>();
+
     const lire = async <T>(
       chemin: string,
       extraire: (
@@ -2200,20 +2202,37 @@ export class EbayAdapter implements MarketplaceAdapter {
     ) => {
       try {
         return extraire(await this.call<T>(ctx, chemin));
-      } catch {
-        // Un refus se lit comme « rien à proposer » : le message d'aide
-        // couvre les deux cas, et un écran à moitié rempli vaut mieux qu'une
-        // page d'erreur.
+      } catch (err) {
+        /*
+         * UN REFUS N'EST PAS UNE ABSENCE.
+         *
+         * Ce catch affirmait que le message d'aide « couvre les deux cas ».
+         * Il ne les couvre pas : « À créer dans Seller Hub » envoie créer une
+         * règle à qui en a déjà une et à qui eBay a simplement refusé la
+         * lecture. On garde l'écran à moitié rempli plutôt qu'une page
+         * d'erreur, mais on retient la cause pour que le menu vide la nomme.
+         */
+        pannes.set(
+          chemin,
+          err instanceof Error ? err.message : "eBay n'a pas répondu.",
+        );
         return [];
       }
     };
+
+    const CHEMINS = {
+      livraison: `/sell/account/v1/fulfillment_policy${q}`,
+      paiement: `/sell/account/v1/payment_policy${q}`,
+      retour: `/sell/account/v1/return_policy${q}`,
+      lieux: "/sell/inventory/v1/location",
+    } as const;
 
     type Pol = { name?: string; description?: string };
     type Liste<K extends string> = Record<K, Array<Pol & Record<string, string>>>;
 
     const [livraison, paiement, retour, lieux] = await Promise.all([
       lire<Liste<"fulfillmentPolicies">>(
-        `/sell/account/v1/fulfillment_policy${q}`,
+        CHEMINS.livraison,
         (d) =>
           (d.fulfillmentPolicies ?? []).map((p) => ({
             id: String(p["fulfillmentPolicyId"]),
@@ -2221,14 +2240,14 @@ export class EbayAdapter implements MarketplaceAdapter {
             detail: p.description,
           })),
       ),
-      lire<Liste<"paymentPolicies">>(`/sell/account/v1/payment_policy${q}`, (d) =>
+      lire<Liste<"paymentPolicies">>(CHEMINS.paiement, (d) =>
         (d.paymentPolicies ?? []).map((p) => ({
           id: String(p["paymentPolicyId"]),
           label: p.name ?? String(p["paymentPolicyId"]),
           detail: p.description,
         })),
       ),
-      lire<Liste<"returnPolicies">>(`/sell/account/v1/return_policy${q}`, (d) =>
+      lire<Liste<"returnPolicies">>(CHEMINS.retour, (d) =>
         (d.returnPolicies ?? []).map((p) => ({
           id: String(p["returnPolicyId"]),
           label: p.name ?? String(p["returnPolicyId"]),
@@ -2241,7 +2260,7 @@ export class EbayAdapter implements MarketplaceAdapter {
           name?: string;
           location?: { address?: { city?: string; country?: string } };
         }>;
-      }>("/sell/inventory/v1/location", (d) =>
+      }>(CHEMINS.lieux, (d) =>
         (d.locations ?? []).map((l) => ({
           id: String(l.merchantLocationKey),
           label: l.name ?? String(l.merchantLocationKey),
@@ -2261,10 +2280,29 @@ export class EbayAdapter implements MarketplaceAdapter {
         label: "Adresse d'expédition",
         aide: "À créer dans Seller Hub → Préférences d'expédition.",
         options: lieux,
+        panne: pannes.get(CHEMINS.lieux),
       },
-      { key: "fulfillmentPolicyId", label: "Politique de livraison", aide: AIDE, options: livraison },
-      { key: "paymentPolicyId", label: "Politique de paiement", aide: AIDE, options: paiement },
-      { key: "returnPolicyId", label: "Politique de retour", aide: AIDE, options: retour },
+      {
+        key: "fulfillmentPolicyId",
+        label: "Politique de livraison",
+        aide: AIDE,
+        options: livraison,
+        panne: pannes.get(CHEMINS.livraison),
+      },
+      {
+        key: "paymentPolicyId",
+        label: "Politique de paiement",
+        aide: AIDE,
+        options: paiement,
+        panne: pannes.get(CHEMINS.paiement),
+      },
+      {
+        key: "returnPolicyId",
+        label: "Politique de retour",
+        aide: AIDE,
+        options: retour,
+        panne: pannes.get(CHEMINS.retour),
+      },
     ];
   }
 
@@ -2627,7 +2665,27 @@ export class EbayAdapter implements MarketplaceAdapter {
       if (!aspectManquant || !product) throw err;
 
       await this.reecrireAspects(ctx, listing, forme, product);
-      r = await publier();
+      try {
+        r = await publier();
+      } catch (encore) {
+        /*
+         * LE SECOND 25002 A UN SENS PRÉCIS : la caractéristique qu'eBay
+         * réclame n'est PAS dans la fiche — on vient de tout réécrire avec
+         * ce qu'elle porte, et ça ne suffit toujours pas. Rendre le texte
+         * brut ferait chercher un défaut de transmission qui n'existe plus ;
+         * le manque est dans la SAISIE, et le geste est dans l'écran.
+         */
+        if (encore instanceof EbayHttpError && encore.codes.includes(25002)) {
+          const nom = /l['']objet\s+(.+?)\s+est\s+manquant/i.exec(
+            encore.message,
+          )?.[1];
+          return this.manuel(
+            ctx,
+            `eBay exige ${nom ? `la caractéristique « ${nom} »` : "une caractéristique"} que la fiche ne porte pas encore (« ${encore.message.slice(0, 140)} »). Ouvre Publier → panneau eBay, renseigne-la sous ce nom exact, Enregistrer, puis renvoie — l'annonce existante sera réécrite avec.`,
+          );
+        }
+        throw encore;
+      }
     }
 
     const listingId = r?.listingId ?? listing.remoteId;

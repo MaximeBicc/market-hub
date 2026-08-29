@@ -892,7 +892,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
         accountId: ctx.account.id,
         marketplace: ctx.account.marketplace,
         status: "manual_required",
-        message: `Etsy exige ${manquent.join(", ")} avant toute création. Renseignez-le(s) dans les Réglages de la boutique — la politique de retour se crée dans Etsy → Paramètres → Politiques, puis se choisit ici.`,
+        message: `Etsy exige ${manquent.join(", ")} avant toute création. Renseignez-le(s) dans les Réglages de la boutique — la politique de retour se crée dans Etsy → Paramètres → « Paramètres des conditions » → « Retours et échanges », puis se choisit ici.`,
       };
     }
 
@@ -1762,6 +1762,18 @@ export class EtsyAdapter implements MarketplaceAdapter {
   async listSettings(ctx: MarketplaceContext): Promise<RemoteSetting[]> {
     const boutique = this.shopId(ctx);
 
+    /*
+     * UNE LECTURE QUI ÉCHOUE N'EST PAS UNE BOUTIQUE VIDE.
+     *
+     * Ce catch renvoyait `[]` sans rien retenir. Le vendeur qui avait DÉJÀ
+     * créé sa politique de retour chez Etsy lisait donc « Rien à proposer —
+     * à créer dans Etsy », c'est-à-dire une consigne d'aller refaire ce
+     * qu'il venait de faire. On garde l'écran à moitié rempli — c'est
+     * toujours mieux qu'une page d'erreur — mais on retient POURQUOI, pour
+     * que le menu vide puisse dire lequel des deux cas il est.
+     */
+    const pannes = new Map<string, string>();
+
     const lire = async <T>(
       chemin: string,
       extraire: (
@@ -1770,10 +1782,21 @@ export class EtsyAdapter implements MarketplaceAdapter {
     ) => {
       try {
         return extraire(await this.call<T>(ctx, chemin));
-      } catch {
+      } catch (err) {
+        pannes.set(
+          chemin,
+          err instanceof Error ? err.message : "Etsy n'a pas répondu.",
+        );
         return [];
       }
     };
+
+    const CHEMINS = {
+      livraison: `/shops/${boutique}/shipping-profiles`,
+      preparation: `/shops/${boutique}/readiness-state-definitions`,
+      partenaires: `/shops/${boutique}/production-partners`,
+      retours: `/shops/${boutique}/policies/return`,
+    } as const;
 
     const [livraison, preparation, partenaires, retours] = await Promise.all([
       lire<{
@@ -1783,7 +1806,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
           origin_country_iso?: string;
           origin_postal_code?: string;
         }>;
-      }>(`/shops/${boutique}/shipping-profiles`, (d) =>
+      }>(CHEMINS.livraison, (d) =>
         (d.results ?? []).map((p) => ({
           id: String(p.shipping_profile_id),
           label: p.title ?? `Profil ${p.shipping_profile_id}`,
@@ -1803,7 +1826,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
           /** Libellé déjà traduit par Etsy : « Réalisé sur commande (1-2 jours) ». */
           processing_days_display_label?: string;
         }>;
-      }>(`/shops/${boutique}/readiness-state-definitions`, (d) =>
+      }>(CHEMINS.preparation, (d) =>
         (d.results ?? []).map((p) => ({
           id: String(p.readiness_state_id),
           /*
@@ -1838,7 +1861,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
           partner_name?: string;
           location?: string;
         }>;
-      }>(`/shops/${boutique}/production-partners`, (d) =>
+      }>(CHEMINS.partenaires, (d) =>
         (d.results ?? []).map((p) => ({
           id: String(p.production_partner_id),
           label: p.partner_name ?? `Partenaire ${p.production_partner_id}`,
@@ -1858,7 +1881,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
           accepts_exchanges?: boolean;
           return_deadline?: number;
         }>;
-      }>(`/shops/${boutique}/policies/return`, (d) =>
+      }>(CHEMINS.retours, (d) =>
         (d.results ?? []).map((p) => ({
           id: String(p.return_policy_id),
           label: p.accepts_returns
@@ -1874,26 +1897,37 @@ export class EtsyAdapter implements MarketplaceAdapter {
       {
         key: "returnPolicyId",
         label: "Politique de retour",
-        aide: "À créer dans votre boutique Etsy → Paramètres → Politiques. Obligatoire pour mettre en vente : sans elle, Etsy accepte le brouillon puis refuse l'activation.",
+        // Les libellés sont ceux du menu français d'Etsy, relevés à l'écran.
+        // « Politiques » n'y figure nulle part : le mot employé est
+        // « conditions », et le bouton est au pluriel.
+        aide: "À créer dans Etsy → Paramètres → « Paramètres des conditions » → onglet « Retours et échanges » → « Créer des conditions ». Obligatoire pour mettre en vente : sans elle, Etsy accepte le brouillon puis refuse l'activation.",
         options: retours,
+        panne: pannes.get(CHEMINS.retours),
       },
       {
         key: "productionPartnerId",
         label: "Partenaire de production",
-        aide: "À déclarer dans votre boutique Etsy → Paramètres → Production. Obligatoire dès qu'un article est fabriqué par quelqu'un d'autre : sans lui, Etsy refuse la mise en vente sans expliquer pourquoi.",
+        aide: "À déclarer dans Etsy → Paramètres → « Partenaires avec lesquels vous travaillez ». Obligatoire dès qu'un article est fabriqué par quelqu'un d'autre : sans lui, Etsy refuse la mise en vente sans expliquer pourquoi.",
         options: partenaires,
+        panne: pannes.get(CHEMINS.partenaires),
       },
       {
         key: "shippingProfileId",
         label: "Profil de livraison",
-        aide: "À créer dans votre boutique Etsy → Paramètres → Expédition.",
+        aide: "À créer dans Etsy → Paramètres → Paramètres de livraison → onglet « Profils de livraison et traitement » → section « Profils de livraison » → « Créer un profil ».",
         options: livraison,
+        panne: pannes.get(CHEMINS.livraison),
       },
       {
         key: "readinessStateId",
         label: "Délai de préparation",
-        aide: "À créer dans votre boutique Etsy → Paramètres → Délais de traitement.",
+        // Ce réglage n'a PAS de page à lui : le chercher sous un menu
+        // « Délais de traitement » — ce que cette aide annonçait — envoie
+        // fouiller un menu qui n'existe pas. Il vit au-dessus des profils de
+        // livraison, sur la même page qu'eux.
+        aide: "À créer dans Etsy → Paramètres → Paramètres de livraison → même onglet, section « Vos profils de traitement » → « Créer un nouveau niveau ».",
         options: preparation,
+        panne: pannes.get(CHEMINS.preparation),
       },
     ];
   }
@@ -2203,7 +2237,7 @@ function refusEligibiliteEtsy(args: {
   return (
     "Etsy n'accepte que trois sortes d'articles : fait main, fourniture créative, ou vintage de vingt ans et plus. " +
     "Celui-ci est déclaré « fabriqué par quelqu'un d'autre », ce qui n'entre dans la première qu'avec un PARTENAIRE DE PRODUCTION déclaré. " +
-    "Trois issues, toutes honnêtes : déclarer le fabricant dans votre boutique Etsy → Paramètres → Production, puis le choisir dans les réglages du compte ; " +
+    "Trois issues, toutes honnêtes : déclarer le fabricant dans votre boutique Etsy → Paramètres → « Partenaires avec lesquels vous travaillez », puis le choisir dans les réglages du compte ; " +
     "ou marquer l'article comme fourniture créative si c'en est une ; ou corriger la période s'il a plus de vingt ans. " +
     "Sans cela Etsy refuse, et son message ne dit ni laquelle des trois manque ni comment la fournir."
   );

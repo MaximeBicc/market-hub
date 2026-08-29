@@ -865,6 +865,40 @@ describe("réparer une annonce refusée pour caractéristique manquante", () => 
     expect(r.message).toMatch(/déjà en ligne/i);
   });
 
+  it("traduit en geste le refus qui SURVIT à la réécriture", async () => {
+    /*
+     * Après réécriture complète, un second 25002 a un sens précis : la
+     * caractéristique n'est pas dans la SAISIE — la transmission, elle,
+     * vient d'être refaite. Le texte brut d'eBay ferait chercher un défaut
+     * de transmission qui n'existe plus ; le message doit nommer la
+     * caractéristique et l'écran où la remplir.
+     */
+    const refus = {
+      status: 400,
+      body: {
+        errors: [
+          {
+            errorId: 25002,
+            longMessage:
+              "La caractéristique de l'objet Type est manquante. Ajoutez Type à cette annonce, saisissez une valeur valide, puis réessayez.",
+          },
+        ],
+      },
+    };
+    const { http, sent } = fakeHttp([
+      refus, // publish n° 1
+      { status: 204, body: {} }, // réécriture de l'article
+      refus, // publish n° 2 : la fiche ne porte toujours pas Type
+    ]);
+
+    const r = await adapter.activateListing(ctxWith(http), annonce, "i", fiche);
+
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toContain("« Type »");
+    expect(r.message).toContain("Publier");
+    expect(sent).toHaveLength(3);
+  });
+
   it("sans la fiche, le refus est rendu tel quel — pas de réécriture aveugle", async () => {
     const { http, sent } = fakeHttp([
       {

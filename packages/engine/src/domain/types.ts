@@ -442,6 +442,18 @@ export interface RemoteSetting {
   /** Ce qu'il faut faire quand la liste est vide. */
   aide: string;
   options: Array<{ id: string; label: string; detail?: string | undefined }>;
+  /*
+   * POURQUOI LA LISTE EST VIDE, quand c'est la lecture qui a échoué.
+   *
+   * Sans ce champ, deux situations opposées s'affichaient à l'identique :
+   * « vous n'en avez créé aucun » et « la plateforme nous a refusé la
+   * lecture ». Le vendeur qui a DÉJÀ tout créé chez la plateforme se voyait
+   * alors renvoyé vers un menu où il n'avait plus rien à faire — et rien ne
+   * lui disait que le problème était de notre côté.
+   *
+   * Absent quand la lecture a réussi, y compris si elle ne rapporte rien.
+   */
+  panne?: string | undefined;
 }
 
 /**
