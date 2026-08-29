@@ -678,6 +678,32 @@ const SUJETS_VOULUS = [
   "ORDER_CANCELLATION_ACTIVITY",
 ] as const;
 
+/**
+ * Reconnaît un refus eBay par son code, QUEL QUE SOIT LE CHEMIN.
+ *
+ * Le même refus arrive sous deux formes selon qui l'a vu en premier : notre
+ * `call` construit une EbayHttpError qui PORTE les codes ; mais en
+ * production, la couche HTTP du worker intercepte les non-2xx avant nous et
+ * lève une erreur générique dont le corps d'eBay n'est plus que du TEXTE.
+ * Ne tester que `instanceof` faisait donc vivre la réparation dans les tests
+ * — où le faux http rend la réponse — et jamais en production, où il la
+ * lève. C'est le piège déjà documenté sur les notifications ; il est
+ * maintenant enfermé ici.
+ */
+function refusEbay(err: unknown, code: number): boolean {
+  if (err instanceof EbayHttpError && err.codes.includes(code)) return true;
+  if (!(err instanceof Error)) return false;
+  /*
+   * Pas d'expression régulière ici : le corps d'eBay est du JSON compact,
+   * et une simple recherche de la paire suffit. La variante avec espace
+   * couvre un corps ré-indenté par une couche intermédiaire.
+   */
+  return (
+    err.message.includes(`"errorId":${code}`) ||
+    err.message.includes(`"errorId": ${code}`)
+  );
+}
+
 /** Une caractéristique d'article telle qu'eBay la décrit pour une catégorie. */
 export interface AspectEbay {
   nom: string;
@@ -2670,7 +2696,8 @@ export class EbayAdapter implements MarketplaceAdapter {
        * quel plutôt que d'afficher un échec sur une annonce qui vend.
        */
       const dejaEnLigne =
-        err instanceof Error && /already.*(publish|list)/i.test(err.message);
+        (err instanceof Error && /already.*(publish|list)/i.test(err.message)) ||
+        refusEbay(err, 25016);
       if (dejaEnLigne) {
         return this.ok(
           ctx,
@@ -2679,8 +2706,7 @@ export class EbayAdapter implements MarketplaceAdapter {
         );
       }
 
-      const aspectManquant =
-        err instanceof EbayHttpError && err.codes.includes(25002);
+      const aspectManquant = refusEbay(err, 25002);
       if (!aspectManquant || !product) throw err;
 
       await this.reecrireAspects(ctx, listing, forme, product);
@@ -2694,13 +2720,13 @@ export class EbayAdapter implements MarketplaceAdapter {
          * brut ferait chercher un défaut de transmission qui n'existe plus ;
          * le manque est dans la SAISIE, et le geste est dans l'écran.
          */
-        if (encore instanceof EbayHttpError && encore.codes.includes(25002)) {
-          const nom = /l['']objet\s+(.+?)\s+est\s+manquant/i.exec(
-            encore.message,
-          )?.[1];
+        if (refusEbay(encore, 25002)) {
+          const texte =
+            encore instanceof Error ? encore.message : String(encore);
+          const nom = /l['']objet\s+(.+?)\s+est\s+manquant/i.exec(texte)?.[1];
           return this.manuel(
             ctx,
-            `eBay exige ${nom ? `la caractéristique « ${nom} »` : "une caractéristique"} que la fiche ne porte pas encore (« ${encore.message.slice(0, 140)} »). Ouvre Publier → panneau eBay, renseigne-la sous ce nom exact, Enregistrer, puis renvoie — l'annonce existante sera réécrite avec.`,
+            `eBay exige ${nom ? `la caractéristique « ${nom} »` : "une caractéristique"} que la fiche ne porte pas encore (« ${texte.slice(0, 140)} »). Ouvre Publier → panneau eBay, renseigne-la sous ce nom exact, Enregistrer, puis renvoie — l'annonce existante sera réécrite avec.`,
           );
         }
         throw encore;

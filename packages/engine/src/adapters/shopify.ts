@@ -1360,9 +1360,18 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (/access|scope|permission|denied|publications/i.test(detail)) {
+        /*
+         * LE REFUS BRUT ACCOMPAGNE LE DIAGNOSTIC. Sans lui, impossible de
+         * distinguer « droits jamais enregistrés » de « droits enregistrés
+         * mais pas encore actifs » : la phrase de Shopify nomme le scope
+         * exact qui manque encore, et c'est elle qui permet de vérifier que
+         * le clic sur Enregistrer a réellement porté. Pas de reconnexion à
+         * demander : une application personnalisée applique ses nouveaux
+         * droits au jeton existant.
+         */
         return this.manuel(
           ctx,
-          "Shopify a créé le produit actif, mais l'application n'a pas les droits read_publications/write_publications pour le rendre visible sur la boutique en ligne. Ajoutez ces autorisations puis reconnectez la boutique.",
+          `Shopify a créé le produit actif, mais refuse de le rendre visible sur la boutique en ligne — il manque les droits read_publications/write_publications sur l'application. Coche-les dans Shopify (Paramètres → Applications → ton app → Configuration → Admin API), Enregistre, puis relance : le jeton actuel suffit. Refus exact de Shopify : « ${detail.slice(0, 160)} »`,
         );
       }
       throw error;

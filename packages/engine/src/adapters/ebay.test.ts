@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { aspectsCommuns, EbayAdapter, ebayConsentUrl } from "./ebay.js";
 import type { MarketplaceContext } from "../ports/marketplace.js";
 import type { Listing, Product, Variant } from "../domain/types.js";
@@ -73,6 +73,26 @@ const PUBLIABLE = {
 };
 
 const adapter = new EbayAdapter();
+
+
+/*
+ * AUCUN APPEL RÉSEAU RÉEL DANS CE FICHIER.
+ *
+ * Tout passe par le faux http des décors — sauf le jeton applicatif, qui
+ * part par le fetch GLOBAL quand un test ne le fournit pas en cache. Trois
+ * tests devenaient alors intermittents : verts quand ebay.com répondait
+ * vite, rouges au timeout. Un test qui dépend de la météo d'un serveur
+ * distant ne prouve plus rien ; ici, le fetch global échoue immédiatement,
+ * et le pré-vol retombe sur son échec ouvert — rapide et déterministe.
+ */
+beforeAll(() => {
+  vi.stubGlobal("fetch", () =>
+    Promise.reject(new Error("réseau réel interdit dans les tests")),
+  );
+});
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("consentement", () => {
   it("envoie le RuName comme redirect_uri, pas une URL", () => {
@@ -899,6 +919,46 @@ describe("réparer une annonce refusée pour caractéristique manquante", () => 
     expect(sent).toHaveLength(3);
   });
 
+  it("répare aussi quand la couche HTTP LÈVE au lieu de rendre la réponse", async () => {
+    /*
+     * LA COMPOSITION DE PRODUCTION, PAS CELLE DES TESTS.
+     *
+     * En production, la couche HTTP du worker intercepte les non-2xx AVANT
+     * l'adaptateur et lève une erreur générique — le corps d'eBay n'y survit
+     * que comme texte : « ebay 400 : {"errors":[{"errorId":25002,...}]} ».
+     * Tous les tests précédents rendaient la Response : la réparation était
+     * verte ici et morte en production, où l'utilisateur a revu trois fois
+     * le même refus brut. Ce décor-là lève, comme le vrai.
+     */
+    let appels = 0;
+    const http = async (url: string, init?: RequestInit) => {
+      appels += 1;
+      if (String(url).includes("/publish") && appels === 1) {
+        // Backticks : la phrase d'eBay porte une apostrophe.
+        throw new Error(
+          `ebay 400 : {"errors":[{"errorId":25002,"domain":"API_INVENTORY","message":"La caractéristique de l${"'"}objet Marque est manquante."}]}`,
+        );
+      }
+      return new Response(
+        String(url).includes("/publish")
+          ? JSON.stringify({ listingId: "7777" })
+          : null,
+        { status: String(url).includes("/publish") ? 200 : 204 },
+      );
+    };
+
+    const r = await adapter.activateListing(
+      ctxWith(http as MarketplaceContext["http"]),
+      annonce,
+      "i",
+      fiche,
+    );
+
+    expect(r.status).toBe("success");
+    expect(r.remoteId).toBe("7777");
+    expect(appels).toBe(3); // publish refusé, réécriture, publish réussi
+  });
+
   it("sans la fiche, le refus est rendu tel quel — pas de réécriture aveugle", async () => {
     const { http, sent } = fakeHttp([
       {
@@ -991,6 +1051,10 @@ describe("galerie d'un groupe à photos par coloris", () => {
       ],
     };
     const { http, sent } = fakeHttp([
+      // Le pré-vol lit d'abord le catalogue des caractéristiques : jeton et
+      // arbre fournis en cache, sinon il partirait sur le RÉSEAU RÉEL — et
+      // ce test devenait dépendant de la météo d'ebay.com.
+      { body: { aspects: [] } },
       { status: 404, body: {} }, // SKU 1 libre
       { status: 404, body: {} }, // SKU 2 libre
       { status: 404, body: {} }, // groupe libre
@@ -1002,7 +1066,13 @@ describe("galerie d'un groupe à photos par coloris", () => {
     ]);
 
     await adapter.createListing(
-      ctxWith(http, { ...PUBLIABLE, defaultCategoryId: "1234" }),
+      ctxWith(http, {
+        ...PUBLIABLE,
+        defaultCategoryId: "1234",
+        appToken: "app",
+        appTokenExpiresAt: FUTUR,
+        categoryTreeId: "3",
+      }),
       produit,
       "i",
     );
