@@ -10,6 +10,7 @@ import { engine } from "./routes/engine.js";
 import { accounts } from "./routes/accounts.js";
 import { diagnostic } from "./routes/diagnostic.js";
 import { webhooks } from "./routes/webhooks.js";
+import { media } from "./routes/media.js";
 import { handleScheduled } from "./scheduler.js";
 import { handleQueue } from "./consumer.js";
 
@@ -89,6 +90,9 @@ app.get("/api/health", async (c) => {
 app.route("/api/auth", auth);
 app.route("/api/oauth", oauth);
 app.route("/api/webhooks", webhooks); // public, protégé par signature
+// Lecture publique — ce sont les plateformes qui viennent chercher l'image,
+// sans session. L'écriture est gardée à l'intérieur du routeur.
+app.route("/api/media", media);
 app.route("/api/ai", ai);
 app.route("/api/engine/accounts", accounts);
 app.route("/api/engine/diagnostic", diagnostic);

@@ -2422,6 +2422,41 @@ h2.sec:first-child {
 .photo-outil:hover { background: var(--accent); color: var(--accent-on); }
 .photos-note { white-space: normal; line-height: 1.45; margin: 0 0 8px; }
 
+/* L'éditeur de photo : par-dessus la fenêtre d'import, pour ne pas perdre
+   la saisie en cours. Un cran au-dessus d'elle dans l'empilement. */
+.editeur-fond {
+  position: fixed; inset: 0; z-index: 1200;
+  background: rgba(0, 0, 0, .62);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.editeur {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 16px; width: min(380px, 100%); max-height: 92vh; overflow: auto;
+}
+.editeur__tete {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 12px;
+}
+/* Le damier dit où l'image s'arrête : sur fond sombre, un bord blanc et le
+   fond de la fenêtre se confondraient. */
+.editeur__scene {
+  display: flex; justify-content: center; margin-bottom: 14px;
+  background-image:
+    linear-gradient(45deg, var(--line) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--line) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--line) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--line) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  border-radius: 10px; padding: 8px;
+}
+.editeur__scene canvas { border-radius: 6px; max-width: 100%; height: auto; }
+.editeur__reglage {
+  display: grid; grid-template-columns: 92px 1fr; gap: 10px;
+  align-items: center; margin-bottom: 10px; font-size: 12px;
+}
+.editeur__reglage input[type="range"] { width: 100%; }
+
 /* La photo d'un coloris : les outils puis le champ, sur une seule ligne. */
 .decl-photo { display: inline-flex; gap: 4px; align-items: center; margin-top: 4px; }
 .decl-photo__champ { font-size: 11px; padding: 3px 7px; min-width: 150px; }

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, money } from "../lib/api.js";
 import { Icon } from "./Icon.js";
 import { toast } from "./Toast.js";
+import { EditeurPhoto } from "./EditeurPhoto.js";
 
 interface DeclinaisonAlibaba {
   skuId: string;
@@ -157,18 +158,40 @@ function lienChatGPT(url: string, quoi: string): string {
 }
 
 /** Les deux gestes qu'on répète sur chaque photo : ouvrir, et copier. */
-function OutilsPhoto({ url, quoi }: { url: string; quoi: string }) {
+function OutilsPhoto({
+  url,
+  quoi,
+  onCadrer,
+}: {
+  url: string;
+  quoi: string;
+  /** Absent quand le recadrage n'a pas de destination — coloris sans photo. */
+  onCadrer?: (() => void) | undefined;
+}) {
   return (
     <span className="photo-outils">
+      {onCadrer && (
+        <button
+          type="button"
+          className="photo-outil"
+          title="Recadrer en carré, centrer, ajuster la lumière — sans quitter MarketHub"
+          onClick={(e) => {
+            e.stopPropagation();
+            onCadrer();
+          }}
+        >
+          Cadrer
+        </button>
+      )}
       <a
         className="photo-outil"
         href={lienChatGPT(url, quoi)}
         target="_blank"
         rel="noreferrer"
-        title="Ouvrir ChatGPT avec la consigne de retouche déjà écrite — l'image reste à déposer"
+        title="Ouvrir ChatGPT pour le fond ou le filigrane — l'image reste à y déposer, il ne sait pas la chercher"
         onClick={(e) => e.stopPropagation()}
       >
-        Retoucher
+        ChatGPT
       </a>
       <button
         type="button"
@@ -209,6 +232,15 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
   const [saisie, setSaisie] = useState("");
   /** Une photo de remplacement par coloris, indexée par sa clé d'option. */
   const [photosColoris, setPhotosColoris] = useState<Record<string, string>>({});
+  /*
+   * L'éditeur sert deux destinations : la galerie du produit et la photo d'un
+   * coloris. `coloris` dit laquelle — nul pour le produit. Sans cette
+   * distinction, une retouche faite depuis un coloris atterrirait dans la
+   * galerie commune, où elle ne servirait à rien.
+   */
+  const [editeur, setEditeur] = useState<
+    { source: string; coloris: string | null } | null
+  >(null);
 
   /**
    * Ajoute une photo à soi, en refusant ce qui ne marchera pas.
@@ -608,7 +640,19 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                           <img src={vignette(url)} alt="" loading="lazy" title={url} />
                           {prise && <span className="photo-choix__coche">✓</span>}
                         </button>
-                        <OutilsPhoto url={url} quoi={fiche.titre} />
+                        <OutilsPhoto
+                          url={url}
+                          quoi={fiche.titre}
+                          onCadrer={() =>
+                            setEditeur({
+                              // Le proxy, jamais l'originale : un canevas
+                              // nourri d'une image d'un autre domaine refuse
+                              // de s'exporter.
+                              source: vignette(url) ?? url,
+                              coloris: null,
+                            })
+                          }
+                        />
                       </div>
                     );
                   })}
@@ -1028,7 +1072,16 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
                                   */}
                                 <span className="decl-photo">
                                   {d.image && (
-                                    <OutilsPhoto url={d.image} quoi={d.nom} />
+                                    <OutilsPhoto
+                                      url={d.image}
+                                      quoi={d.nom}
+                                      onCadrer={() =>
+                                        setEditeur({
+                                          source: vignette(d.image) ?? d.image!,
+                                          coloris: d.optionKey,
+                                        })
+                                      }
+                                    />
                                   )}
                                   <input
                                     type="url"
@@ -1122,6 +1175,25 @@ export function AlibabaModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+
+      {/* L'éditeur par-dessus la fenêtre d'import : on ne perd pas sa saisie
+          en allant recadrer une photo. */}
+      {editeur && (
+        <EditeurPhoto
+          source={editeur.source}
+          onFermer={() => setEditeur(null)}
+          onFini={(url) => {
+            if (editeur.coloris) {
+              // Sur un coloris, la retouche REMPLACE : une variante ne porte
+              // qu'une image.
+              setPhotosColoris((m) => ({ ...m, [editeur.coloris!]: url }));
+            } else if (!miennes.includes(url)) {
+              setMiennes((l) => [...l, url]);
+            }
+            setEditeur(null);
+          }}
+        />
+      )}
     </div>
   );
 }
