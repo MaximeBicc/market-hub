@@ -1108,17 +1108,58 @@ export class EtsyAdapter implements MarketplaceAdapter {
      * L'échec est NON BLOQUANT et rapporté : le brouillon existe déjà chez
      * Etsy, prétendre le contraire ferait recréer un doublon au prochain essai.
      */
-    const photos = (product.images ?? []).slice(0, 10);
+    /*
+     * LES PHOTOS DES COLORIS D'ABORD, ET C'EST DÉLIBÉRÉ.
+     *
+     * Etsy plafonne à DIX images par annonce. Une photo de coloris sert deux
+     * fois — elle illustre l'annonce ET permet de la rattacher à sa
+     * déclinaison, pour que choisir « Noir » change l'image. Une photo
+     * générique de plus ne sert qu'une fois. À plafond égal, les premières
+     * valent donc mieux que les secondes.
+     */
+    const photosVariantes: string[] = [];
+    for (const v of variantes) {
+      const u = v.imageUrl?.trim();
+      if (u && !photosVariantes.includes(u)) photosVariantes.push(u);
+    }
+    const photos = [
+      ...photosVariantes,
+      ...(product.images ?? []).filter((u) => !photosVariantes.includes(u)),
+    ].slice(0, 10);
+
     let posees = 0;
     const refusees: string[] = [];
+    /** L'identifiant Etsy de chaque photo, pour le rattachement ci-dessous. */
+    const idParUrl = new Map<string, number>();
 
     for (const url of photos) {
       try {
-        posees += await this.envoyerImage(ctx, created.listing_id, url, posees);
+        const id = await this.envoyerImage(ctx, created.listing_id, url, posees);
+        posees += 1;
+        if (id !== null) idParUrl.set(url, id);
       } catch (err) {
         refusees.push(err instanceof Error ? err.message : String(err));
       }
     }
+
+    /*
+     * RATTACHER CHAQUE PHOTO À SON COLORIS.
+     *
+     * Etsy impose trois choses : les images doivent DÉJÀ être sur l'annonce
+     * (d'où l'ordre), le rattachement ne peut porter que sur UNE SEULE
+     * propriété, et l'appel REMPLACE tous les rattachements existants. On
+     * n'envoie donc qu'un seul lot, complet, pour le premier axe.
+     *
+     * Non bloquant : l'annonce et ses déclinaisons existent déjà, et échouer
+     * ici ferait croire à une création ratée — le prochain essai en créerait
+     * une seconde, facturée.
+     */
+    const noteCouleurs = await this.rattacherPhotosCouleurs(
+      ctx,
+      created.listing_id,
+      variantes,
+      idParUrl,
+    );
 
     const note =
       photos.length === 0
@@ -1130,7 +1171,7 @@ export class EtsyAdapter implements MarketplaceAdapter {
     return this.ok(
       ctx,
       String(created.listing_id),
-      `Créée en brouillon — à publier depuis Etsy après relecture${noteVariations}${note}`,
+      `Créée en brouillon — à publier depuis Etsy après relecture${noteVariations}${note}${noteCouleurs}`,
       // Ce que la suite exige : l'identifiant d'annonce pour toute mise à jour,
       // et le nombre de produits d'inventaire réellement écrits — sans lui,
       // impossible de savoir si les déclinaisons sont passées.
@@ -1310,12 +1351,108 @@ export class EtsyAdapter implements MarketplaceAdapter {
    * multipart doit contenir la frontière générée par `FormData`. On passe donc
    * par le transport en laissant l'en-tête être calculé.
    */
+/**
+   * RATTACHE CHAQUE PHOTO À SON COLORIS — « choisir Noir change l'image ».
+   *
+   * Etsy pose trois règles, et chacune a sa conséquence ici :
+   *
+   *   les images doivent DÉJÀ être sur l'annonce, désignées par leur
+   *   identifiant — d'où le téléversement préalable et la carte url →
+   *   identifiant ;
+   *
+   *   le rattachement ne peut porter que sur UNE SEULE propriété : on prend
+   *   la première, celle qui porte les photos. Un produit à deux axes ne
+   *   verra donc changer l'image que sur le premier ;
+   *
+   *   l'appel REMPLACE tous les rattachements existants : on envoie un lot
+   *   complet, jamais un ajout.
+   *
+   * Les couples propriété/valeur viennent de l'inventaire qu'Etsy vient de
+   * nous rendre : ce sont SES identifiants, pas les nôtres. Les recalculer
+   * ou les deviner donnerait « Invalid property_id, value_id combination ».
+   */
+  private async rattacherPhotosCouleurs(
+    ctx: MarketplaceContext,
+    listingId: number,
+    variantes: readonly Variant[],
+    idParUrl: ReadonlyMap<string, number>,
+  ): Promise<string> {
+    if (idParUrl.size === 0) return "";
+    const avecPhoto = variantes.filter((v) => v.imageUrl);
+    if (avecPhoto.length === 0) return "";
+
+    try {
+      const inv = await this.call<{
+        products?: Array<{
+          property_values?: Array<{
+            property_id?: number;
+            value_ids?: number[];
+            values?: string[];
+          }>;
+        }>;
+      }>(ctx, `/listings/${listingId}/inventory`);
+
+      /*
+       * La valeur normalisée d'Etsy vers son couple d'identifiants. On ne
+       * garde que le PREMIER axe rencontré : Etsy refuse un lot qui en
+       * mélangerait deux.
+       */
+      let axe: number | undefined;
+      const parValeur = new Map<string, number>();
+      for (const p of inv.products ?? []) {
+        const pv = (p.property_values ?? [])[0];
+        if (!pv?.property_id) continue;
+        if (axe === undefined) axe = pv.property_id;
+        if (pv.property_id !== axe) continue;
+        const valeur = pv.values?.[0];
+        const valueId = pv.value_ids?.[0];
+        if (valeur && valueId) parValeur.set(normaliserTexte(valeur), valueId);
+      }
+      if (axe === undefined || parValeur.size === 0) {
+        return " · photos par coloris impossibles (Etsy n'a rendu aucune valeur de variation)";
+      }
+
+      const vus = new Set<number>();
+      const lot: Array<{
+        property_id: number;
+        value_id: number;
+        image_id: number;
+      }> = [];
+      for (const v of avecPhoto) {
+        const imageId = idParUrl.get(v.imageUrl!.trim());
+        const valueId = parValeur.get(
+          normaliserTexte(v.optionValues[0] ?? ""),
+        );
+        // Etsy refuse les doublons : une valeur ne peut porter qu'une image.
+        if (!imageId || !valueId || vus.has(valueId)) continue;
+        vus.add(valueId);
+        lot.push({ property_id: axe, value_id: valueId, image_id: imageId });
+      }
+      if (lot.length === 0) {
+        return " · photos par coloris non rattachées (aucune correspondance)";
+      }
+
+      await this.call(
+        ctx,
+        `/shops/${this.shopId(ctx)}/listings/${listingId}/variation-images`,
+        { method: "POST", body: JSON.stringify({ variation_images: lot }) },
+      );
+
+      const manque = avecPhoto.length - lot.length;
+      return manque > 0
+        ? ` · ${lot.length} photo(s) par coloris rattachée(s), ${manque} sans correspondance`
+        : ` · ${lot.length} photo(s) rattachée(s) à leur coloris`;
+    } catch (err) {
+      return ` · photos par coloris non rattachées (${err instanceof Error ? err.message.slice(0, 90) : "échec"})`;
+    }
+  }
+
   private async envoyerImage(
     ctx: MarketplaceContext,
     listingId: number,
     url: string,
     rang: number,
-  ): Promise<number> {
+  ): Promise<number | null> {
     const http = ctx.http ?? fetch;
 
     const source = await fetch(url);
@@ -1348,7 +1485,18 @@ export class EtsyAdapter implements MarketplaceAdapter {
       const detail = (await res.text().catch(() => "")).slice(0, 150).trim();
       throw new Error(`Etsy a refusé l'image (${res.status}) ${detail}`);
     }
-    return 1;
+
+    /*
+     * L'IDENTIFIANT DE L'IMAGE, ET PAS SEULEMENT « ça a marché ».
+     *
+     * Rattacher une photo à un coloris exige de désigner l'image PAR SON
+     * IDENTIFIANT chez Etsy. Le compteur binaire d'avant suffisait à écrire
+     * « 3 photos transmises » et ne permettait rien d'autre.
+     */
+    const rendu = (await res.json().catch(() => null)) as {
+      listing_image_id?: number;
+    } | null;
+    return rendu?.listing_image_id ?? null;
   }
 
   async updatePrice(

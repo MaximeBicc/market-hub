@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   EtsyAdapter,
   lireResourceUrl,
@@ -1236,6 +1236,102 @@ function corpsPut(
   const put = sent.find((x) => x.method === "PUT");
   return put?.raw ? JSON.parse(put.raw) : undefined;
 }
+
+describe("photos rattachées à leur coloris", () => {
+  /*
+   * Etsy pose trois règles, et le lot envoyé doit les respecter TOUTES :
+   * les images doivent déjà être sur l'annonce, un seul `property_id` est
+   * accepté, et aucun doublon. Se tromper donne « Invalid property_id,
+   * value_id combination » — un refus qui ne dit pas laquelle des trois.
+   */
+  const produit: Product = {
+    id: "p1",
+    sku: "CLIP",
+    title: "Clip",
+    price: { amount: 599, currency: "EUR" },
+    stock: 5,
+    whoMade: "i_did",
+    whenMade: "2020_2026",
+    images: ["https://img/generique.jpg"],
+    options: [{ name: "Couleur", values: ["Noir", "Blanc"] }],
+    variants: [
+      { ...variante("couleur=noir", ["Noir"], "CLIP-N"), imageUrl: "https://img/noir.jpg" },
+      { ...variante("couleur=blanc", ["Blanc"], "CLIP-B"), imageUrl: "https://img/blanc.jpg" },
+    ],
+  };
+
+  it("téléverse les photos de coloris D'ABORD, puis les rattache", async () => {
+    /*
+     * L'ordre n'est pas un détail : Etsy plafonne à dix images, et une photo
+     * de coloris sert deux fois — elle illustre ET rattache. Reléguée après
+     * les génériques, elle peut tomber hors plafond et le rattachement
+     * devient impossible.
+     */
+    vi.stubGlobal("fetch", async () => new Response("x", { status: 200 }));
+
+    const { http, sent } = fakeHttp([
+      { body: { listing_id: 900 } }, // création du brouillon
+      { body: { results: [] } }, // propriétés de la taxonomie
+      { body: {} }, // PUT inventaire
+      { body: { listing_image_id: 11 } }, // photo noir
+      { body: { listing_image_id: 12 } }, // photo blanc
+      { body: { listing_image_id: 13 } }, // photo générique
+      {
+        body: {
+          products: [
+            {
+              property_values: [
+                { property_id: 200, value_ids: [51], values: ["Noir"] },
+              ],
+            },
+            {
+              property_values: [
+                { property_id: 200, value_ids: [52], values: ["Blanc"] },
+              ],
+            },
+          ],
+        },
+      },
+      { body: {} }, // POST variation-images
+    ]);
+
+    const r = await adapter.createListing(ctxWith(http, PUBLIABLE), produit, "i");
+    expect(r.status).toBe("success");
+
+    const images = sent.filter((a) => a.url.endsWith("/listings/900/images"));
+    expect(images.map((a) => a.url)).toHaveLength(3);
+
+    const lien = sent.find((a) => a.url.includes("variation-images"));
+    expect(lien).toBeDefined();
+    const corps = JSON.parse(String(lien!.raw));
+    expect(corps.variation_images).toEqual([
+      { property_id: 200, value_id: 51, image_id: 11 },
+      { property_id: 200, value_id: 52, image_id: 12 },
+    ]);
+    // Un seul axe : Etsy refuse un lot qui en mélangerait deux.
+    expect(new Set(corps.variation_images.map((x: any) => x.property_id)).size).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("n'échoue jamais l'annonce quand le rattachement rate", async () => {
+    // L'annonce est créée ET FACTURÉE : rendre un échec ferait croire à une
+    // création ratée, et le prochain essai en créerait une seconde.
+    vi.stubGlobal("fetch", async () => new Response("x", { status: 200 }));
+    const { http } = fakeHttp([
+      { body: { listing_id: 901 } },
+      { body: { results: [] } }, // propriétés de la taxonomie
+      { body: {} },
+      { body: { listing_image_id: 11 } },
+      { body: { listing_image_id: 12 } },
+      { body: { listing_image_id: 13 } },
+      { status: 500, body: { error: "boom" } }, // lecture d'inventaire cassée
+    ]);
+    const r = await adapter.createListing(ctxWith(http, PUBLIABLE), produit, "i");
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/coloris non rattachées|impossibles/);
+    vi.unstubAllGlobals();
+  });
+});
 
 describe("relevé d'une annonce à déclinaisons", () => {
   it("lit la quantité DU COLORIS, pas le total de l'annonce", async () => {
