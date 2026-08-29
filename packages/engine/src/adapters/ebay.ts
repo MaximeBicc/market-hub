@@ -3095,7 +3095,54 @@ export class EbayAdapter implements MarketplaceAdapter {
       if (!(e instanceof EbayHttpError) || e.status !== 404) throw e;
       return this.ok(ctx, listing.remoteId, "Offre déjà absente d'eBay.");
     }
-    return this.ok(ctx, listing.remoteId, "Annonce effacée chez eBay.");
+
+    /*
+     * LIBÉRER LES SKU, SANS QUOI LA RÉFÉRENCE EST BRÛLÉE À VIE.
+     *
+     * Supprimer le groupe ou l'offre ne supprime PAS les articles
+     * d'inventaire : les SKU survivent chez eBay, invisibles et intouchables.
+     * Conséquence, découverte en base après une suppression : republier le
+     * même produit se heurte à la sonde « ce SKU existe déjà chez eBay » et
+     * l'outil refuse — à raison, puisqu'il ne peut pas distinguer un reliquat
+     * d'une annonce faite à la main. Le vendeur devait changer de référence
+     * pour un article qu'il possède toujours.
+     *
+     * Effacer l'article d'inventaire emporte au passage ses offres non
+     * publiées : c'est exactement le ménage qu'on veut à la suppression d'un
+     * produit.
+     *
+     * NON BLOQUANT : l'annonce est déjà partie, c'est l'essentiel. Un SKU qui
+     * résiste se signale sans faire échouer une suppression accomplie.
+     */
+    const skus =
+      forme.type === "groupe"
+        ? Object.keys(
+            (listing.marketplaceData?.["offers"] ?? {}) as Record<string, unknown>,
+          )
+        : [listing.remoteId].filter((x): x is string => Boolean(x));
+
+    const restants: string[] = [];
+    for (const sku of skus) {
+      try {
+        await this.call(
+          ctx,
+          `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
+          { method: "DELETE" },
+        );
+      } catch (e) {
+        // Déjà absent : c'est l'état voulu, rien à signaler.
+        if (e instanceof EbayHttpError && e.status === 404) continue;
+        restants.push(sku);
+      }
+    }
+
+    return this.ok(
+      ctx,
+      listing.remoteId,
+      restants.length === 0
+        ? `Annonce effacée chez eBay${skus.length > 0 ? `, ${skus.length} référence(s) libérée(s)` : ""}.`
+        : `Annonce effacée chez eBay, mais ${restants.length} référence(s) restent occupées (${restants[0]}) : republier avec le même SKU sera refusé tant qu'elles ne sont pas effacées depuis eBay.`,
+    );
   }
 
   async deactivateListing(

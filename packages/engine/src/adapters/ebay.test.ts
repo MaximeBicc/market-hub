@@ -1021,6 +1021,68 @@ describe("aspects communs face aux axes de variation", () => {
   });
 });
 
+describe("supprimer libère les références", () => {
+  it("efface les articles d'inventaire du groupe, pas seulement le groupe", async () => {
+    /*
+     * LA RÉFÉRENCE BRÛLÉE À VIE.
+     *
+     * Supprimer le groupe ne supprime PAS les articles d'inventaire : les
+     * SKU survivent chez eBay, invisibles. Republier le même produit se
+     * heurtait alors à « ce SKU existe déjà chez eBay » — et le vendeur
+     * devait changer de référence pour un article qu'il possède toujours.
+     * Constaté en base après une vraie suppression.
+     */
+    const groupe: Listing = {
+      id: "l-grp",
+      productId: "p1",
+      accountId: "acc-ebay",
+      remoteId: "GRP-1",
+      status: "active",
+      price: { amount: 599, currency: "EUR" },
+      stock: 5,
+      marketplaceData: {
+        inventoryItemGroupKey: "GRP-1",
+        offers: { "GRP-1-N": "o1", "GRP-1-B": "o2" },
+      },
+    };
+
+    const { http, sent } = fakeHttp([
+      { status: 204, body: {} }, // retrait préalable
+      { status: 204, body: {} }, // suppression du groupe
+      { status: 204, body: {} }, // article noir
+      { status: 204, body: {} }, // article blanc
+    ]);
+
+    const r = await adapter.deleteListing(ctxWith(http), groupe, "i");
+    expect(r.status).toBe("success");
+
+    const effaces = sent
+      .filter((a) => a.method === "DELETE" && a.url.includes("/inventory_item/"))
+      .map((a) => decodeURIComponent(a.url.split("/inventory_item/")[1] ?? ""));
+    expect(effaces.sort()).toEqual(["GRP-1-B", "GRP-1-N"]);
+    expect(r.message).toMatch(/2 référence\(s\) libérée/);
+  });
+
+  it("ne fait pas échouer la suppression quand un SKU résiste", async () => {
+    // L'annonce est déjà partie : c'est l'essentiel. Un SKU récalcitrant se
+    // signale, il n'annule pas une suppression accomplie.
+    const groupe: Listing = {
+      id: "l-grp", productId: "p1", accountId: "acc-ebay", remoteId: "GRP-1",
+      status: "active", price: { amount: 599, currency: "EUR" }, stock: 5,
+      marketplaceData: { inventoryItemGroupKey: "GRP-1", offers: { "GRP-1-N": "o1" } },
+    };
+    const { http } = fakeHttp([
+      { status: 204, body: {} },
+      { status: 204, body: {} },
+      { status: 400, body: { errors: [{ errorId: 25001, message: "occupé" }] } },
+    ]);
+
+    const r = await adapter.deleteListing(ctxWith(http), groupe, "i");
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/restent occupées/);
+  });
+});
+
 describe("restaurer une déclinaison retirée par eBay", () => {
   it("réécrit le groupe amputé avant de publier", async () => {
     /*
