@@ -2304,7 +2304,8 @@ h2.sec:first-child {
 }
 .declinaisons__ligne {
   display: grid;
-  grid-template-columns: 1fr auto auto 64px;
+  /* Une colonne de plus, en tête : la vignette du coloris. */
+  grid-template-columns: 28px 1fr auto auto 64px;
   gap: 10px;
   align-items: center;
   padding: 4px 0;
@@ -2316,6 +2317,22 @@ h2.sec:first-child {
 }
 .declinaisons__nom {
   font-weight: 500;
+}
+/* La vignette du coloris. Carrée et petite : elle sert à reconnaître, pas à
+   admirer — et sa taille fixe garde les noms alignés d'une ligne à l'autre,
+   qu'il y ait une photo ou non. */
+.declinaisons__photo {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--rule-soft);
+  border: 1px solid var(--line);
+  display: block;
+}
+.declinaisons__photo--vide {
+  background: var(--rule-soft);
+  opacity: 0.5;
 }
 
 /* Une déclinaison par ligne : nom, SKU, prix, stock, retrait. Dense, parce
@@ -2335,6 +2352,25 @@ h2.sec:first-child {
 @media (max-width: 640px) {
   .decl-ligne { grid-template-columns: 1fr 1fr; }
 }
+
+/* Un coloris venu d'une boutique : tout est en lecture SAUF la quantité, qui
+   appartient à l'outil. Déclarée APRÈS `.decl-ligne` et après la requête
+   média : à spécificité égale, c'est la dernière règle qui l'emporte, et la
+   placer avant revenait à ne rien écrire du tout. */
+.decl-ligne--lecture {
+  grid-template-columns: 32px 1fr auto 88px;
+  align-items: center;
+}
+@media (max-width: 640px) {
+  .decl-ligne--lecture { grid-template-columns: 32px 1fr 88px; }
+  .decl-ligne--lecture .row__s { display: none; }
+}
+.decl-vignette {
+  width: 32px; height: 32px; border-radius: 6px; object-fit: cover;
+  background: var(--rule-soft); border: 1px solid var(--line); display: block;
+}
+.decl-vignette--vide { opacity: .5; }
+.decl-nom { font-weight: 600; }
 .decl-ligne .input {
   padding: 6px 8px;
   font-size: 13px;

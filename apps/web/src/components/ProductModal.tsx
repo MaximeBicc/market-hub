@@ -20,7 +20,51 @@ function parseNumberInput(val: string | number | undefined): number {
   return isNaN(num) ? 0 : num;
 }
 
+/** Ce que les boutiques ont fait du nouveau stock. */
+interface RapportStock {
+  boutiques?: Array<{ nom: string; plateforme: string; ok: boolean; message?: string }>;
+  toutesOk?: boolean;
+}
+
+/**
+ * DIRE OÙ LE STOCK EST PARTI, PAS SEULEMENT QU'IL EST ENREGISTRÉ.
+ *
+ * « Produit mis à jour » ne distingue pas une écriture locale d'une
+ * propagation réussie vers trois boutiques — or c'est toute la différence
+ * entre un stock juste et une survente. Le message nomme donc les boutiques,
+ * et n'annonce jamais un succès qu'il n'a pas constaté.
+ */
+function messageEnregistrement(
+  edition: boolean,
+  rapport?: RapportStock,
+): string {
+  const base = edition ? "Produit mis à jour" : "Nouveau produit ajouté au stock";
+  const boutiques = rapport?.boutiques ?? [];
+  if (boutiques.length === 0) return `${base} !`;
+
+  const ok = boutiques.filter((b) => b.ok).map((b) => b.nom);
+  const rates = boutiques.filter((b) => !b.ok);
+
+  if (rates.length === 0) {
+    return `${base} — stock à jour sur ${ok.join(", ")}.`;
+  }
+  // L'échec d'abord : c'est lui qui demande une action.
+  return `${base}, mais ${rates.map((b) => b.nom).join(", ")} n'a pas suivi : ${
+    rates[0]?.message ?? "raison inconnue"
+  }${ok.length > 0 ? ` (à jour sur ${ok.join(", ")})` : ""}`;
+}
+
 interface LigneDecl {
+  /**
+   * L'identifiant de la variante, quand elle existe déjà.
+   *
+   * Il permet d'écrire le stock d'un produit venu d'une boutique sans
+   * toucher à sa structure : le nom, le SKU et le prix des coloris
+   * appartiennent à la plateforme, la QUANTITÉ appartient à l'outil.
+   */
+  id?: string;
+  /** La quantité au chargement, pour ne renvoyer que ce qui a bougé. */
+  stockInitial?: number;
   valeur: string;
   sku: string;
   prixEuro: string;
@@ -119,6 +163,7 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
       api.get<{
         axes: Array<{ name: string; values: string[] }>;
         variantes: Array<{
+          id: string;
           sku: string | null;
           optionValues: string[];
           priceAmount: number;
@@ -138,6 +183,8 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
       setAxe(declData.axes[0]?.name || "Couleur");
       setDecl(
         vivantes.map((v) => ({
+          id: v.id,
+          stockInitial: v.onHand ?? 0,
           valeur: v.optionValues.join(" / "),
           sku: v.sku ?? "",
           prixEuro: v.priceAmount ? (v.priceAmount / 100).toFixed(2) : "",
@@ -209,10 +256,11 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
         tags: tags.map((t) => t.trim()).filter(Boolean),
       };
 
-      const cree = await api.post<{ ok: boolean; id: string; sku: string }>(
-        "/products",
-        payload,
-      );
+      const cree: { ok: boolean; id: string; sku: string; rapport?: RapportStock } =
+        await api.post<{ ok: boolean; id: string; sku: string }>(
+          "/products",
+          payload,
+        );
 
       /*
        * Les déclinaisons ensuite, et seulement si on en a.
@@ -222,8 +270,29 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
        * laissé tel quel : ses coloris viennent de la boutique, et la route
        * les refuserait de toute façon.
        */
+      /*
+       * PRODUIT VENU D'UNE BOUTIQUE : on n'écrit QUE les quantités.
+       *
+       * Son nom, son SKU et son prix par coloris appartiennent à la
+       * plateforme et seraient défaits au relevé suivant. Sa quantité, elle,
+       * appartient à l'outil. L'écran refusait tout en bloc : on tapait 20 et
+       * le chiffre revenait à sa valeur d'avant, sans un mot.
+       */
+      if (synchronise) {
+        const changes = decl
+          .filter((l) => l.id && Number(l.stock) !== l.stockInitial)
+          .map((l) => ({ variantId: l.id!, stock: Math.max(0, Number(l.stock) || 0) }));
+        if (changes.length > 0) {
+          const r = await api.put<RapportStock>(
+            `/products/${cree.id}/stocks`,
+            { lignes: changes },
+          );
+          return { ...cree, rapport: r };
+        }
+      }
+
       if (decl.length > 0 && !synchronise) {
-        await api.put(`/products/${cree.id}/declinaisons`, {
+        const r = await api.put<RapportStock>(`/products/${cree.id}/declinaisons`, {
           axe: axe.trim() || "Couleur",
           lignes: decl
             .filter((l) => l.valeur.trim())
@@ -237,16 +306,17 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
               stock: Math.max(0, Number(l.stock) || 0),
             })),
         });
+        return { ...cree, rapport: r };
       }
 
       return cree;
     },
-    onSuccess: () => {
+    onSuccess: (cree) => {
       qc.invalidateQueries({ queryKey: ["inventory"] });
       qc.invalidateQueries({ queryKey: ["products"] });
       qc.invalidateQueries({ queryKey: ["product-tags"] });
       qc.invalidateQueries({ queryKey: ["variantes"] });
-      toast(isEditing ? "Produit mis à jour !" : "Nouveau produit ajouté au stock !");
+      toast(messageEnregistrement(isEditing, cree.rapport));
       onSuccess?.();
       onClose();
     },
@@ -461,11 +531,53 @@ export function ProductModal({ product, consumables = [], onClose, onSuccess }: 
             <div className="field">
               <label className="field__label">Déclinaisons</label>
               {synchronise ? (
-                <p className="row__s" style={{ whiteSpace: "normal", margin: 0 }}>
-                  Ce produit vient d'une boutique connectée. Ses déclinaisons y
-                  sont réécrites à chaque synchronisation — elles se modifient
-                  chez la plateforme, pas ici.
-                </p>
+                /*
+                 * STRUCTURE VERROUILLÉE, QUANTITÉ OUVERTE.
+                 *
+                 * Ce bloc refusait TOUTE saisie parce que le produit vient
+                 * d'une boutique. C'est juste pour le nom, le SKU et le prix
+                 * — la plateforme les réécrit au relevé suivant — et faux
+                 * pour la quantité, dont l'outil est la source de vérité.
+                 * Résultat : on tapait 20, le chiffre revenait, et rien ne
+                 * disait pourquoi.
+                 */
+                <>
+                  <p className="row__s" style={{ whiteSpace: "normal", margin: "0 0 10px" }}>
+                    Ce produit vient d'une boutique connectée : le nom, la
+                    référence et le prix de chaque coloris y sont écrits et
+                    seront réécrits au prochain relevé. <b>La quantité, elle,
+                    se règle ici</b> — c'est l'outil qui fait foi, et
+                    l'enregistrement la pousse sur toutes les boutiques.
+                  </p>
+                  {decl.map((l, i) => (
+                    <div className="decl-ligne decl-ligne--lecture" key={l.id ?? i}>
+                      {l.photo ? (
+                        <img className="decl-vignette" src={l.photo} alt="" loading="lazy" />
+                      ) : (
+                        <span className="decl-vignette decl-vignette--vide" aria-hidden="true" />
+                      )}
+                      <span className="decl-nom">{l.valeur}</span>
+                      <span className="row__s">{l.sku || "sans SKU"}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        className="input font-mono"
+                        style={{ textAlign: "center", fontWeight: 700 }}
+                        value={l.stock}
+                        title="Quantité en stock"
+                        onChange={(e) =>
+                          setDecl(
+                            decl.map((x, j) =>
+                              j === i
+                                ? { ...x, stock: Math.max(0, Number(e.target.value) || 0) }
+                                : x,
+                            ),
+                          )
+                        }
+                      />
+                    </div>
+                  ))}
+                </>
               ) : (
                 <>
                   {decl.length > 0 && (

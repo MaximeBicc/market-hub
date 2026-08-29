@@ -27,6 +27,7 @@ import {
   retirerPartout,
   supprimerPartout,
 } from "../lib/disponibilite.js";
+import { pousserStock } from "../lib/pousser-stock.js";
 import { recalculerStockProduit } from "../lib/stock-produit.js";
 import { marquerSupprime } from "../lib/suppression.js";
 import { authenticate, type AuthedUser } from "../lib/session.js";
@@ -1745,12 +1746,30 @@ api.post("/products/:id/stock", async (c) => {
       .where(eq(listing.sku, existing.sku));
   }
 
+  /*
+   * ET LE NOUVEAU STOCK PART CHEZ LES PLATEFORMES.
+   *
+   * La ligne au-dessus n'écrit que NOTRE copie de l'annonce : elle change ce
+   * qu'on affiche, pas ce que la boutique propose. Sans cet envoi, le
+   * « +1 / -1 » donnait l'illusion d'agir, et la vraie quantité ne bougeait
+   * qu'au rapprochement suivant.
+   *
+   * Rien n'est poussé quand la valeur n'a pas changé : recliquer sur un
+   * chiffre déjà juste ne doit rien coûter.
+   */
+  const pousse =
+    newStock === existing.stock
+      ? { boutiques: [], toutesOk: true }
+      : await pousserStock(c.env, id, [{ variantId: seule, stock: newStock }]);
+
   const dispo = await appliquerDisponibilite(c.env, id);
 
   return c.json({
     ok: true,
     id,
     stock: newStock,
+    boutiques: pousse.boutiques,
+    toutesOk: pousse.toutesOk,
     annonces: dispo.action === "rien" ? undefined : dispo,
   });
 });
@@ -2482,6 +2501,74 @@ api.get("/products/:id/variantes", async (c) => {
  * ligne pointe sur l'identifiant de variante, et l'effacer laisserait cette
  * annonce sans stock rattachable — sans erreur, jusqu'à la prochaine vente.
  */
+/**
+ * ÉCRIRE LE STOCK SANS TOUCHER À LA STRUCTURE.
+ *
+ * Les déclinaisons d'un produit venu d'une boutique appartiennent à cette
+ * boutique : leur nom, leur SKU, leur prix y sont écrits, et les réécrire
+ * d'ici serait défait au relevé suivant. La QUANTITÉ, elle, appartient à
+ * l'outil — c'est la règle du projet, et c'est même la raison d'être de cet
+ * inventaire.
+ *
+ * L'écran de modification confondait les deux : parce que le produit venait
+ * d'une boutique, il interdisait TOUTE saisie, stock compris. On pouvait
+ * taper 20 et voir le chiffre revenir à sa valeur d'avant, sans un mot
+ * d'explication. Cette route sépare enfin les deux natures.
+ */
+api.put("/products/:id/stocks", async (c) => {
+  const db = drizzle(c.env.DB);
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{ lignes?: Array<{ variantId?: string; stock?: number }> }>()
+    .catch(() => ({}) as { lignes?: never });
+
+  const [p] = await db.select({ id: product.id }).from(product).where(eq(product.id, id)).limit(1);
+  if (!p) return c.json({ error: "product_not_found" }, 404);
+
+  /*
+   * Seules les variantes DE CE PRODUIT sont acceptées. Sans ce filtre, la
+   * route écrirait le stock de n'importe quelle variante du catalogue à qui
+   * en connaît l'identifiant.
+   */
+  const siennes = new Map(
+    (
+      await db
+        .select({ id: variant.id, status: variant.status })
+        .from(variant)
+        .where(eq(variant.productId, id))
+    ).map((v) => [v.id, v.status]),
+  );
+
+  const mod = buildEngine(c.env, { used: 0 });
+  const bouges: Array<{ variantId: string; stock: number }> = [];
+  let ecrites = 0;
+
+  for (const l of body.lignes ?? []) {
+    const variantId = l.variantId;
+    if (!variantId || siennes.get(variantId) !== "active") continue;
+    const stock = Math.max(0, Math.round(Number(l.stock ?? 0)));
+
+    const avant = (await mod.inventoryService.ensure(variantId, 0)).onHand;
+    if (avant === stock) continue;
+    await mod.inventoryService.set(variantId, stock);
+    bouges.push({ variantId, stock });
+    ecrites++;
+  }
+
+  await recalculerStockProduit(db, id);
+
+  const pousse = await pousserStock(c.env, id, bouges);
+  const dispo = await appliquerDisponibilite(c.env, id);
+
+  return c.json({
+    ok: true,
+    ecrites,
+    boutiques: pousse.boutiques,
+    toutesOk: pousse.toutesOk,
+    ...(dispo.action === "rien" ? {} : { annonces: dispo }),
+  });
+});
+
 api.put("/products/:id/declinaisons", async (c) => {
   const db = drizzle(c.env.DB);
   const id = c.req.param("id");
@@ -2622,6 +2709,8 @@ api.put("/products/:id/declinaisons", async (c) => {
   const now = Math.floor(Date.now() / 1000);
   const mod = buildEngine(c.env, { used: 0 });
   const gardees = new Set<string>();
+  /** Les déclinaisons dont la quantité a réellement changé. */
+  const bouges: Array<{ variantId: string; stock: number }> = [];
 
   for (let i = 0; i < lignes.length; i++) {
     const l = lignes[i]!;
@@ -2664,8 +2753,18 @@ api.put("/products/:id/declinaisons", async (c) => {
         },
       });
 
-    await mod.inventoryService.ensure(variantId, 0);
+    /*
+     * L'ANCIENNE QUANTITÉ AVANT DE L'ÉCRASER : c'est elle qui dit si cette
+     * déclinaison a bougé. Propager les dix-sept coloris quand un seul a
+     * changé brûlerait le budget de sous-requêtes pour rien, et ferait
+     * échouer l'écriture qui comptait vraiment.
+     *
+     * `ensure` rend l'existant quand il y en a un : c'est donc lui qui porte
+     * la valeur d'avant, sans lecture supplémentaire.
+     */
+    const avant = (await mod.inventoryService.ensure(variantId, 0)).onHand;
     await mod.inventoryService.set(variantId, l.stock);
+    if (avant !== l.stock) bouges.push({ variantId, stock: l.stock });
   }
 
   /*
@@ -2698,7 +2797,25 @@ api.put("/products/:id/declinaisons", async (c) => {
 
   await recalculerStockProduit(db, id);
 
-  return c.json({ ok: true, declinaisons: lignes.length, archivees });
+  /*
+   * LE STOCK PART VERS LES BOUTIQUES, ET ON DIT SI C'EST PASSÉ.
+   *
+   * Sans cette étape, l'écran affichait « enregistré » pendant que les
+   * annonces gardaient l'ancienne quantité — jusqu'au rapprochement, un quart
+   * d'heure plus tard. Pendant ce quart d'heure, une boutique peut vendre une
+   * pièce qui n'existe plus.
+   */
+  const pousse = await pousserStock(c.env, id, bouges);
+  const dispo = await appliquerDisponibilite(c.env, id);
+
+  return c.json({
+    ok: true,
+    declinaisons: lignes.length,
+    archivees,
+    boutiques: pousse.boutiques,
+    toutesOk: pousse.toutesOk,
+    ...(dispo.action === "rien" ? {} : { annonces: dispo }),
+  });
 });
 
 /**

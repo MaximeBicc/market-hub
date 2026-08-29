@@ -852,6 +852,8 @@ interface DeclinaisonLigne {
   optionValues: string[];
   priceAmount: number;
   priceCurrency: string;
+  /** La photo du coloris. L'API la renvoyait déjà ; l'écran l'ignorait. */
+  imageUrl: string | null;
   status: string;
   onHand: number | null;
   reserved: number | null;
@@ -892,6 +894,29 @@ function DeclinaisonsProduit({ produitId }: { produitId: string }) {
     <div className="declinaisons">
       {lignes.map((v) => (
         <div className="declinaisons__ligne" key={v.id}>
+          {/*
+            LA PHOTO AVANT LE NOM.
+            « Bleu marine » et « Bleu nuit » ne se distinguent pas de mémoire :
+            sur un produit à dix-sept coloris, c'est la vignette qui dit lequel
+            est épuisé, pas son intitulé. Un carré neutre tient la place quand
+            la déclinaison n'a pas d'image, pour que la colonne des noms reste
+            alignée d'une ligne à l'autre.
+          */}
+          {v.imageUrl ? (
+            <img
+              className="declinaisons__photo"
+              src={v.imageUrl}
+              alt=""
+              loading="lazy"
+              /* Une URL morte laisserait une icône cassée : on retombe sur la
+                 place vide, qui ne prétend rien. */
+              onError={(e) => {
+                e.currentTarget.style.visibility = "hidden";
+              }}
+            />
+          ) : (
+            <span className="declinaisons__photo declinaisons__photo--vide" aria-hidden="true" />
+          )}
           <span className="declinaisons__nom">
             {v.optionValues.join(" · ") || "sans déclinaison"}
           </span>
