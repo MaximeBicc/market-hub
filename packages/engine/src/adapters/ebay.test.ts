@@ -1042,8 +1042,14 @@ describe("restaurer une déclinaison retirée par eBay", () => {
       images: ["https://ex.fr/p.jpg"],
       options: [{ name: "Couleur", values: ["Noir", "Blanc"] }],
       variants: [
-        variante("couleur=noir", ["Noir"], "GRP-1-N"),
-        variante("couleur=blanc", ["Blanc"], "GRP-1-B"),
+        {
+          ...variante("couleur=noir", ["Noir"], "GRP-1-N"),
+          marketplaceData: { stock: 20 },
+        },
+        {
+          ...variante("couleur=blanc", ["Blanc"], "GRP-1-B"),
+          marketplaceData: { stock: 19 },
+        },
       ],
     };
     const groupe: Listing = {
@@ -1064,6 +1070,8 @@ describe("restaurer une déclinaison retirée par eBay", () => {
       // Le groupe tel qu'eBay le détient : le noir n'y est plus.
       { body: { variantSKUs: ["GRP-1-B"] } },
       { status: 204, body: {} }, // réécriture du groupe
+      { status: 204, body: {} }, // quantité du noir
+      { status: 204, body: {} }, // quantité du blanc
       { body: { listingId: "5566" } }, // publication
     ]);
 
@@ -1081,6 +1089,23 @@ describe("restaurer une déclinaison retirée par eBay", () => {
     expect(ecriture).toBeDefined();
     // La liste ENTIÈRE est renvoyée : le PUT est un remplacement complet.
     expect(ecriture!.body.variantSKUs).toEqual(["GRP-1-N", "GRP-1-B"]);
+
+    /*
+     * ET LEUR QUANTITÉ AVEC. Publier ne fait que rendre visible ce qu'eBay
+     * détient : une annonce couchée pour rupture y est à zéro, et republier
+     * sans réécrire la ramènerait « en rupture de stock », marchandise en
+     * main. C'est exactement ce qui a été constaté.
+     */
+    const quantites = sent
+      .filter((a) => a.url.includes("bulk_update_price_quantity"))
+      .map((a) => a.body.requests[0]);
+    expect(quantites).toHaveLength(2);
+    expect(quantites[0].shipToLocationAvailability.quantity).toBe(20);
+    expect(quantites[0].offers[0]).toEqual({
+      offerId: "o1",
+      availableQuantity: 20,
+    });
+    expect(quantites[1].shipToLocationAvailability.quantity).toBe(19);
   });
 
   it("ne touche à rien quand le groupe est complet", async () => {
@@ -1106,6 +1131,7 @@ describe("restaurer une déclinaison retirée par eBay", () => {
       { body: { variantSKUs: ["GRP-1-N", "GRP-1-B"] } },
       { body: { listingId: "5566" } },
     ]);
+    // Aucune quantité connue sur ces variantes : rien à réécrire.
 
     await adapter.activateListing(
       ctxWith(http, { categoryTreeId: "3", appToken: "app", appTokenExpiresAt: FUTUR }),

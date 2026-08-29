@@ -661,9 +661,29 @@ export class MarketplaceOrchestrator {
           const actives = (
             await this.variants.listByProduct(input.productId)
           ).filter((v) => v.status === "active");
+          /*
+           * LE STOCK VOYAGE AVEC LA FICHE, comme à la création.
+           *
+           * Sans lui, un module qui remet une annonce en vente ne peut pas
+           * lui redonner ses quantités : il publie ce que la plateforme
+           * détenait, c'est-à-dire zéro quand l'annonce avait été couchée.
+           * L'annonce revient alors « en rupture de stock » alors que la
+           * marchandise est là — constaté sur eBay.
+           */
+          const avecStock = await Promise.all(
+            actives.map(async (v) => {
+              const stock = (await this.inventory.get(v.id))?.onHand;
+              return stock === undefined
+                ? v
+                : {
+                    ...v,
+                    marketplaceData: { ...(v.marketplaceData ?? {}), stock },
+                  };
+            }),
+          );
           produit = {
             ...brut,
-            ...(actives.length > 0 ? { variants: actives } : {}),
+            ...(avecStock.length > 0 ? { variants: avecStock } : {}),
           };
         }
       }

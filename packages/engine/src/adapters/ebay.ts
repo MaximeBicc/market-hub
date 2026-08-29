@@ -2627,6 +2627,80 @@ export class EbayAdapter implements MarketplaceAdapter {
     };
   }
 
+  /**
+   * Réécrit la quantité de chaque déclinaison d'un groupe.
+   *
+   * PLAFONNÉ, et le plafond est DIT. Chaque écriture est une sous-requête, et
+   * l'invocation en compte quarante en tout : un produit à dix-sept coloris
+   * épuiserait le budget avant d'avoir publié. Ce qui dépasse sera écrit par
+   * le rapprochement de stock, qui repasse de toute façon — mais le taire
+   * ferait lire « publié » là où la moitié des coloris resteraient à zéro.
+   *
+   * Chaque échec est retenu sans interrompre les autres : un coloris refusé
+   * ne doit pas empêcher les seize suivants d'être servis.
+   */
+  private async ecrireQuantites(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    product: Product,
+  ): Promise<string> {
+    const PLAFOND = 12;
+    const offres = (listing.marketplaceData?.["offers"] ?? {}) as Record<
+      string,
+      string
+    >;
+
+    const aEcrire = (product.variants ?? [])
+      .filter((v) => v.status === "active")
+      .map((v) => ({ sku: v.sku?.trim(), stock: quantiteVariante(v) }))
+      .filter(
+        (x): x is { sku: string; stock: number } =>
+          Boolean(x.sku) && x.stock !== undefined,
+      );
+    if (aEcrire.length === 0) return "";
+
+    const lot = aEcrire.slice(0, PLAFOND);
+    const echecs: string[] = [];
+    for (const x of lot) {
+      try {
+        await this.call(ctx, "/sell/inventory/v1/bulk_update_price_quantity", {
+          method: "POST",
+          body: JSON.stringify({
+            requests: [
+              {
+                sku: x.sku,
+                shipToLocationAvailability: { quantity: x.stock },
+                ...(offres[x.sku]
+                  ? {
+                      offers: [
+                        { offerId: offres[x.sku], availableQuantity: x.stock },
+                      ],
+                    }
+                  : {}),
+              },
+            ],
+          }),
+        });
+      } catch (err) {
+        echecs.push(
+          `${x.sku} (${lireRefusGroupe(err instanceof Error ? err.message : String(err)).slice(0, 90)})`,
+        );
+      }
+    }
+
+    const reste = aEcrire.length - lot.length;
+    const parts: string[] = [];
+    if (echecs.length > 0) {
+      parts.push(`quantité refusée pour ${echecs.length} coloris : ${echecs[0]}`);
+    }
+    if (reste > 0) {
+      parts.push(
+        `${reste} coloris laissés au prochain rapprochement (budget de sous-requêtes)`,
+      );
+    }
+    return parts.length > 0 ? ` · ${parts.join(" ; ")}` : "";
+  }
+
   /** La forme de cette annonce chez eBay, telle que la création l'a laissée. */
   private forme(listing: Listing):
     | { type: "offre"; offerId: string }
@@ -2750,8 +2824,22 @@ export class EbayAdapter implements MarketplaceAdapter {
      * Le PUT du groupe est un remplacement complet : renvoyer la liste
      * entière suffit à rattacher ce qui manquait.
      */
+    let noteStock = "";
     if (forme.type === "groupe" && product) {
       await this.restaurerDeclinaisons(ctx, forme.cle, product);
+      /*
+       * REDONNER LEUR QUANTITÉ AVANT DE PUBLIER.
+       *
+       * Publier ne fait que rendre visible ce qu'eBay détient déjà. Une
+       * annonce couchée pour rupture y a été mise à zéro ; la republier sans
+       * rien d'autre la fait revenir « en rupture de stock », marchandise en
+       * main. Constaté : l'outil tenait 19 et 20, eBay affichait zéro sur les
+       * deux coloris.
+       *
+       * C'est le sens même de la règle du projet — le stock de l'outil fait
+       * foi — appliqué au moment où l'annonce redevient achetable.
+       */
+      noteStock = await this.ecrireQuantites(ctx, listing, product);
     }
 
     let r: { listingId?: string } | undefined;
@@ -2813,7 +2901,7 @@ export class EbayAdapter implements MarketplaceAdapter {
       ctx,
       listingId,
       forme.type === "groupe"
-        ? "Annonce à déclinaisons publiée d'un seul tenant."
+        ? `Annonce à déclinaisons publiée d'un seul tenant.${noteStock}`
         : "Annonce publiée et visible sur eBay.",
       listingId ? { listingId } : undefined,
       url,
