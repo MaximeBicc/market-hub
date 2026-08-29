@@ -1273,6 +1273,90 @@ describe("stock d'une déclinaison", () => {
     ],
   };
 
+  it("garde le délai de préparation de CHAQUE déclinaison", async () => {
+    /*
+     * LE REFUS RÉEL : « All offerings need readiness state ».
+     *
+     * L'écriture d'inventaire d'Etsy est un remplacement complet, et notre
+     * recopie ne gardait que le prix, la quantité et l'activation. Le délai
+     * de préparation, qu'Etsy rend pourtant à la lecture, tombait — et toute
+     * mise à jour de stock sur une annonce à déclinaisons échouait.
+     *
+     * Celui de l'annonce l'emporte sur le réglage de la boutique : c'est le
+     * choix du vendeur, et le remplacer changerait un délai annoncé à
+     * l'acheteur sans le lui dire.
+     */
+    const avecDelais = {
+      products: [
+        {
+          product_id: 1,
+          sku: "",
+          property_values: [{ property_id: 200, property_name: "Couleur", values: ["Noir"] }],
+          offerings: [
+            {
+              offering_id: 11,
+              price: { amount: 1990, divisor: 100 },
+              quantity: 5,
+              is_enabled: true,
+              readiness_state_id: 777,
+            },
+          ],
+        },
+        {
+          product_id: 2,
+          sku: "",
+          property_values: [{ property_id: 200, property_name: "Couleur", values: ["Bleu Marine"] }],
+          // Celle-ci n'en a pas : le réglage de la boutique prend le relais.
+          offerings: [
+            { offering_id: 12, price: { amount: 1990, divisor: 100 }, quantity: 4, is_enabled: true },
+          ],
+        },
+      ],
+    };
+
+    const { http, sent } = fakeHttp([{ body: avecDelais }, { body: {} }]);
+    const r = await adapter.updateStock(
+      ctxWith(http, PUBLIABLE),
+      annonce,
+      3,
+      "k",
+      variante("couleur=bleu-marine", ["Bleu Marine"]),
+    );
+
+    expect(r.status).toBe("success");
+    const ecrits = corpsPut(sent)?.products;
+    expect(ecrits[0].offerings[0].readiness_state_id).toBe(777);
+    // PUBLIABLE porte readinessStateId « rs1 », non numérique : rien à poser
+    // plutôt qu'un identifiant inventé.
+    expect(ecrits[1].offerings[0].readiness_state_id).toBeUndefined();
+  });
+
+  it("pose le délai de la boutique quand la déclinaison n'en a pas", async () => {
+    const sansDelai = {
+      products: [
+        {
+          product_id: 1,
+          sku: "",
+          property_values: [{ property_id: 200, property_name: "Couleur", values: ["Noir"] }],
+          offerings: [
+            { offering_id: 11, price: { amount: 1990, divisor: 100 }, quantity: 5, is_enabled: true },
+          ],
+        },
+      ],
+    };
+    const { http, sent } = fakeHttp([{ body: sansDelai }, { body: {} }]);
+    await adapter.updateStock(
+      ctxWith(http, { ...PUBLIABLE, readinessStateId: "1510416135313" }),
+      annonce,
+      3,
+      "k",
+      variante("couleur=noir", ["Noir"]),
+    );
+    expect(corpsPut(sent)?.products[0].offerings[0].readiness_state_id).toBe(
+      1510416135313,
+    );
+  });
+
   it("ne change que la déclinaison visée", async () => {
     const { http, sent } = fakeHttp([{ body: inventaire }, { body: {} }]);
     const r = await adapter.updateStock(

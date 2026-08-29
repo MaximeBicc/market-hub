@@ -338,6 +338,14 @@ interface EtsyOffering {
   quantity?: number;
   is_enabled?: boolean;
   is_deleted?: boolean;
+  /**
+   * Le délai de préparation de CETTE déclinaison.
+   *
+   * Etsy le rend à la lecture et l'EXIGE à l'écriture — « All offerings need
+   * readiness state ». Le laisser tomber en recopiant l'inventaire faisait
+   * échouer toute écriture de stock sur une annonce à déclinaisons.
+   */
+  readiness_state_id?: number;
 }
 
 interface EtsyInventoryProduct {
@@ -449,6 +457,16 @@ function ensembleNormalise(valeurs: string[]): Set<string> {
 function cleanProduct(
   p: EtsyInventoryProduct,
   patch: { quantity?: number; priceMinor?: number },
+  /**
+   * Le délai de préparation de la boutique, en dernier recours.
+   *
+   * Etsy exige un `readiness_state_id` sur CHAQUE déclinaison — « All
+   * offerings need readiness state ». On recopie d'abord celui que l'annonce
+   * porte déjà : c'est le choix du vendeur, et le remplacer par le réglage
+   * par défaut changerait un délai annoncé à l'acheteur sans le lui dire.
+   * Le réglage ne sert que lorsque l'annonce n'en a aucun.
+   */
+  readinessParDefaut?: number,
 ): Record<string, unknown> {
   return {
     sku: p.sku ?? "",
@@ -458,11 +476,17 @@ function cleanProduct(
       delete rest["value_pairs"];
       return rest;
     }),
-    offerings: (p.offerings ?? []).map((o) => ({
-      price: Number(((patch.priceMinor ?? toMinor(o.price)) / 100).toFixed(2)),
-      quantity: patch.quantity ?? o.quantity ?? 0,
-      is_enabled: o.is_enabled ?? true,
-    })),
+    offerings: (p.offerings ?? []).map((o) => {
+      const readiness = o.readiness_state_id ?? readinessParDefaut;
+      return {
+        price: Number(((patch.priceMinor ?? toMinor(o.price)) / 100).toFixed(2)),
+        quantity: patch.quantity ?? o.quantity ?? 0,
+        is_enabled: o.is_enabled ?? true,
+        ...(Number.isFinite(readiness) && Number(readiness) > 0
+          ? { readiness_state_id: Number(readiness) }
+          : {}),
+      };
+    }),
   };
 }
 
@@ -1423,7 +1447,11 @@ export class EtsyAdapter implements MarketplaceAdapter {
       // Un patch vide laisse la ligne telle qu'Etsy la rend : même prix, même
       // quantité. C'est ce qui permet de réécrire l'inventaire entier sans
       // toucher aux déclinaisons que la commande ne vise pas.
-      cleanProduct(p, !cible || p === cible ? patch : {}),
+      cleanProduct(
+        p,
+        !cible || p === cible ? patch : {},
+        Number(ctx.credentials?.["readinessStateId"] ?? 0) || undefined,
+      ),
     );
 
     await this.call(ctx, `/listings/${id}/inventory`, {
