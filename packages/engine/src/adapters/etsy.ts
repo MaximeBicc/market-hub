@@ -1668,19 +1668,62 @@ export class EtsyAdapter implements MarketplaceAdapter {
         url?: string;
         skus?: string[];
         images?: Array<{ url_570xN?: string; url_fullxfull?: string }>;
+        /**
+         * Le détail par déclinaison, demandé par `includes=Inventory`.
+         *
+         * Sans lui, `quantity` est le TOTAL de l'annonce — 19 blancs plus
+         * 20 noirs font 39 — et nous le comparions au stock du seul coloris
+         * auquel l'annonce est rattachée. Voir plus bas ce que cette
+         * confusion produisait.
+         */
+        inventory?: {
+          products?: Array<{
+            sku?: string;
+            offerings?: Array<{ quantity?: number; is_enabled?: boolean }>;
+          }>;
+        };
       }>;
     }>(
       ctx,
-      `/shops/${this.shopId(ctx)}/listings?state=${etat}&limit=${LIMITE}&offset=${offset}&includes=Images`,
+      `/shops/${this.shopId(ctx)}/listings?state=${etat}&limit=${LIMITE}&offset=${offset}&includes=Images,Inventory`,
     );
 
     const devise = ctx.credentials?.["currency"] ?? "EUR";
 
     const items: RemoteListing[] = (d.results ?? []).map((l) => {
-      const stock = l.quantity ?? 0;
+      /*
+       * LA QUANTITÉ DU COLORIS, PAS CELLE DE L'ANNONCE.
+       *
+       * Une annonce Etsy porte toutes ses déclinaisons, et son `quantity` en
+       * est la SOMME. Notre modèle, lui, rattache cette annonce à UNE
+       * variante — celle du premier SKU. Comparer la somme au stock de cette
+       * seule variante déclenchait une bagarre sans fin, observée en
+       * production : on poussait 20 chez Etsy, on relisait 39 au passage
+       * suivant, on « adoptait » 39 comme si le vendeur l'avait changé, puis
+       * on repoussait 39 sur les autres boutiques. Le stock corrigé à la main
+       * revenait tout seul à sa valeur d'avant, toutes les deux minutes.
+       *
+       * On lit donc l'offre du SKU auquel l'annonce est rattachée.
+       *
+       * CE QUI RESTE HORS DE VUE, et qui est assumé : les autres
+       * déclinaisons de la même annonce Etsy ne sont rattachées à rien ici.
+       * Un changement fait sur Etsy pour l'une d'elles ne sera pas vu. C'est
+       * cohérent avec la règle du projet — l'outil détient la vérité du
+       * stock — et bien préférable à une valeur fausse tenue pour vraie.
+       */
+      const sku = l.skus?.[0] || null;
+      const produits = l.inventory?.products ?? [];
+      const sien = sku ? produits.find((x) => x.sku === sku) : undefined;
+      const stockDuSien = sien
+        ? (sien.offerings ?? [])
+            .filter((o) => o.is_enabled !== false)
+            .reduce((n, o) => n + (o.quantity ?? 0), 0)
+        : undefined;
+
+      const stock = stockDuSien ?? l.quantity ?? 0;
       return {
         remoteId: String(l.listing_id),
-        sku: l.skus?.[0] || null,
+        sku,
         title: l.title ?? String(l.listing_id),
         price: {
           amount: toMinor(l.price),

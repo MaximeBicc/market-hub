@@ -1237,6 +1237,84 @@ function corpsPut(
   return put?.raw ? JSON.parse(put.raw) : undefined;
 }
 
+describe("relevé d'une annonce à déclinaisons", () => {
+  it("lit la quantité DU COLORIS, pas le total de l'annonce", async () => {
+    /*
+     * LA BAGARRE SANS FIN, OBSERVÉE EN PRODUCTION.
+     *
+     * `quantity` est la SOMME des déclinaisons — 19 blancs + 20 noirs = 39 —
+     * et notre modèle rattache l'annonce au premier SKU. Comparer 39 au stock
+     * du seul noir faisait conclure « la plateforme a changé », adopter 39,
+     * puis repousser 39 sur les autres boutiques : le stock corrigé à la main
+     * revenait tout seul à sa valeur d'avant, toutes les deux minutes.
+     */
+    const { http } = fakeHttp([
+      {
+        body: {
+          count: 1,
+          results: [
+            {
+              listing_id: 4564650504,
+              title: "Clip",
+              state: "active",
+              quantity: 39, // le TOTAL, celui qui trompait
+              price: { amount: 599, divisor: 100, currency_code: "EUR" },
+              skus: ["ALI-noir"],
+              inventory: {
+                products: [
+                  {
+                    sku: "ALI-blanc",
+                    offerings: [{ quantity: 19, is_enabled: true }],
+                  },
+                  {
+                    sku: "ALI-noir",
+                    offerings: [{ quantity: 20, is_enabled: true }],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const r = await adapter.fetchListings(ctxWith(http));
+    expect(r.items[0]?.sku).toBe("ALI-noir");
+    expect(r.items[0]?.stock).toBe(20);
+  });
+
+  it("retombe sur le total quand aucune déclinaison ne porte le SKU", async () => {
+    // Une annonce sans variations : total et quantité du coloris se
+    // confondent, et il ne faut pas rendre zéro sous prétexte d'absence.
+    const { http } = fakeHttp([
+      {
+        body: {
+          count: 1,
+          results: [
+            {
+              listing_id: 77,
+              title: "Bougie",
+              state: "active",
+              quantity: 8,
+              price: { amount: 1200, divisor: 100, currency_code: "EUR" },
+            },
+          ],
+        },
+      },
+    ]);
+    const r = await adapter.fetchListings(ctxWith(http));
+    expect(r.items[0]?.stock).toBe(8);
+  });
+
+  it("demande le détail des déclinaisons dans la même requête", async () => {
+    // `includes=Inventory` évite un appel par annonce : le quota de
+    // sous-requêtes ne permettrait pas de les payer un par un.
+    const { http, sent } = fakeHttp([{ body: { count: 0, results: [] } }]);
+    await adapter.fetchListings(ctxWith(http));
+    expect(sent[0]?.url).toContain("includes=Images,Inventory");
+  });
+});
+
 describe("stock d'une déclinaison", () => {
   /**
    * L'écriture d'inventaire d'Etsy est un remplacement COMPLET : il faut
