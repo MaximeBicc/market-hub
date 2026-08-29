@@ -1417,9 +1417,26 @@ export class ShopifyAdapter implements MarketplaceAdapter {
          * et son jeton permanent doit survivre.
          */
         await ctx.saveCredentials?.({ accessTokenExpiresAt: "0" });
+
+        /*
+         * DÉCLARER UN DROIT NE L'ACCORDE PAS.
+         *
+         * Le message envoyait cocher les portées puis relancer, « le jeton
+         * actuel suffit ». C'est faux pour une installation gérée par
+         * Shopify, et ça a coûté plusieurs allers-retours : la
+         * documentation dit que le marchand est INVITÉ À APPROUVER les
+         * portées ajoutées quand il ouvre l'application. Tant que cette
+         * approbation manque, la concession reste celle d'avant — et un
+         * jeton frais, obtenu par échange, porte donc toujours les anciens
+         * droits. Déclarer dans la configuration et accorder sur la
+         * boutique sont deux gestes distincts ; seul le second débloque.
+         */
+        const mode = ctx.credentials?.["clientId"]
+          ? "échangeable (client_credentials)"
+          : "permanent (application créée dans l'admin)";
         return this.manuel(
           ctx,
-          `Shopify a créé le produit actif, mais refuse de le rendre visible sur la boutique en ligne — il manque les droits read_publications/write_publications sur l'application. Coche-les dans Shopify (Paramètres → Applications → ton app → Configuration → « Admin API integration », pas Storefront), Enregistre, puis relance : le jeton actuel suffit. Refus exact de Shopify : « ${detail.slice(0, 160)} »${portes ? ` — Droits actuellement portés par le jeton : ${portes}.` : ""}`,
+          `Shopify a créé le produit actif mais refuse la mise en vitrine : la concession accordée à cette boutique ne porte pas read_publications. Déclarer les portées dans la configuration ne suffit PAS — Shopify demande au marchand d'APPROUVER les portées ajoutées, et cette approbation se fait en OUVRANT l'application depuis l'admin de la boutique (Paramètres → Applications et canaux de vente → MarketHub → Ouvrir). Accepte l'écran de permissions, puis relance ici. Refus exact de Shopify : « ${detail.slice(0, 160)} »${portes ? ` — Droits actuellement accordés : ${portes}` : ""} — Jeton ${mode}.`,
         );
       }
       throw error;
