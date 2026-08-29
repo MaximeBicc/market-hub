@@ -57,8 +57,48 @@ const BOUTIQUES: Record<string, { nom: string; lettre: string }> = {
   alibaba: { nom: "Alibaba", lettre: "A" },
 };
 
-function Annonces({ listings }: { listings?: ListingRow[] | undefined }) {
+function Annonces({
+  listings,
+  produitId,
+  aDesPhotosDeColoris,
+}: {
+  listings?: ListingRow[] | undefined;
+  produitId: string;
+  /** Vrai quand au moins une déclinaison porte une photo propre. */
+  aDesPhotosDeColoris: boolean;
+}) {
   const rows = listings ?? [];
+
+  /*
+   * ILLUSTRER LES COLORIS D'UNE ANNONCE DÉJÀ EN LIGNE.
+   *
+   * Le rattachement « choisir Noir change l'image » se fait à la création.
+   * Une annonce publiée avant que la fonction existe ne l'a pas, et
+   * republier coûterait un frais d'insertion chez Etsy. Ce bouton ne touche
+   * QUE les visuels — ni le prix, ni le stock, ni le texte.
+   *
+   * Il n'apparaît que s'il a quelque chose à faire : au moins une annonce et
+   * au moins une photo de coloris.
+   */
+  const illustrer = useMutation({
+    mutationFn: () =>
+      api.post<{ results: Array<{ marketplace: string; status: string; message?: string }> }>(
+        "/engine/photos",
+        { productId: produitId },
+      ),
+    onSuccess: (r) => {
+      const ok = r.results.filter((x) => x.status === "success");
+      const rates = r.results.filter((x) => x.status !== "success");
+      toast(
+        rates.length === 0
+          ? `Coloris illustrés sur ${ok.map((x) => x.marketplace).join(", ")}`
+          : `${ok.length > 0 ? `Fait sur ${ok.map((x) => x.marketplace).join(", ")}. ` : ""}${rates[0]?.marketplace} : ${rates[0]?.message ?? "échec"}`,
+      );
+    },
+    onError: (e: unknown) =>
+      toast(e instanceof Error ? e.message : "Échec"),
+  });
+
   if (rows.length === 0) return null;
 
   return (
@@ -99,6 +139,20 @@ function Annonces({ listings }: { listings?: ListingRow[] | undefined }) {
           </span>
         );
       })}
+      {aDesPhotosDeColoris && (
+        <button
+          type="button"
+          className="annonce-illustrer"
+          title="Rattacher chaque photo à son coloris sur les boutiques — ne touche ni au prix, ni au stock, ni au texte"
+          disabled={illustrer.isPending}
+          onClick={(e) => {
+            e.stopPropagation();
+            illustrer.mutate();
+          }}
+        >
+          {illustrer.isPending ? "…" : "Illustrer les coloris"}
+        </button>
+      )}
     </span>
   );
 }
@@ -439,7 +493,11 @@ export function Inventory() {
                         )}
                         <span className="product-card-title">{p.title}</span>
                         <code className="product-card-sku">{p.sku}</code>
-                        <Annonces listings={p.listings} />
+                        <Annonces
+                          listings={p.listings}
+                          produitId={p.id}
+                          aDesPhotosDeColoris={(p.variantCount ?? 0) > 1}
+                        />
                         {isOut && <span className="pill pill--stop">Rupture</span>}
                         {isLow && <span className="pill pill--warn">Stock bas (≤ {p.minAlert})</span>}
                       </div>

@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { CanonicalOrderEvent } from "@hub/engine";
 import { COMMANDES, etatCommande } from "@hub/engine";
-import { commandLog, inventory, product, shop, variant } from "../db/schema.js";
+import { commandLog, inventory, listing, product, shop, variant } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { authenticate } from "../lib/session.js";
 import { buildEngine } from "../engine/module.js";
@@ -254,6 +254,48 @@ engine.post("/stock", async (c) => {
     ...(body.variantId ? { variantId: body.variantId } : {}),
     accountIds: body.accountIds,
     stock: body.stock,
+    idempotencyKey: key,
+  });
+
+  return c.json({ ...outcome, idempotencyKey: key });
+});
+
+/**
+ * Repose les photos des coloris sur les annonces déjà en ligne.
+ *
+ * Sans destinataires explicites, toutes les boutiques actives du produit :
+ * c'est ce qu'on veut d'un bouton « illustrer les coloris » — le geste vise
+ * le produit, pas une plateforme en particulier.
+ */
+engine.post("/photos", async (c) => {
+  const body = await c.req.json<{
+    productId: string;
+    accountIds?: string[];
+    idempotencyKey?: string;
+  }>();
+  if (!body.productId) return c.json({ error: "productId requis" }, 400);
+  const key = body.idempotencyKey ?? crypto.randomUUID();
+
+  const db = drizzle(c.env.DB);
+  let cibles = body.accountIds ?? [];
+  if (cibles.length === 0) {
+    const rows = await db
+      .selectDistinct({ shopId: listing.shopId })
+      .from(listing)
+      .innerJoin(shop, eq(shop.id, listing.shopId))
+      .where(
+        and(eq(listing.productId, body.productId), eq(shop.status, "active")),
+      );
+    cibles = rows.map((r) => r.shopId);
+  }
+  if (cibles.length === 0) {
+    return c.json({ error: "Ce produit n'a aucune annonce à illustrer." }, 400);
+  }
+
+  const mod = buildEngine(c.env);
+  const outcome = await mod.orchestrator.refreshMedia({
+    productId: body.productId,
+    accountIds: cibles,
     idempotencyKey: key,
   });
 

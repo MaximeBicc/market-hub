@@ -1622,6 +1622,105 @@ export class EtsyAdapter implements MarketplaceAdapter {
     return this.ok(ctx, id);
   }
 
+/**
+   * Repose les photos des coloris sur une annonce Etsy déjà en ligne.
+   *
+   * REFUSE DE SE RÉPÉTER, et c'est la raison d'être de la marque posée à la
+   * fin. Etsy ne permet pas de reconnaître une image déjà versée : il la
+   * réhéberge sous sa propre adresse, et rien dans sa réponse ne renvoie à
+   * l'URL d'origine. Un second passage téléverserait donc les mêmes photos
+   * une deuxième fois — jusqu'à saturer les dix places de l'annonce avec des
+   * doublons. Mieux vaut refuser que salir la boutique.
+   */
+  async refreshMedia(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    product: Product,
+  ): Promise<TargetResult> {
+    const listingId = Number(listing.remoteId);
+    if (!Number.isFinite(listingId) || listingId <= 0) {
+      return this.aLaMain(ctx, "Annonce Etsy sans identifiant exploitable.");
+    }
+
+    if (listing.marketplaceData?.["photosCouleurs"] === true) {
+      return this.ok(
+        ctx,
+        listing.remoteId,
+        "Photos par coloris déjà posées sur cette annonce — Etsy ne permet pas de les reposer sans créer de doublons.",
+      );
+    }
+
+    const variantes = (product.variants ?? []).filter(
+      (v) => v.status === "active" && v.imageUrl,
+    );
+    if (variantes.length === 0) {
+      return this.ok(ctx, listing.remoteId, "Aucune photo de coloris à poser.");
+    }
+
+    /*
+     * Le rang de départ suit les photos existantes : les poser à partir de 1
+     * réordonnerait la galerie et changerait la photo de couverture, que le
+     * vendeur a peut-être choisie.
+     */
+    let rang = 0;
+    try {
+      const dejaLa = await this.call<{ count?: number }>(
+        ctx,
+        `/shops/${this.shopId(ctx)}/listings/${listingId}/images`,
+      );
+      rang = Math.max(0, Number(dejaLa.count ?? 0));
+    } catch {
+      // Illisible : on repart de zéro, Etsy placera à la suite de toute façon.
+    }
+
+    const idParUrl = new Map<string, number>();
+    const refus: string[] = [];
+    for (const v of variantes) {
+      const url = v.imageUrl!.trim();
+      if (idParUrl.has(url)) continue;
+      try {
+        const id = await this.envoyerImage(ctx, listingId, url, rang);
+        rang += 1;
+        if (id !== null) idParUrl.set(url, id);
+      } catch (err) {
+        refus.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    if (idParUrl.size === 0) {
+      return {
+        accountId: ctx.account.id,
+        marketplace: ctx.account.marketplace,
+        status: "failed",
+        message: `Aucune photo n'a pu être versée chez Etsy${refus[0] ? ` — ${refus[0]}` : ""}`,
+      };
+    }
+
+    const note = await this.rattacherPhotosCouleurs(
+      ctx,
+      listingId,
+      variantes,
+      idParUrl,
+    );
+    const rattachees = /(\d+) photo\(s\) rattachée/.exec(note)?.[1];
+
+    return {
+      accountId: ctx.account.id,
+      marketplace: ctx.account.marketplace,
+      status: "success",
+      ...(listing.remoteId ? { remoteId: listing.remoteId } : {}),
+      /*
+       * La marque n'est posée QUE si le rattachement a réellement abouti :
+       * la poser sur un échec interdirait le seul nouvel essai qui aurait pu
+       * réussir.
+       */
+      ...(rattachees ? { marketplaceData: { photosCouleurs: true } } : {}),
+      message: rattachees
+        ? `${rattachees} coloris illustré(s) : choisir une couleur change la photo.`
+        : `Photos versées, mais${note || " le rattachement a échoué"}`,
+    };
+  }
+
   async activateListing(
     ctx: MarketplaceContext,
     listing: Listing,

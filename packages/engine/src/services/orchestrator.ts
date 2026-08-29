@@ -732,6 +732,78 @@ export class MarketplaceOrchestrator {
    * n'existe que sur la plateforme où elle a été passée. La diffuser vers
    * plusieurs comptes n'aurait aucun sens.
    */
+/**
+   * REPOSE LES PHOTOS DES COLORIS SUR LES ANNONCES DÉJÀ EN LIGNE.
+   *
+   * Le rattachement se fait normalement à la création. Une annonce publiée
+   * avant que la fonction existe ne l'a donc pas — et republier coûterait un
+   * frais d'insertion chez Etsy, une place de plafond chez eBay. D'où cette
+   * commande, qui ne touche QUE les visuels.
+   *
+   * `listingUpdate` est la capacité requise : illustrer, c'est modifier une
+   * annonce existante. Une plateforme qui ne sait pas rattacher une image à
+   * une déclinaison n'implémente pas `refreshMedia` et se voit écartée avec
+   * un message clair plutôt qu'un échec.
+   */
+  async refreshMedia(input: {
+    productId: ProductId;
+    accountIds: AccountId[];
+    idempotencyKey: string;
+  }): Promise<CommandOutcome> {
+    const brut = await this.products.get(input.productId);
+    if (!brut) throw new Error(`Produit inconnu : ${input.productId}`);
+    const actives = (await this.variants.listByProduct(input.productId)).filter(
+      (v) => v.status === "active",
+    );
+    const product: Product = {
+      ...brut,
+      ...(actives.length > 0 ? { variants: actives } : {}),
+    };
+
+    return this.fanOut(input.accountIds, "listingUpdate", async (ctx, adapter) => {
+      if (!adapter.refreshMedia) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message: `${ctx.account.marketplace} ne sait pas rattacher une photo à une déclinaison.`,
+        };
+      }
+
+      const annonces = await this.listings.listByProductAndAccount(
+        input.productId,
+        ctx.account.id,
+      );
+      /*
+       * UNE SEULE ANNONCE PAR COMPTE. Chez Shopify, chaque coloris a sa
+       * ligne mais toutes désignent le même produit distant : les traiter
+       * une par une referait le même travail autant de fois, en versant
+       * autant de doublons chez Etsy.
+       */
+      const cible = annonces.find((l) => l.status === "active") ?? annonces[0];
+      if (!cible) {
+        return {
+          accountId: ctx.account.id,
+          marketplace: ctx.account.marketplace,
+          status: "unsupported",
+          message: "Aucune annonce pour ce produit sur ce compte",
+        };
+      }
+
+      const r = await adapter.refreshMedia(ctx, cible, product);
+      if (r.status === "success" && r.marketplaceData) {
+        await this.listings.put({
+          ...cible,
+          marketplaceData: {
+            ...(cible.marketplaceData ?? {}),
+            ...r.marketplaceData,
+          },
+        });
+      }
+      return r;
+    });
+  }
+
   async fulfillOrder(input: {
     accountId: AccountId;
     fulfillment: FulfillmentInput;

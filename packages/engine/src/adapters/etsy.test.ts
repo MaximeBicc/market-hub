@@ -1333,6 +1333,82 @@ describe("photos rattachées à leur coloris", () => {
   });
 });
 
+describe("reposer les photos sur une annonce existante", () => {
+  const produit: Product = {
+    id: "p1",
+    sku: "CLIP",
+    title: "Clip",
+    price: { amount: 599, currency: "EUR" },
+    stock: 5,
+    options: [{ name: "Couleur", values: ["Noir"] }],
+    variants: [
+      { ...variante("couleur=noir", ["Noir"], "CLIP-N"), imageUrl: "https://img/noir.jpg" },
+    ],
+  };
+  const enLigne: Listing = {
+    id: "l1",
+    productId: "p1",
+    accountId: "acc-etsy",
+    remoteId: "900",
+    status: "active",
+    price: { amount: 599, currency: "EUR" },
+    stock: 5,
+    marketplaceData: {},
+  };
+
+  it("refuse de se répéter une fois les photos posées", async () => {
+    /*
+     * LA GARDE QUI PROTÈGE LA BOUTIQUE.
+     *
+     * Etsy réhéberge les images sous ses propres adresses : rien dans sa
+     * réponse ne renvoie à l'URL d'origine, donc rien ne permet de
+     * reconnaître une photo déjà versée. Un second passage les téléverserait
+     * une deuxième fois, jusqu'à saturer les dix places de l'annonce avec
+     * des doublons. Refuser vaut mieux que salir la boutique.
+     */
+    const { http, sent } = fakeHttp([]);
+    const r = await adapter.refreshMedia!(
+      ctxWith(http, PUBLIABLE),
+      { ...enLigne, marketplaceData: { photosCouleurs: true } },
+      produit,
+    );
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/déjà posées/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("verse la photo, la rattache, et marque l'annonce", async () => {
+    vi.stubGlobal("fetch", async () => new Response("x", { status: 200 }));
+    const { http } = fakeHttp([
+      { body: { count: 2 } }, // photos déjà présentes : on se place après
+      { body: { listing_image_id: 44 } },
+      {
+        body: {
+          products: [
+            {
+              property_values: [
+                { property_id: 200, value_ids: [51], values: ["Noir"] },
+              ],
+            },
+          ],
+        },
+      },
+      { body: {} }, // variation-images
+    ]);
+
+    const r = await adapter.refreshMedia!(
+      ctxWith(http, PUBLIABLE),
+      enLigne,
+      produit,
+    );
+    expect(r.status).toBe("success");
+    // La marque n'est posée QUE si le rattachement a abouti : sinon elle
+    // interdirait le seul nouvel essai qui aurait pu réussir.
+    expect(r.marketplaceData).toMatchObject({ photosCouleurs: true });
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("relevé d'une annonce à déclinaisons", () => {
   it("lit la quantité DU COLORIS, pas le total de l'annonce", async () => {
     /*

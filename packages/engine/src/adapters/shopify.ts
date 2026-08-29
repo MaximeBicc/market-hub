@@ -1319,6 +1319,163 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     return this.ok(ctx, listing.remoteId);
   }
 
+/**
+   * Repose les photos des coloris sur un produit Shopify déjà créé.
+   *
+   * Deux temps, comme à la création : verser les médias manquants sur le
+   * produit, puis désigner celui de chaque variante. Le lien se fait par le
+   * TEXTE ALTERNATIF — Shopify réhéberge les photos, l'URL d'origine ne
+   * survit pas, et le rang est fragile.
+   *
+   * Idempotent : reposer un média déjà rattaché ne change rien, et les
+   * médias déjà présents ne sont pas re-versés.
+   */
+  async refreshMedia(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    product: Product,
+  ): Promise<TargetResult> {
+    const productId = await this.produitParent(ctx, listing);
+    if (!productId) {
+      return this.manuel(ctx, "Produit absent de Shopify — rien à illustrer.");
+    }
+
+    const variantes = (product.variants ?? []).filter(
+      (v) => v.status === "active" && v.imageUrl,
+    );
+    if (variantes.length === 0) {
+      return this.ok(ctx, listing.remoteId, "Aucune photo de coloris à poser.");
+    }
+
+    const lu = await this.gql<{
+      product: {
+        media: { nodes: Array<{ id: string; alt: string | null }> };
+        variants: {
+          nodes: Array<{
+            id: string;
+            selectedOptions: Array<{ name: string; value: string }>;
+          }>;
+        };
+      } | null;
+    }>(
+      ctx,
+      `query Illustrer($id: ID!) {
+        product(id: $id) {
+          media(first: 250) { nodes { id alt } }
+          variants(first: 250) { nodes { id selectedOptions { name value } } }
+        }
+      }`,
+      { id: productId },
+    );
+    if (!lu.product) {
+      return this.manuel(ctx, "Produit introuvable chez Shopify.");
+    }
+
+    /*
+     * VERSER D'ABORD CE QUI MANQUE. Une annonce créée avant cette fonction a
+     * ses photos de coloris dans la galerie, mais sous le texte alternatif du
+     * TITRE — impossible de savoir laquelle montre quel coloris. On reverse
+     * donc sous le bon texte ; Shopify accepte le doublon, et c'est le prix à
+     * payer pour un rattachement sûr plutôt que deviné.
+     */
+    const alts = new Set(
+      (lu.product.media?.nodes ?? [])
+        .map((m) => m.alt)
+        .filter((a): a is string => Boolean(a)),
+    );
+    const aVerser = variantes
+      .filter((v) => !alts.has(altVariante(product, v)))
+      .map((v) => ({
+        originalSource: v.imageUrl!,
+        mediaContentType: "IMAGE",
+        alt: altVariante(product, v),
+      }));
+
+    if (aVerser.length > 0) {
+      const cree = await this.gql<{
+        productCreateMedia: { userErrors: UserError[] };
+      }>(
+        ctx,
+        `mutation Verser($productId: ID!, $media: [CreateMediaInput!]!) {
+          productCreateMedia(productId: $productId, media: $media) {
+            userErrors { field message }
+          }
+        }`,
+        { productId, media: aVerser },
+      );
+      this.assertNoUserErrors(
+        cree.productCreateMedia.userErrors,
+        "versement des photos de coloris",
+      );
+    }
+
+    /*
+     * Le téléversement est ASYNCHRONE : on relit pour ne rattacher que des
+     * médias réellement présents. Ce qui manque encore se rattrapera au
+     * prochain clic plutôt que d'attendre dans une boucle.
+     */
+    const relu = await this.gql<{
+      product: { media: { nodes: Array<{ id: string; alt: string | null }> } } | null;
+    }>(
+      ctx,
+      `query MediaRelu($id: ID!) {
+        product(id: $id) { media(first: 250) { nodes { id alt } } }
+      }`,
+      { id: productId },
+    );
+    const parAlt = new Map<string, string>();
+    for (const m of relu.product?.media?.nodes ?? []) {
+      if (m.alt && !parAlt.has(m.alt)) parAlt.set(m.alt, m.id);
+    }
+
+    const parOptions = new Map<string, string>();
+    for (const v of lu.product.variants?.nodes ?? []) {
+      parOptions.set(
+        cleOptions((v.selectedOptions ?? []).map((o) => o.value)),
+        v.id,
+      );
+    }
+
+    const liens: Array<{ id: string; mediaId: string }> = [];
+    for (const v of variantes) {
+      const mediaId = parAlt.get(altVariante(product, v));
+      const variantId = parOptions.get(cleOptions(v.optionValues));
+      if (mediaId && variantId) liens.push({ id: variantId, mediaId });
+    }
+
+    if (liens.length === 0) {
+      return this.manuel(
+        ctx,
+        "Aucune photo n'a pu être rattachée : les médias ne sont pas encore prêts chez Shopify, ou les coloris ne correspondent pas. Réessayez dans une minute.",
+      );
+    }
+
+    const maj = await this.gql<{
+      productVariantsBulkUpdate: { userErrors: UserError[] };
+    }>(
+      ctx,
+      `mutation Illustrer($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+          userErrors { field message }
+        }
+      }`,
+      { productId, variants: liens },
+    );
+    this.assertNoUserErrors(
+      maj.productVariantsBulkUpdate.userErrors,
+      "photos des déclinaisons",
+    );
+
+    const manque = variantes.length - liens.length;
+    return this.ok(
+      ctx,
+      listing.remoteId,
+      manque > 0
+        ? `${liens.length} coloris illustré(s), ${manque} en attente — recliquez dans une minute.`
+        : `${liens.length} coloris illustré(s) : choisir une couleur change la photo.`,
+    );
+  }
+
   async activateListing(
     ctx: MarketplaceContext,
     listing: Listing,

@@ -2828,6 +2828,17 @@ a.annonce-pastille:hover { transform: translateY(-1px); filter: brightness(1.12)
 }
 .annonce-pastille--off > span[aria-hidden] { background: var(--line); color: var(--muted); }
 
+/* Une action discrète, posée à côté des pastilles : elle ne touche que les
+   visuels et ne doit pas peser autant qu'un bouton de publication. */
+.annonce-illustrer {
+  border: 1px dashed var(--line); background: transparent; color: var(--muted);
+  border-radius: 999px; padding: 2px 9px; font-size: 10.5px; font-weight: 600;
+  cursor: pointer; line-height: 1.6; white-space: nowrap;
+  transition: color .12s ease, border-color .12s ease;
+}
+.annonce-illustrer:hover:not(:disabled) { color: var(--fg); border-color: var(--fg); }
+.annonce-illustrer:disabled { opacity: .55; cursor: progress; }
+
 .publish-legal-note { margin-top: 12px; color: var(--muted); font-size: 12px; }
 .publish-legal-note summary { cursor: pointer; font-weight: 600; }
 .publish-legal-note p { margin-bottom: 0; }

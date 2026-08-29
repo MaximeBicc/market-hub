@@ -140,6 +140,24 @@ export interface MarketplaceAdapter {
    * réécrire puis retenter. Facultative, comme `unite` sur updateStock, et
    * pour la même raison : le cœur fournit le contexte, le module traduit.
    */
+  /**
+   * REPOSE LES PHOTOS DES DÉCLINAISONS SUR UNE ANNONCE DÉJÀ EN LIGNE.
+   *
+   * Le rattachement « choisir Noir change l'image » se fait à la création.
+   * Une annonce publiée avant que la fonction existe ne l'a donc pas, et
+   * republier coûterait cher — chez Etsy, un frais d'insertion ; chez eBay,
+   * une place dans le plafond vendeur. D'où cette commande à part.
+   *
+   * Facultative : une plateforme qui ne sait pas rattacher une image à une
+   * déclinaison ne l'implémente pas, et le noyau l'écarte proprement plutôt
+   * que de la faire échouer.
+   */
+  refreshMedia?(
+    ctx: MarketplaceContext,
+    listing: Listing,
+    product: Product,
+  ): Promise<TargetResult>;
+
   activateListing(
     ctx: MarketplaceContext,
     listing: Listing,
