@@ -1405,6 +1405,18 @@ export class ShopifyAdapter implements MarketplaceAdapter {
          * `read_publications`, la saisie n'a pas atteint CE jeton.
          */
         const portes = await this.porteesDuJeton(ctx);
+        /*
+         * LE JETON EN CACHE SURVIVRAIT À LA CORRECTION. Il vient d'un
+         * échange client_credentials et vit jusqu'à vingt-quatre heures :
+         * une fois les portées corrigées côté Shopify, l'outil continuerait
+         * de présenter l'ancien jeton — et le même refus — jusqu'à son
+         * expiration. On le marque donc expiré ICI, sur le refus : le
+         * prochain envoi ré-échange, et le jeton frais porte les droits que
+         * la nouvelle version de l'application accorde. Le jeton lui-même
+         * est conservé : une application d'avant 2026 n'a rien à réécanger,
+         * et son jeton permanent doit survivre.
+         */
+        await ctx.saveCredentials?.({ accessTokenExpiresAt: "0" });
         return this.manuel(
           ctx,
           `Shopify a créé le produit actif, mais refuse de le rendre visible sur la boutique en ligne — il manque les droits read_publications/write_publications sur l'application. Coche-les dans Shopify (Paramètres → Applications → ton app → Configuration → « Admin API integration », pas Storefront), Enregistre, puis relance : le jeton actuel suffit. Refus exact de Shopify : « ${detail.slice(0, 160)} »${portes ? ` — Droits actuellement portés par le jeton : ${portes}.` : ""}`,
