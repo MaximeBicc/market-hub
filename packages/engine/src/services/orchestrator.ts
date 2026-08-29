@@ -293,7 +293,22 @@ export class MarketplaceOrchestrator {
           ...(url ? { url } : {}),
           marketplaceData: {
             ...(existante.marketplaceData ?? {}),
-            alreadyActive: existante.status === "active",
+            /*
+             * « Déjà actif » N'EST VRAI QU'AVEC UNE ADRESSE PUBLIQUE.
+             *
+             * Le statut local disait « active » pour un produit Shopify que
+             * personne ne pouvait acheter : actif dans l'administration, mais
+             * jamais publié sur le canal Boutique en ligne — la publication
+             * du canal est arrivée après la création de cette annonce-là. La
+             * route de publication sautait alors l'activation, précisément
+             * l'étape qui aurait posé le canal. L'URL publique est la seule
+             * preuve de vitrine qu'on détient : sans elle, on laisse
+             * l'activation se rejouer — elle est idempotente et ne refait
+             * que ce qui manque.
+             */
+            alreadyActive:
+              existante.status === "active" &&
+              Boolean(existante.marketplaceData?.["url"]),
           },
           message:
             "Déjà publié sur ce compte — rien à recréer. Utilisez « prix » ou « stock » pour le mettre à jour.",

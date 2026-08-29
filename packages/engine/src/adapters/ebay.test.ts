@@ -805,6 +805,66 @@ describe("réparer une annonce refusée pour caractéristique manquante", () => 
     ).toBe(12);
   });
 
+  it("nomme la liste COMPLÈTE des caractéristiques manquantes avant de publier", async () => {
+    /*
+     * eBay les révèle une par une : un refus 25002 par essai, sur un
+     * brouillon créé la veille — la création, seule à porter le pré-vol,
+     * ne se rejoue pas. Le contrôle doit donc vivre à la publication, et
+     * dire TOUT ce qui manque en un seul message.
+     */
+    const { http, sent } = fakeHttp([
+      // Le catalogue des caractéristiques de la catégorie, seul appel :
+      // le jeton applicatif est fourni en cache — il part par fetch global,
+      // invisible pour ce faux http.
+      {
+        body: {
+          aspects: [
+            { localizedAspectName: "Type", aspectConstraint: { aspectRequired: true } },
+            { localizedAspectName: "Matière", aspectConstraint: { aspectRequired: true } },
+            { localizedAspectName: "Marque", aspectConstraint: { aspectRequired: true } },
+          ],
+        },
+      },
+    ]);
+
+    const r = await adapter.activateListing(
+      ctxWith(http, {
+        categoryTreeId: "3",
+        defaultCategoryId: "9999",
+        appToken: "app",
+        appTokenExpiresAt: FUTUR,
+      }),
+      annonce,
+      "i",
+      fiche, // porte Marque, pas Type ni Matière
+    );
+
+    expect(r.status).toBe("manual_required");
+    expect(r.message).toContain("Type");
+    expect(r.message).toContain("Matière");
+    expect(r.message).not.toMatch(/Marque[^s]/);
+    // Aucune publication tentée : le refus est venu AVANT l'appel.
+    expect(sent.some((a) => a.url.includes("publish"))).toBe(false);
+  });
+
+  it("rapporte « déjà en ligne » comme un succès, pas comme une panne", async () => {
+    // L'activation se rejoue quand la preuve de vitrine manque : eBay
+    // répond alors que l'offre est déjà publiée. L'état voulu est atteint.
+    const { http } = fakeHttp([
+      {
+        status: 400,
+        body: {
+          errors: [
+            { errorId: 25016, message: "This offer is already published." },
+          ],
+        },
+      },
+    ]);
+    const r = await adapter.activateListing(ctxWith(http), annonce, "i");
+    expect(r.status).toBe("success");
+    expect(r.message).toMatch(/déjà en ligne/i);
+  });
+
   it("sans la fiche, le refus est rendu tel quel — pas de réécriture aveugle", async () => {
     const { http, sent } = fakeHttp([
       {

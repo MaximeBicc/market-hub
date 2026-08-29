@@ -2558,10 +2558,70 @@ export class EbayAdapter implements MarketplaceAdapter {
             { method: "POST" },
           );
 
+    /*
+     * LE PRÉ-VOL VIT ICI, PAS SEULEMENT À LA CRÉATION.
+     *
+     * La création ne s'exécute qu'une fois : dès que l'annonce existe, la
+     * publication saute directement à l'activation — et le contrôle des
+     * caractéristiques sautait avec elle. Personne ne redisait la liste des
+     * manquantes ; eBay les révélait alors UNE PAR UNE, un refus 25002 par
+     * essai, sur un brouillon créé la veille. C'est exactement la boucle
+     * qu'on a vécue : « Marque » corrigée, « Type » refusée au tour suivant.
+     *
+     * Ici, la liste complète est dite d'un coup, avant tout appel de
+     * publication. Échec ouvert si le catalogue ne répond pas : eBay
+     * tranchera, et la réparation ci-dessous reste le filet.
+     */
+    const categoryId =
+      (product?.marketplaceData?.["ebayCategoryId"] as string | undefined) ??
+      (listing.marketplaceData?.["categoryId"] as string | undefined) ??
+      ctx.credentials?.["defaultCategoryId"];
+    if (product && categoryId) {
+      const obligatoires = await this.aspectsObligatoires(ctx, categoryId);
+      if (obligatoires.length > 0) {
+        const fournis = new Set(
+          Object.keys(aspectsCommuns(product) ?? {}).map((n) =>
+            n.toLowerCase(),
+          ),
+        );
+        for (const axe of product.options ?? []) {
+          if (axe.name) fournis.add(nomAspect(axe.name).toLowerCase());
+        }
+        const manquants = obligatoires.filter(
+          (n) => !fournis.has(nomAspect(n).toLowerCase()),
+        );
+        if (manquants.length > 0) {
+          return this.manuel(
+            ctx,
+            `eBay refusera la mise en ligne : il manque ${manquants.length > 1 ? "les caractéristiques" : "la caractéristique"} ${manquants.join(", ")} pour la catégorie ${categoryId}. Renseigne-${manquants.length > 1 ? "les" : "la"} dans Publier → panneau eBay, enregistre, puis renvoie — l'annonce existante sera réécrite avec.`,
+          );
+        }
+      }
+    }
+
     let r: { listingId?: string } | undefined;
     try {
       r = await publier();
     } catch (err) {
+      /*
+       * « DÉJÀ PUBLIÉE » EST UN SUCCÈS, PAS UNE PANNE.
+       *
+       * Republier une offre en ligne est la conséquence normale d'un
+       * « alreadyActive » devenu plus exigeant : l'activation se rejoue
+       * quand la preuve de vitrine manque. eBay répond alors que l'offre
+       * est déjà publiée — l'état voulu est atteint, on le rapporte tel
+       * quel plutôt que d'afficher un échec sur une annonce qui vend.
+       */
+      const dejaEnLigne =
+        err instanceof Error && /already.*(publish|list)/i.test(err.message);
+      if (dejaEnLigne) {
+        return this.ok(
+          ctx,
+          listing.remoteId,
+          "Annonce déjà en ligne chez eBay — rien à republier.",
+        );
+      }
+
       const aspectManquant =
         err instanceof EbayHttpError && err.codes.includes(25002);
       if (!aspectManquant || !product) throw err;
